@@ -1,0 +1,291 @@
+{
+  "$ref": "#/definitions/ReasoningCard",
+  "definitions": {
+    "ReasoningCard": {
+      "type": "object",
+      "properties": {
+        "card_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "token": {
+          "type": "string",
+          "minLength": 1
+        },
+        "window_h": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "sources": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "kol": {
+                "type": "string",
+                "minLength": 1
+              },
+              "platform": {
+                "type": "string",
+                "enum": [
+                  "telegram",
+                  "x",
+                  "discord"
+                ]
+              },
+              "url": {
+                "type": "string",
+                "format": "uri"
+              },
+              "posted_at": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "quote": {
+                "type": "string"
+              },
+              "extract": {
+                "type": "object",
+                "properties": {
+                  "sentiment": {
+                    "type": "string",
+                    "enum": [
+                      "bull",
+                      "bear",
+                      "neutral"
+                    ]
+                  },
+                  "conviction": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1
+                  },
+                  "urgency": {
+                    "$ref": "#/definitions/ReasoningCard/properties/sources/items/properties/extract/properties/conviction"
+                  }
+                },
+                "required": [
+                  "sentiment",
+                  "conviction",
+                  "urgency"
+                ],
+                "additionalProperties": false
+              },
+              "indep": {
+                "type": "number",
+                "enum": [
+                  0.3,
+                  0.5,
+                  1
+                ]
+              },
+              "echo_of": {
+                "type": "string",
+                "format": "uri"
+              }
+            },
+            "required": [
+              "kol",
+              "platform",
+              "url",
+              "posted_at",
+              "quote",
+              "extract",
+              "indep"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "convergence": {
+          "type": "object",
+          "properties": {
+            "score": {
+              "type": "number",
+              "minimum": -1,
+              "maximum": 1
+            },
+            "independent_kols": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "echo_dropped": {
+              "$ref": "#/definitions/ReasoningCard/properties/convergence/properties/independent_kols"
+            },
+            "threshold": {
+              "type": "number",
+              "minimum": -1,
+              "maximum": 1
+            }
+          },
+          "required": [
+            "score",
+            "independent_kols",
+            "echo_dropped",
+            "threshold"
+          ],
+          "additionalProperties": false
+        },
+        "evidence": {
+          "type": "object",
+          "properties": {
+            "lead_min": {
+              "type": "number"
+            },
+            "px_change_before_pct": {
+              "type": "number"
+            },
+            "vol_ratio": {
+              "type": "number",
+              "minimum": 0
+            },
+            "price_sources": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          },
+          "required": [
+            "lead_min",
+            "px_change_before_pct",
+            "vol_ratio",
+            "price_sources"
+          ],
+          "additionalProperties": false
+        },
+        "debate": {
+          "type": "object",
+          "properties": {
+            "bull": {
+              "type": "string"
+            },
+            "bear": {
+              "type": "string"
+            },
+            "verdict": {
+              "type": "string",
+              "enum": [
+                "APPROVE",
+                "REJECT",
+                "HOLD"
+              ]
+            },
+            "confidence": {
+              "$ref": "#/definitions/ReasoningCard/properties/sources/items/properties/extract/properties/conviction"
+            },
+            "models": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          },
+          "required": [
+            "bull",
+            "bear",
+            "verdict",
+            "confidence",
+            "models"
+          ],
+          "additionalProperties": false
+        },
+        "risk_rules": {
+          "type": "object",
+          "properties": {
+            "max_position_pct": {
+              "$ref": "#/definitions/ReasoningCard/properties/sources/items/properties/extract/properties/conviction"
+            },
+            "max_open": {
+              "$ref": "#/definitions/ReasoningCard/properties/convergence/properties/independent_kols"
+            },
+            "stop_loss_pct": {
+              "$ref": "#/definitions/ReasoningCard/properties/sources/items/properties/extract/properties/conviction"
+            },
+            "min_mcap_usd": {
+              "$ref": "#/definitions/ReasoningCard/properties/evidence/properties/vol_ratio"
+            },
+            "horizon_h": {
+              "type": "number",
+              "exclusiveMinimum": 0
+            }
+          },
+          "required": [
+            "max_position_pct",
+            "max_open",
+            "stop_loss_pct",
+            "min_mcap_usd",
+            "horizon_h"
+          ],
+          "additionalProperties": false
+        },
+        "models": {
+          "type": "object",
+          "properties": {
+            "extract_model": {
+              "type": "string",
+              "minLength": 1
+            },
+            "judge_model": {
+              "type": "string",
+              "minLength": 1
+            },
+            "prompt_hashes": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "extract_model",
+            "judge_model",
+            "prompt_hashes"
+          ],
+          "additionalProperties": false
+        },
+        "decision": {
+          "type": "object",
+          "properties": {
+            "side": {
+              "type": "string",
+              "enum": [
+                "long",
+                "short",
+                "none"
+              ]
+            },
+            "size_pct": {
+              "$ref": "#/definitions/ReasoningCard/properties/sources/items/properties/extract/properties/conviction"
+            }
+          },
+          "required": [
+            "side",
+            "size_pct"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "card_id",
+        "created_at",
+        "token",
+        "window_h",
+        "sources",
+        "convergence",
+        "evidence",
+        "debate",
+        "risk_rules",
+        "models",
+        "decision"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#"
+}

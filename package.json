@@ -1,0 +1,11 @@
+{
+  "name": "echo-ledger",
+  "private": true,
+  "workspaces": [
+    "shared"
+  ],
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "bun run --cwd shared typecheck"
+  }
+}
