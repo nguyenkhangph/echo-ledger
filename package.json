@@ -2,10 +2,13 @@
   "name": "echo-ledger",
   "private": true,
   "workspaces": [
-    "shared"
+    "shared",
+    "dashboard"
   ],
   "scripts": {
     "test": "bun test",
-    "typecheck": "bun run --cwd shared typecheck"
+    "typecheck": "bun run --cwd shared typecheck && bun run --cwd dashboard typecheck",
+    "dashboard:dev": "bun run --cwd dashboard dev",
+    "dashboard:build": "bun run --cwd dashboard build"
   }
 }
