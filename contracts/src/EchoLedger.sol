@@ -75,6 +75,8 @@ contract EchoLedger is ReceiverTemplate {
         bytes32 cardHash;
         Attestation attestation;
         uint256 reasonCode;
+        bytes32[] kolIds;
+        bool[] echoFlags;
     }
 
     struct SettleReport {
@@ -85,9 +87,10 @@ contract EchoLedger is ReceiverTemplate {
     }
 
     struct TrustUpdateReport {
-        bytes32 kolId;
-        uint256 score;
-        uint256 trades;
+        bytes32 positionId;
+        bytes32[] kolIds;
+        uint256[] scores;
+        uint256[] trades;
     }
 
     struct Position {
@@ -117,12 +120,22 @@ contract EchoLedger is ReceiverTemplate {
     error PositionNotOpen(bytes32 positionId);
     error InvalidSizeBps(uint256 sizeBps);
     error InvalidTrustScore(uint256 score);
+    error SourceLengthMismatch(uint256 kolIdsLength, uint256 echoFlagsLength);
+    error MissingSources();
+    error TooManySources(uint256 count);
+    error DuplicateKolId(bytes32 kolId);
+    error KolNotInPosition(bytes32 positionId, bytes32 kolId);
+    error TrustAlreadyUpdated(bytes32 positionId, bytes32 kolId);
+    error TrustLengthMismatch(uint256 kolIdsLength, uint256 scoresLength, uint256 tradesLength);
 
     event PositionOpened(bytes32 indexed id, string token, bytes32 indexed cardHash);
     event PositionSettled(bytes32 indexed id, int256 pnlBps);
     event TrustUpdated(bytes32 indexed kolId, uint256 score);
 
     mapping(bytes32 positionId => Position position) private s_positions;
+    mapping(bytes32 => bytes32[]) private s_positionKolIds;
+    mapping(bytes32 => bool[]) private s_positionEchoFlags;
+    mapping(bytes32 => mapping(bytes32 => bool)) private s_trustUpdated;
     mapping(bytes32 kolId => KolTrust trust) private s_kolTrust;
     bytes32[] private s_openPositionIds;
     mapping(bytes32 positionId => uint256 indexPlusOne) private s_openPositionIndex;
@@ -132,6 +145,12 @@ contract EchoLedger is ReceiverTemplate {
     /// @notice Returns a stored position or rejected decision.
     function getPosition(bytes32 id) external view returns (Position memory) {
         return s_positions[id];
+    }
+
+    /// @notice Returns the KOL IDs and echo flags committed with an OPEN report.
+    function getPositionSources(bytes32 id) external view returns (bytes32[] memory kolIds, bool[] memory echoFlags) {
+        if (!s_positions[id].exists) revert PositionNotFound(id);
+        return (s_positionKolIds[id], s_positionEchoFlags[id]);
     }
 
     /// @notice Returns IDs for active, unsettled practice positions.
@@ -167,6 +186,21 @@ contract EchoLedger is ReceiverTemplate {
     function _open(OpenReport memory report) private {
         if (s_positions[report.positionId].exists) revert DuplicatePosition(report.positionId);
         if (report.sizeBps > 10_000) revert InvalidSizeBps(report.sizeBps);
+        if (report.kolIds.length != report.echoFlags.length) {
+            revert SourceLengthMismatch(report.kolIds.length, report.echoFlags.length);
+        }
+        if (report.kolIds.length > 20) revert TooManySources(report.kolIds.length);
+        if (report.attestation != Attestation.REJECT && report.side != Side.NONE && report.kolIds.length == 0) {
+            revert MissingSources();
+        }
+
+        for (uint256 i = 0; i < report.kolIds.length; ++i) {
+            for (uint256 j = 0; j < i; ++j) {
+                if (report.kolIds[i] == report.kolIds[j]) revert DuplicateKolId(report.kolIds[i]);
+            }
+            s_positionKolIds[report.positionId].push(report.kolIds[i]);
+            s_positionEchoFlags[report.positionId].push(report.echoFlags[i]);
+        }
 
         s_positions[report.positionId] = Position({
             exists: true,
@@ -217,8 +251,37 @@ contract EchoLedger is ReceiverTemplate {
     }
 
     function _updateTrust(TrustUpdateReport memory report) private {
-        if (report.score > 10_000) revert InvalidTrustScore(report.score);
-        s_kolTrust[report.kolId] = KolTrust({score: report.score, trades: report.trades});
-        emit TrustUpdated(report.kolId, report.score);
+        Position storage position = s_positions[report.positionId];
+        if (!position.exists) revert PositionNotFound(report.positionId);
+        if (!position.settled) revert PositionNotOpen(report.positionId);
+        if (report.kolIds.length != report.scores.length || report.kolIds.length != report.trades.length) {
+            revert TrustLengthMismatch(report.kolIds.length, report.scores.length, report.trades.length);
+        }
+
+        bytes32[] storage positionKolIds = s_positionKolIds[report.positionId];
+        for (uint256 i = 0; i < report.kolIds.length; ++i) {
+            if (report.scores[i] > 10_000) revert InvalidTrustScore(report.scores[i]);
+            if (s_trustUpdated[report.positionId][report.kolIds[i]]) {
+                revert TrustAlreadyUpdated(report.positionId, report.kolIds[i]);
+            }
+            for (uint256 j = 0; j < i; ++j) {
+                if (report.kolIds[i] == report.kolIds[j]) revert DuplicateKolId(report.kolIds[i]);
+            }
+
+            bool found;
+            for (uint256 j = 0; j < positionKolIds.length; ++j) {
+                if (positionKolIds[j] == report.kolIds[i]) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) revert KolNotInPosition(report.positionId, report.kolIds[i]);
+        }
+
+        for (uint256 i = 0; i < report.kolIds.length; ++i) {
+            s_trustUpdated[report.positionId][report.kolIds[i]] = true;
+            s_kolTrust[report.kolIds[i]] = KolTrust({score: report.scores[i], trades: report.trades[i]});
+            emit TrustUpdated(report.kolIds[i], report.scores[i]);
+        }
     }
 }

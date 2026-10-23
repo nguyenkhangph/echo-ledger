@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { riskGate, type PriceSnapshot } from './workflow'
+import { positionSources, riskGate, type PriceSnapshot } from './workflow'
 import payload from './payload.example.json'
 
 const approveLongCard = payload.card
@@ -38,5 +38,26 @@ describe('riskGate', () => {
     expect(riskGate(approveLongCard, { ...prices, binance: 170 }, 0).reasonCode).toBe(1002n)
     expect(riskGate(approveLongCard, { ...prices, marketCapUsd: 1_000 }, 0).reasonCode).toBe(1003n)
     expect(riskGate(approveLongCard, prices, approveLongCard.risk_rules.max_open).reasonCode).toBe(1004n)
+  })
+})
+
+describe('positionSources', () => {
+  test('hashes unique KOL names and preserves echo status', () => {
+    const sources = positionSources(approveLongCard)
+    expect(sources.kolIds).toHaveLength(2)
+    expect(sources.echoFlags).toEqual([false, false])
+  })
+
+  test('deduplicates a KOL and marks it echo if any occurrence is echoed', () => {
+    const duplicate = {
+      ...approveLongCard,
+      sources: [
+        ...approveLongCard.sources,
+        { ...approveLongCard.sources[0], echo_of: 'https://x.com/source/status/1' },
+      ],
+    }
+    const sources = positionSources(duplicate)
+    expect(sources.kolIds).toHaveLength(2)
+    expect(sources.echoFlags).toEqual([true, false])
   })
 })

@@ -139,7 +139,7 @@ const ledgerAbi = parseAbi([
 ])
 
 const openReportParameters = parseAbiParameters(
-  'uint8 reportType, (bytes32 positionId, string token, uint8 side, uint256 sizeBps, uint256 entryPriceE8, bytes32 cardHash, uint8 attestation, uint256 reasonCode) openReport',
+  'uint8 reportType, (bytes32 positionId, string token, uint8 side, uint256 sizeBps, uint256 entryPriceE8, bytes32 cardHash, uint8 attestation, uint256 reasonCode, bytes32[] kolIds, bool[] echoFlags) openReport',
 )
 
 const priceSnapshotSchema = z.object({
@@ -228,6 +228,24 @@ export type Gate = {
   reason: string
 }
 
+export const positionSources = (card: Card): { kolIds: Hex[]; echoFlags: boolean[] } => {
+  const sources = new Map<string, { kolId: Hex; echo: boolean }>()
+  for (const source of card.sources) {
+    const key = source.kol
+    const existing = sources.get(key)
+    const echo = source.echo_of !== undefined
+    if (existing) {
+      existing.echo = existing.echo || echo
+    } else {
+      sources.set(key, { kolId: keccak256(toBytes(key)), echo })
+    }
+  }
+  return {
+    kolIds: [...sources.values()].map((source) => source.kolId),
+    echoFlags: [...sources.values()].map((source) => source.echo),
+  }
+}
+
 export const riskGate = (card: Card, price: PriceSnapshot, openCount: number): Gate => {
   const sourcePrices = [price.coingecko, price.coinbase, price.binance]
   const medianPrice = [...sourcePrices].sort((a, b) => a - b)[1]
@@ -274,6 +292,7 @@ const writeOpenReport = (
   const medianPrice = [price.coingecko, price.coinbase, price.binance].sort((a, b) => a - b)[1]
   const entryPriceE8 = BigInt(Math.round(medianPrice * 1e8))
   const positionId = keccak256(toBytes(`${card.card_id}:${suppliedHash}`))
+  const sources = positionSources(card)
   const callData = encodeAbiParameters(openReportParameters, [
     0,
     {
@@ -285,6 +304,8 @@ const writeOpenReport = (
       cardHash: suppliedHash,
       attestation: gate.attestation,
       reasonCode: gate.reasonCode,
+      kolIds: sources.kolIds,
+      echoFlags: sources.echoFlags,
     },
   ])
   const report = runtime.report(prepareReportRequest(callData)).result()
