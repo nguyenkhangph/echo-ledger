@@ -1,0 +1,9 @@
+{
+  "schedule": "0 0 * * * *",
+  "chainSelectorName": "ethereum-testnet-sepolia",
+  "ledgerAddress": "0x64EB7352B29B311826c8bbB361c2354675349e05",
+  "deploymentBlock": "11974596",
+  "horizonHours": 24,
+  "stopLossPct": 0.08,
+  "gasLimit": "1000000"
+}
