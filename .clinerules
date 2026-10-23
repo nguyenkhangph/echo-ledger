@@ -1,0 +1,46 @@
+# Echo Ledger — project rules
+
+## What we build
+An agent that watches up to 20 crypto KOLs, detects independent narrative
+convergence (penalising echo / quote-chains), checks market evidence
+(did the narrative lead or chase price), runs a Bull/Bear/Judge debate, and
+opens PRACTICE (paper) positions only. Every decision produces a
+"reasoning card" (JSON). Chainlink CRE workflows fetch consensus prices,
+enforce a deterministic risk gate, write the position + card hash to an
+EchoLedger contract on Ethereum Sepolia, settle positions, and update KOL trust.
+Hackathon: BLI Legal Tech Hackathon 2 — bounties RYO-CHAN Autonomous Agents
+and Chainlink "Best workflow with CRE". Deadline 2026-10-31.
+
+## Layout
+- shared/     ReasoningCard schema (zod + JSON Schema), canonical hash, types
+- contracts/  Foundry, Solidity ^0.8.24, EchoLedger.sol (CRE consumer)
+- cre/        CRE project (TypeScript SDK, Bun): workflows record, settle, reputation
+- agent/      TypeScript + Bun: ingest, extract (LLM), converge, evidence, debate, card, replay
+- dashboard/  Vite + React + TypeScript + viem, dark UI
+- fixtures/   recorded KOL posts + prices for deterministic replay/demo
+
+## Dev environment
+- Windows 11 + Windows PowerShell 5.1. Write helper scripts as .ps1, use Windows paths.
+- No bash-only syntax in commands you give me: no &&, export, mkdir -p, \ line continuation.
+- Foundry binaries live in %USERPROFILE%\.foundry\bin (already on PATH).
+
+## Hard rules
+- NEVER read, print or commit .env files or private keys. Use .env.example with placeholders.
+- NEVER deploy to mainnet. Testnet only, and ask me before any command that
+  sends a transaction (forge script --broadcast, cre ... --broadcast).
+- PRACTICE trading only. No real orders, no exchange keys.
+- LLM output is never trusted inside CRE. LLM runs in agent/; CRE logic is deterministic.
+- For anything CRE: read the official docs FIRST (links below), quote the API you use,
+  and verify with `cre workflow simulate` before saying it works.
+- Keep the ReasoningCard schema in shared/ as the single source of truth.
+- Small steps: after each step run the relevant test/build and show me the result.
+- Write clear commit messages; do not commit unless I ask.
+
+## CRE docs (read before CRE work)
+- Full TS docs for LLMs: https://docs.chain.link/cre/ts/llms-full.txt
+- Simulating: https://docs.chain.link/cre/guides/operations/simulating-workflows
+- HTTP client: https://docs.chain.link/cre/guides/workflow/using-http-client
+- EVM client: https://docs.chain.link/cre/guides/workflow/using-evm-client/overview-ts
+- Forwarders: https://docs.chain.link/cre/guides/workflow/using-evm-client/forwarder-directory-ts
+  Sepolia MockKeystoneForwarder (simulation): 0x15fC6ae953E024d975e77382eEeC56A9101f9F88
+- Templates: https://github.com/smartcontractkit/cre-templates
