@@ -2,10 +2,11 @@
   "name": "echo-ledger",
   "private": true,
   "workspaces": [
-    "shared"
+    "shared",
+    "agent"
   ],
   "scripts": {
     "test": "bun test",
-    "typecheck": "bun run --cwd shared typecheck"
+    "typecheck": "bun run --filter '*' typecheck"
   }
 }
