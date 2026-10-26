@@ -119,8 +119,14 @@ function LatestCards() {
   );
 }
 
+// One pass of the ticker has to be wider than any screen, or a gap shows
+// before the loop restarts, so short feeds are repeated to at least 12 items.
+const TICKER_MIN_ITEMS = 12;
+
 function SignalTicker() {
-  const loop = [...feed, ...feed];
+  if (feed.length === 0) return null;
+  const pass = Array.from({ length: Math.ceil(TICKER_MIN_ITEMS / feed.length) }, () => feed).flat();
+  const loop = [...pass, ...pass];
   return (
     <div className="ticker" aria-label="Latest signals">
       <div className="ticker__track mono-font">

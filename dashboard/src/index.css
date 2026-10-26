@@ -277,7 +277,7 @@ svg { width: 1.25rem; fill: none; stroke: currentColor; stroke-linecap: round; s
 /* Sections                                                            */
 /* ------------------------------------------------------------------ */
 
-.page-section { width: min(var(--content), 100%); margin: 112px auto 0; padding: 0 24px; }
+.page-section { width: min(var(--content), 100%); margin: 112px auto 0; padding: 0 24px; scroll-margin-top: 96px; }
 .section-heading h2 { max-width: 42rem; margin: 12px 0 0; font-size: 2.6rem; font-weight: 700; line-height: 1.1; letter-spacing: -0.03em; }
 .section-heading-row { display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; margin-bottom: 40px; }
 .scan-status { display: inline-flex; align-items: center; gap: 10px; flex-shrink: 0; padding: 9px 14px; border: 1px solid var(--ec-border); background: rgba(0, 0, 0, 0.6); color: var(--ec-text); font-size: 12px; }
