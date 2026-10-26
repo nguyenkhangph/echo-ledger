@@ -111,7 +111,7 @@ export function ReasoningCardDetail({ card }: { card: FixtureCard }) {
           <span className="brand-mark" aria-hidden="true">EL</span>
           <span>ECHO<span>LEDGER</span></span>
         </a>
-        <a className="back-link" href="/">← Radar</a>
+        <nav className="detail-nav" aria-label="Primary navigation"><a href="/">Radar</a><a href="/scorecard">Scorecard</a></nav>
         <div className="network-status"><span className="live-dot" /><span>Sepolia</span><b>Practice</b></div>
       </header>
 

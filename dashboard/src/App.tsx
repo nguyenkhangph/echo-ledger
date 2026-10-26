@@ -1,6 +1,7 @@
 import { exampleCards } from "@echo/shared/fixtures";
 import type { ReasoningCard } from "@echo/shared/card";
 import { CardNotFound, ReasoningCardDetail } from "./ReasoningCardDetail";
+import { Scorecard } from "./Scorecard";
 
 const RADAR_THRESHOLD = 0.6;
 const snapshotTime = new Date(
@@ -91,16 +92,11 @@ function LedgerIcon() {
   );
 }
 
-function SettingsIcon() {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      <circle cx="12" cy="12" r="3" />
-      <path d="M19 12a7 7 0 0 0-.1-1l2-1.5-2-3.4-2.4 1A8 8 0 0 0 15 6l-.3-2.6h-4L10.4 6a8 8 0 0 0-1.5.9l-2.4-1-2 3.4 2 1.6a7 7 0 0 0 0 2.1l-2 1.6 2 3.4 2.4-1a8 8 0 0 0 1.5.9l.3 2.6h4L15 18a8 8 0 0 0 1.5-.9l2.4 1 2-3.4-2-1.6a7 7 0 0 0 .1-1.1Z" />
-    </svg>
-  );
-}
-
 function App() {
+  if (typeof window !== "undefined" && /^\/scorecard\/?$/.test(window.location.pathname)) {
+    return <Scorecard />;
+  }
+
   const cardRoute = typeof window === "undefined" ? null : window.location.pathname.match(/^\/card\/([^/]+)\/?$/);
   if (cardRoute) {
     const cardId = decodeURIComponent(cardRoute[1]);
@@ -111,15 +107,14 @@ function App() {
   return (
     <div className="app-shell">
       <header className="topbar">
-        <a className="brand" href="#top" aria-label="Echo Ledger home">
+        <a className="brand" href="/" aria-label="Echo Ledger home">
           <span className="brand-mark"><SignalIcon /></span>
           <span>ECHO<span>LEDGER</span></span>
         </a>
 
         <nav className="desktop-nav" aria-label="Primary navigation">
-          <a className="active" href="#radar"><RadarIcon />Radar</a>
-          <a href="#ledger"><LedgerIcon />Ledger</a>
-          <a href="#settings"><SettingsIcon />Settings</a>
+          <a className="active" href="/"><RadarIcon />Radar</a>
+          <a href="/scorecard"><LedgerIcon />Scorecard</a>
         </nav>
 
         <div className="network-status">
@@ -246,9 +241,8 @@ function App() {
       </main>
 
       <nav className="mobile-nav" aria-label="Mobile navigation">
-        <a className="active" href="#radar"><RadarIcon /><span>Radar</span></a>
-        <a href="#ledger"><LedgerIcon /><span>Ledger</span></a>
-        <a href="#settings"><SettingsIcon /><span>Settings</span></a>
+        <a className="active" href="/"><RadarIcon /><span>Radar</span></a>
+        <a href="/scorecard"><LedgerIcon /><span>Scorecard</span></a>
       </nav>
     </div>
   );
