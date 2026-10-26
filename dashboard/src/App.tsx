@@ -1,5 +1,6 @@
 import { exampleCards } from "@echo/shared/fixtures";
 import type { ReasoningCard } from "@echo/shared/card";
+import { CardNotFound, ReasoningCardDetail } from "./ReasoningCardDetail";
 
 const RADAR_THRESHOLD = 0.6;
 const snapshotTime = new Date(
@@ -10,6 +11,7 @@ type CardSource = ReasoningCard["sources"][number];
 type Sentiment = CardSource["extract"]["sentiment"];
 
 type FeedItem = CardSource & {
+  cardId: string;
   token: string;
   isEcho: boolean;
 };
@@ -35,6 +37,7 @@ const feed: FeedItem[] = exampleCards
   .flatMap((card) =>
     card.sources.map((source) => ({
       ...source,
+      cardId: card.card_id,
       token: card.token,
       isEcho: Boolean(source.echo_of) || source.indep < 1,
     })),
@@ -98,6 +101,13 @@ function SettingsIcon() {
 }
 
 function App() {
+  const cardRoute = typeof window === "undefined" ? null : window.location.pathname.match(/^\/card\/([^/]+)\/?$/);
+  if (cardRoute) {
+    const cardId = decodeURIComponent(cardRoute[1]);
+    const card = exampleCards.find((candidate) => candidate.card_id === cardId);
+    return card ? <ReasoningCardDetail card={card} /> : <CardNotFound cardId={cardId} />;
+  }
+
   return (
     <div className="app-shell">
       <header className="topbar">
@@ -213,7 +223,7 @@ function App() {
 
             <div className="feed-list">
               {feed.map((item) => (
-                <article className={`feed-item${item.isEcho ? " echo" : ""}`} key={item.url}>
+                <a className={`feed-item${item.isEcho ? " echo" : ""}`} key={item.url} href={`/card/${encodeURIComponent(item.cardId)}`} aria-label={`Open ${item.token} reasoning card`}>
                   <div className="feed-line" aria-hidden="true"><i /></div>
                   <div className="feed-content">
                     <div className="feed-meta">
@@ -228,7 +238,7 @@ function App() {
                       {item.isEcho && <span className="echo-tag">↳ Echo detected</span>}
                     </div>
                   </div>
-                </article>
+                </a>
               ))}
             </div>
           </section>
