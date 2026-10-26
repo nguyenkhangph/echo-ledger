@@ -7,6 +7,7 @@ import { OpenAiCompatibleLlmClient } from "./llm";
 const agentDirectory = resolve(import.meta.dir, "../..");
 const postsDirectory = resolve(agentDirectory, "../fixtures/posts");
 const extractedDirectory = resolve(agentDirectory, "../fixtures/extracted");
+const extractionAuditDirectory = resolve(agentDirectory, "../fixtures/extraction-audit");
 
 function dateArgument(args: readonly string[]): string | undefined {
   const index = args.indexOf("--date");
@@ -17,6 +18,13 @@ function dateArgument(args: readonly string[]): string | undefined {
 }
 
 const posts = await replayPostFixtures(postsDirectory, dateArgument(Bun.argv.slice(2)));
-const result = await extractPostsToFixtures(posts, new OpenAiCompatibleLlmClient(), extractedDirectory);
+const result = await extractPostsToFixtures(
+  posts,
+  new OpenAiCompatibleLlmClient(),
+  extractedDirectory,
+  extractionAuditDirectory,
+);
 console.log(`Extracted ${result.signals.length} actionable signal(s) from ${posts.length} post(s)`);
+console.log(`Filtered ${result.sponsored.length} sponsored post(s)`);
 for (const path of result.written) console.log(`Wrote ${path}`);
+for (const path of result.auditWritten) console.log(`Wrote sponsorship audit ${path}`);

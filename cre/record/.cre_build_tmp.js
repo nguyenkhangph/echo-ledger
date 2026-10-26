@@ -22874,11 +22874,19 @@ var configSchema = objectType({
   ledgerAddress: stringType(),
   gasLimit: stringType()
 });
+var assertReportDelivered = (label, result) => {
+  if (result.txStatus !== TxStatus.SUCCESS) {
+    throw new Error(`${label} transaction failed: ${result.errorMessage || result.txStatus}`);
+  }
+  if (result.receiverContractExecutionStatus !== undefined && result.receiverContractExecutionStatus !== ReceiverContractExecutionStatus.SUCCESS) {
+    throw new Error(`${label} receiver execution failed: ${ReceiverContractExecutionStatus[result.receiverContractExecutionStatus] ?? result.receiverContractExecutionStatus}`);
+  }
+};
 var ledgerAbi = parseAbi2([
   "function openPositionIds() view returns (bytes32[])",
   "function getPosition(bytes32 id) view returns (bool exists, bool settled, string token, uint8 side, uint256 sizeBps, uint256 entryPriceE8, bytes32 cardHash, uint8 attestation, uint256 reasonCode, uint256 exitPriceE8, int256 pnlBps, uint256 settledAt)"
 ]);
-var openReportParameters = parseAbiParameters2("uint8 reportType, (bytes32 positionId, string token, uint8 side, uint256 sizeBps, uint256 entryPriceE8, bytes32 cardHash, uint8 attestation, uint256 reasonCode) openReport");
+var openReportParameters = parseAbiParameters2("uint8 reportType, (bytes32 positionId, string token, uint8 side, uint256 sizeBps, uint256 entryPriceE8, bytes32 cardHash, uint8 attestation, uint256 reasonCode, bytes32[] kolIds, bool[] echoFlags) openReport");
 var priceSnapshotSchema = objectType({
   coingecko: numberType().positive(),
   coinbase: numberType().positive(),
@@ -22941,6 +22949,23 @@ var readOpenCount = (runtime, client) => {
   });
   return ids.length;
 };
+var positionSources = (card) => {
+  const sources = new Map;
+  for (const source of card.sources) {
+    const key = source.kol;
+    const existing = sources.get(key);
+    const echo = source.echo_of !== undefined;
+    if (existing) {
+      existing.echo = existing.echo || echo;
+    } else {
+      sources.set(key, { kolId: keccak2562(toBytes3(key)), echo });
+    }
+  }
+  return {
+    kolIds: [...sources.values()].map((source) => source.kolId),
+    echoFlags: [...sources.values()].map((source) => source.echo)
+  };
+};
 var riskGate = (card, price, openCount) => {
   const sourcePrices = [price.coingecko, price.coinbase, price.binance];
   const medianPrice = [...sourcePrices].sort((a, b) => a - b)[1];
@@ -22978,6 +23003,7 @@ var writeOpenReport = (runtime, card, suppliedHash, price, gate, client) => {
   const medianPrice = [price.coingecko, price.coinbase, price.binance].sort((a, b) => a - b)[1];
   const entryPriceE8 = BigInt(Math.round(medianPrice * 1e8));
   const positionId = keccak2562(toBytes3(`${card.card_id}:${suppliedHash}`));
+  const sources = positionSources(card);
   const callData = encodeAbiParameters2(openReportParameters, [
     0,
     {
@@ -22988,7 +23014,9 @@ var writeOpenReport = (runtime, card, suppliedHash, price, gate, client) => {
       entryPriceE8,
       cardHash: suppliedHash,
       attestation: gate.attestation,
-      reasonCode: gate.reasonCode
+      reasonCode: gate.reasonCode,
+      kolIds: sources.kolIds,
+      echoFlags: sources.echoFlags
     }
   ]);
   const report = runtime.report(prepareReportRequest(callData)).result();
@@ -22997,9 +23025,7 @@ var writeOpenReport = (runtime, card, suppliedHash, price, gate, client) => {
     report,
     gasConfig: { gasLimit: runtime.config.gasLimit }
   }).result();
-  if (result.txStatus !== TxStatus.SUCCESS) {
-    throw new Error(`OPEN report failed: ${result.errorMessage || result.txStatus}`);
-  }
+  assertReportDelivered("OPEN report", result);
   const decision = gate.attestation === 0 ? "APPROVE" : gate.attestation === 1 ? "CONSTRAIN" : "REJECT";
   runtime.log(`OPEN ${decision} reasonCode=${gate.reasonCode.toString()} reason=${gate.reason} priceE8=${entryPriceE8.toString()} tx=${bytesToHex3(result.txHash || new Uint8Array(32))}`);
   return JSON.stringify({ decision, reasonCode: gate.reasonCode.toString(), reason: gate.reason });

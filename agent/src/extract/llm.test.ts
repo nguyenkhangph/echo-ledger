@@ -20,6 +20,8 @@ const post: IngestedPost = {
 const validContent = JSON.stringify({
   post_id: post.id,
   has_signal: true,
+  is_sponsored: false,
+  sponsorship_reason: null,
   token: "BTC",
   sentiment: "bullish",
   conviction: 0.7,

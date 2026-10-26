@@ -4,6 +4,8 @@ export const ExtractedSignal = z
   .object({
     post_id: z.string().min(1),
     has_signal: z.boolean(),
+    is_sponsored: z.boolean().default(false),
+    sponsorship_reason: z.string().trim().min(1).max(300).nullable().default(null),
     token: z
       .string()
       .trim()
@@ -19,6 +21,17 @@ export const ExtractedSignal = z
     reasoning_summary: z.string().trim().min(1).max(500),
     llm_confidence: z.number().finite().min(0).max(1),
   })
-  .strict();
+  .strict()
+  .superRefine((signal, context) => {
+    if (signal.is_sponsored && signal.has_signal) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "Sponsored posts cannot be actionable signals", path: ["has_signal"] });
+    }
+    if (signal.is_sponsored && signal.sponsorship_reason === null) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "Sponsored posts require sponsorship_reason", path: ["sponsorship_reason"] });
+    }
+    if (!signal.is_sponsored && signal.sponsorship_reason !== null) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "Non-sponsored posts must use a null sponsorship_reason", path: ["sponsorship_reason"] });
+    }
+  });
 
 export type ExtractedSignal = z.infer<typeof ExtractedSignal>;

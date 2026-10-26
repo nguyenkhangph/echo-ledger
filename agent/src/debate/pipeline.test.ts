@@ -36,6 +36,8 @@ function signal(source: IngestedPost, token: string): ExtractedSignal {
   return {
     post_id: source.id,
     has_signal: true,
+    is_sponsored: false,
+    sponsorship_reason: null,
     token,
     sentiment: "bullish",
     conviction: 0.85,

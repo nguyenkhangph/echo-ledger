@@ -33,6 +33,8 @@ function signal(postId: string): ExtractedSignal {
   return {
     post_id: postId,
     has_signal: true,
+    is_sponsored: false,
+    sponsorship_reason: null,
     token: "BTC",
     sentiment: "bullish",
     conviction: 0.8,
