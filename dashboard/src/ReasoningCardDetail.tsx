@@ -1,6 +1,7 @@
 import { useState } from "react";
 import type { ReasoningCard } from "@echo/shared/card";
 import { cardHash } from "@echo/shared/hash";
+import { SiteLayout } from "./components/SiteChrome";
 
 const RADAR_THRESHOLD = 0.6;
 
@@ -151,23 +152,15 @@ export function ReasoningCardDetail({ card }: { card: FixtureCard }) {
   ];
 
   return (
-    <div className="app-shell">
-      <header className="topbar detail-topbar">
-        <a className="brand" href="/" aria-label="Echo Ledger radar">
-          <span className="brand-mark" aria-hidden="true"><img src="/brand/logo.png" alt="" /></span>
-          <span>ECHO<span>LEDGER</span></span>
-        </a>
-        <nav className="detail-nav" aria-label="Primary navigation"><a href="/">Radar</a><a href="/scorecard">Scorecard</a></nav>
-        <div className="network-status"><span className="live-dot" /><span>Sepolia</span><b>Practice</b></div>
-      </header>
-
+    <SiteLayout active="card">
       <main className="card-detail">
         <header className="card-hero">
           <div>
-            <p className="eyebrow"><span />Reasoning card · {card.window_h ?? "—"}h window</p>
+            <a className="back-link" href="/">← Radar</a>
+            <p className="eyebrow">Reasoning card · {card.window_h ?? "—"}h window</p>
             <div className="card-title-row">
-              <span className={`token-icon token-${card.token.toLowerCase()}`}>{card.token.slice(0, 1)}</span>
-              <h1>{card.token}</h1>
+              <span className="token-icon">{card.token.slice(0, 2)}</span>
+              <h1 className="display-font">{card.token}</h1>
               <span className={`decision-badge ${decisionTone}`}>{decisionIcon(decisionTone)}{decisionLabel}</span>
             </div>
             <time dateTime={card.created_at}>{formatTimestamp(card.created_at)}</time>
@@ -252,10 +245,10 @@ export function ReasoningCardDetail({ card }: { card: FixtureCard }) {
           </section>
         </div>
       </main>
-    </div>
+    </SiteLayout>
   );
 }
 
 export function CardNotFound({ cardId }: { cardId: string }) {
-  return <main className="not-found"><p className="eyebrow"><span />Reasoning card</p><h1>Card not found</h1><p>No fixture matches <code>{cardId}</code>.</p><a className="back-link" href="/">← Return to Radar</a></main>;
+  return <SiteLayout active="card"><main className="not-found"><p className="eyebrow">Reasoning card</p><h1 className="display-font">Card not found</h1><p>No fixture matches <code>{cardId}</code>.</p><a className="back-link" href="/">← Return to Radar</a></main></SiteLayout>;
 }

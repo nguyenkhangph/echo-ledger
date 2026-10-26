@@ -1,22 +1,5 @@
+import { SiteLayout } from "./components/SiteChrome";
 import { useScorecardData, type EquityPoint, type ScorecardData } from "./data/scorecard";
-
-function ScorecardIcon() {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M4 19V9m5 10V5m5 14v-7m5 7V3" />
-    </svg>
-  );
-}
-
-function RadarIcon() {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      <circle cx="12" cy="12" r="8" />
-      <circle cx="12" cy="12" r="3" />
-      <path d="M12 12 18 6M12 2v2M2 12h2M12 20v2M20 12h2" />
-    </svg>
-  );
-}
 
 function formatSignedBps(value: number) {
   return `${value > 0 ? "+" : ""}${value.toLocaleString("en-US")} bps`;
@@ -59,8 +42,8 @@ function EquityCurve({ points }: { points: EquityPoint[] }) {
       <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`Cumulative PnL ${finalPoint.cumulativePnlBps} basis points over ${points.length} settled positions`} preserveAspectRatio="none">
         <defs>
           <linearGradient id="equity-fill" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0" stopColor="#35e79a" stopOpacity=".24" />
-            <stop offset="1" stopColor="#35e79a" stopOpacity="0" />
+            <stop offset="0" stopColor="#d62b22" stopOpacity=".24" />
+            <stop offset="1" stopColor="#d62b22" stopOpacity="0" />
           </linearGradient>
         </defs>
         <line className="chart-baseline" x1={padding} x2={width - padding} y1={zeroY} y2={zeroY} />
@@ -98,7 +81,7 @@ function PortfolioScorecard({ data }: { data: ScorecardData["portfolio"] }) {
           <div className="score-table-wrap">
             <table className="score-table token-score-table">
               <thead><tr><th>Token</th><th>Count</th><th>Win rate</th><th>Avg PnL</th></tr></thead>
-              <tbody>{data.byToken.map((token) => <tr key={token.token}><td><span className={`token-icon token-${token.token.toLowerCase()}`}>{token.token.slice(0, 1)}</span><strong>{token.token}</strong></td><td>{token.count}</td><td>{token.winRate}%</td><td className={token.avgPnlBps >= 0 ? "positive" : "negative"}>{formatSignedBps(token.avgPnlBps)}</td></tr>)}</tbody>
+              <tbody>{data.byToken.map((token) => <tr key={token.token}><td><span className="token-icon">{token.token.slice(0, 2)}</span><strong>{token.token}</strong></td><td>{token.count}</td><td>{token.winRate}%</td><td className={token.avgPnlBps >= 0 ? "positive" : "negative"}>{formatSignedBps(token.avgPnlBps)}</td></tr>)}</tbody>
             </table>
           </div>
         </section>
@@ -145,23 +128,15 @@ export function Scorecard({ data }: { data?: ScorecardData }) {
   const scorecard = data ?? fetchedData;
 
   return (
-    <div className="app-shell">
-      <header className="topbar">
-        <a className="brand" href="/" aria-label="Echo Ledger radar"><span className="brand-mark"><img src="/brand/logo.png" alt="" /></span><span>ECHO<span>LEDGER</span></span></a>
-        <nav className="desktop-nav" aria-label="Primary navigation"><a href="/"><RadarIcon />Radar</a><a className="active" href="/scorecard"><ScorecardIcon />Scorecard</a></nav>
-        <div className="network-status"><span className="live-dot" /><span>Sepolia</span><b>Practice</b></div>
-      </header>
-
+    <SiteLayout active="scorecard">
       <main className="scorecard-page">
         <section className="page-heading">
-          <div><p className="eyebrow"><span />Proof of performance</p><h1>System <em>Scorecard</em></h1><p>Practice results and source trust, measured call by call.</p></div>
+          <div><p className="eyebrow">Proof of performance</p><h1 className="display-font">System <span className="accent-underline">Scorecard</span></h1><p>Practice results and source trust, measured call by call.</p></div>
           <div className="score-as-of"><span>Snapshot</span><strong>{formatAsOf(scorecard.asOf)}</strong><small>Mock indexed data</small></div>
         </section>
         <PortfolioScorecard data={scorecard.portfolio} />
         <KolLeaderboard kols={scorecard.kols} />
       </main>
-
-      <nav className="mobile-nav" aria-label="Mobile navigation"><a href="/"><RadarIcon /><span>Radar</span></a><a className="active" href="/scorecard"><ScorecardIcon /><span>Scorecard</span></a></nav>
-    </div>
+    </SiteLayout>
   );
 }
