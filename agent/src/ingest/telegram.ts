@@ -31,14 +31,28 @@ export class TelegramSource implements PostSource {
     this.limiter = options.limiter ?? new RateLimiter();
   }
 
+  /** Sources skipped during the most recent collect() call. */
+  failures: Array<{ kolId: string; reason: string }> = [];
+
   async collect(kols: readonly KolConfig[]): Promise<IngestedPost[]> {
+    this.failures = [];
     const posts: IngestedPost[] = [];
     for (const kol of kols.filter((item) => item.platform === this.platform)) {
-      const html = await fetchTextWithRetry(previewUrl(kol), {
-        fetcher: this.fetcher,
-        limiter: this.limiter,
-      });
-      const parsed = await parseTelegramPreview(html);
+      // One unreachable or renamed channel must not abort the whole ingest: the live-run
+      // loop stops on a failed stage, so a single bad source would end data collection.
+      let parsed: Awaited<ReturnType<typeof parseTelegramPreview>>;
+      try {
+        const html = await fetchTextWithRetry(previewUrl(kol), {
+          fetcher: this.fetcher,
+          limiter: this.limiter,
+        });
+        parsed = await parseTelegramPreview(html);
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
+        this.failures.push({ kolId: kol.id, reason });
+        console.warn(`[ingest] skipped Telegram source ${kol.id}: ${reason}`);
+        continue;
+      }
       posts.push(
         ...parsed.map((post) => ({
           id: postId(this.platform, post.url),

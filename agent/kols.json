@@ -49,10 +49,17 @@
     "trust": 0.5
   },
   {
-    "id": "altcoin-gordon-test-seed",
-    "handle": "@AltcoinGordon",
-    "platform": "x",
-    "url": "https://x.com/AltcoinGordon",
+    "id": "daan-crypto-telegram",
+    "handle": "DaanCryptoTG",
+    "platform": "telegram",
+    "url": "https://t.me/DaanCryptoTG",
+    "trust": 0.5
+  },
+  {
+    "id": "bitcoin-bullets-telegram",
+    "handle": "BitcoinBullets",
+    "platform": "telegram",
+    "url": "https://t.me/BitcoinBullets",
     "trust": 0.5
   },
   {
@@ -70,31 +77,59 @@
     "trust": 0.5
   },
   {
-    "id": "crypto-mich-nl",
-    "handle": "@CryptoMichNL",
+    "id": "killa-xbt",
+    "handle": "@KillaXBT",
     "platform": "x",
-    "url": "https://x.com/CryptoMichNL",
+    "url": "https://x.com/KillaXBT",
     "trust": 0.5
   },
   {
-    "id": "benjamin-cowen",
-    "handle": "@intocryptoverse",
+    "id": "ted-pillows",
+    "handle": "@TedPillows",
     "platform": "x",
-    "url": "https://x.com/intocryptoverse",
+    "url": "https://x.com/TedPillows",
     "trust": 0.5
   },
   {
-    "id": "lookonchain",
-    "handle": "@LookOnChain",
+    "id": "altcoin-sherpa",
+    "handle": "@AltcoinSherpa",
     "platform": "x",
-    "url": "https://x.com/LookOnChain",
+    "url": "https://x.com/AltcoinSherpa",
     "trust": 0.5
   },
   {
-    "id": "aixbt-agent",
-    "handle": "@aixbt_agent",
+    "id": "more-crypto-online",
+    "handle": "@Morecryptoonl",
     "platform": "x",
-    "url": "https://x.com/aixbt_agent",
+    "url": "https://x.com/Morecryptoonl",
+    "trust": 0.5
+  },
+  {
+    "id": "zord-xbt",
+    "handle": "@ZordXBT",
+    "platform": "x",
+    "url": "https://x.com/ZordXBT",
+    "trust": 0.5
+  },
+  {
+    "id": "crypto-anup",
+    "handle": "@CryptoAnup",
+    "platform": "x",
+    "url": "https://x.com/CryptoAnup",
+    "trust": 0.5
+  },
+  {
+    "id": "thanh-nam-arc",
+    "handle": "@thanhnam_arc",
+    "platform": "x",
+    "url": "https://x.com/thanhnam_arc",
+    "trust": 0.5
+  },
+  {
+    "id": "gia-bao-crypto",
+    "handle": "@giabao_crypto",
+    "platform": "x",
+    "url": "https://x.com/giabao_crypto",
     "trust": 0.5
   }
 ]
