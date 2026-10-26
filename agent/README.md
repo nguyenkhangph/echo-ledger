@@ -38,3 +38,9 @@ X has no network client by default. Paste posts into `manual_posts.json`:
 Run `bun run ingest` from this directory. Telegram public previews are fetched sequentially with at least two seconds between requests and up to three attempts. Posts are merged by platform and URL into `../fixtures/posts/<posted-date>.jsonl`.
 
 Run `bun run ingest --from-fixtures` to validate and replay all recorded posts without network access. Add `--date YYYY-MM-DD` to replay one day. `XPostClient` in `src/ingest/manual-x.ts` is the extension point for a future X API adapter.
+
+## LLM extraction
+
+Copy `.env.example` to `.env` and configure an OpenAI-compatible base URL, API key, and model. Run `bun run extract` to process all recorded posts, or `bun run extract --date YYYY-MM-DD` for one day. Calls are sequential, rate-limited, and retried with exponential backoff. Valid actionable signals are merged into `../fixtures/extracted/<posted-date>.jsonl`; posts with `has_signal: false` are not written.
+
+The extractor requests JSON mode first and falls back to JSON parsing when the provider does not support it. Every response is validated with the strict `ExtractedSignal` Zod schema, and malformed model output receives one retry. Extraction is off-chain and supports PRACTICE/paper-trading research only.

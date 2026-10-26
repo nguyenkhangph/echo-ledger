@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "ingest": "bun run src/ingest/cli.ts",
+    "extract": "bun run src/extract/cli.ts",
     "test": "bun test",
     "typecheck": "tsc --noEmit"
   },
