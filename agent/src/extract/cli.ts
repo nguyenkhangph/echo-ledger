@@ -8,6 +8,7 @@ const agentDirectory = resolve(import.meta.dir, "../..");
 const postsDirectory = resolve(agentDirectory, "../fixtures/posts");
 const extractedDirectory = resolve(agentDirectory, "../fixtures/extracted");
 const extractionAuditDirectory = resolve(agentDirectory, "../fixtures/extraction-audit");
+const extractionCacheDirectory = resolve(agentDirectory, "../fixtures/extraction-cache");
 
 function dateArgument(args: readonly string[]): string | undefined {
   const index = args.indexOf("--date");
@@ -23,8 +24,9 @@ const result = await extractPostsToFixtures(
   new OpenAiCompatibleLlmClient(),
   extractedDirectory,
   extractionAuditDirectory,
+  extractionCacheDirectory,
 );
-console.log(`Extracted ${result.signals.length} actionable signal(s) from ${posts.length} post(s)`);
+console.log(`Extracted ${result.signals.length} actionable signal(s) from ${posts.length} post(s) (${result.cacheHits} reused from cache)`);
 console.log(`Filtered ${result.sponsored.length} sponsored post(s)`);
 for (const path of result.written) console.log(`Wrote ${path}`);
 for (const path of result.auditWritten) console.log(`Wrote sponsorship audit ${path}`);

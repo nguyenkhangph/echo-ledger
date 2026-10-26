@@ -103,36 +103,97 @@ async function writeDatedSignals(
   return written;
 }
 
+/** Raw LLM outputs remembered per post, so a repeated cycle never pays to re-extract an unchanged post. */
+type ExtractionCache = Map<string, ExtractedSignalType>;
+
+function cacheKey(post: IngestedPost): string {
+  return `${post.id}#${new Bun.CryptoHasher("sha256").update(post.text).digest("hex").slice(0, 16)}`;
+}
+
+async function readCache(path: string): Promise<ExtractionCache> {
+  const file = Bun.file(path);
+  if (!(await file.exists())) return new Map();
+  const entries: Array<[string, ExtractedSignalType]> = [];
+  for (const line of (await file.text()).split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    try {
+      const { key, result } = JSON.parse(line) as { key: string; result: unknown };
+      entries.push([key, ExtractedSignal.parse(result)]);
+    } catch {
+      // A corrupt cache line only costs one extra LLM call; never fail the cycle over it.
+    }
+  }
+  return new Map(entries);
+}
+
+async function writeCache(path: string, cache: ExtractionCache): Promise<void> {
+  const lines = [...cache].sort(([left], [right]) => left.localeCompare(right)).map(([key, result]) => JSON.stringify({ key, result }));
+  const temporaryPath = `${path}.tmp`;
+  await Bun.write(temporaryPath, `${lines.join("\n")}\n`);
+  await rename(temporaryPath, path);
+}
+
 export async function extractPostsToFixtures(
   posts: readonly IngestedPost[],
   client: SignalExtractionClient,
   directory: string,
   auditDirectory = join(directory, "..", "extraction-audit"),
-): Promise<ExtractionResult> {
+  cacheDirectory?: string,
+): Promise<ExtractionResult & { cacheHits: number }> {
   const signals: ExtractedSignalType[] = [];
   const sponsored: ExtractedSignalType[] = [];
   const byDate = new Map<string, ExtractedSignalType[]>();
   const sponsoredByDate = new Map<string, ExtractedSignalType[]>();
   const processedPostIds = new Map<string, Set<string>>();
-  for (const post of posts) {
-    const date = post.posted_at.slice(0, 10);
-    processedPostIds.set(date, new Set([...(processedPostIds.get(date) ?? []), post.id]));
-    if (!byDate.has(date)) byDate.set(date, []);
-    if (!sponsoredByDate.has(date)) sponsoredByDate.set(date, []);
-    const parsed = ExtractedSignal.parse({ ...(await client.extract(post)), post_id: post.id });
-    const extracted = applySponsorshipEvidence(post, parsed);
-    if (extracted.is_sponsored) {
-      sponsored.push(extracted);
-      sponsoredByDate.set(date, [...(sponsoredByDate.get(date) ?? []), extracted]);
+  const caches = new Map<string, ExtractionCache>();
+  const dirtyDates = new Set<string>();
+  let cacheHits = 0;
+  if (cacheDirectory) await mkdir(cacheDirectory, { recursive: true });
+
+  try {
+    for (const post of posts) {
+      const date = post.posted_at.slice(0, 10);
+      processedPostIds.set(date, new Set([...(processedPostIds.get(date) ?? []), post.id]));
+      if (!byDate.has(date)) byDate.set(date, []);
+      if (!sponsoredByDate.has(date)) sponsoredByDate.set(date, []);
+
+      let parsed: ExtractedSignalType;
+      const key = cacheKey(post);
+      if (cacheDirectory && !caches.has(date)) caches.set(date, await readCache(join(cacheDirectory, `${date}.jsonl`)));
+      const cached = caches.get(date)?.get(key);
+      if (cached) {
+        parsed = cached;
+        cacheHits += 1;
+      } else {
+        parsed = ExtractedSignal.parse({ ...(await client.extract(post)), post_id: post.id });
+        if (cacheDirectory) {
+          caches.get(date)!.set(key, parsed);
+          dirtyDates.add(date);
+        }
+      }
+
+      // Deterministic sponsorship and echo rules always re-run on top of the cached LLM output.
+      const extracted = applySponsorshipEvidence(post, parsed);
+      if (extracted.is_sponsored) {
+        sponsored.push(extracted);
+        sponsoredByDate.set(date, [...(sponsoredByDate.get(date) ?? []), extracted]);
+      }
+      if (!extracted.has_signal) continue;
+      const signal = applyEchoEvidence(post, extracted);
+      signals.push(signal);
+      byDate.set(date, [...(byDate.get(date) ?? []), signal]);
     }
-    if (!extracted.has_signal) continue;
-    const signal = applyEchoEvidence(post, extracted);
-    signals.push(signal);
-    byDate.set(date, [...(byDate.get(date) ?? []), signal]);
+  } finally {
+    // Persist whatever was extracted, even if a later LLM call failed, so the retry resumes instead of restarting.
+    if (cacheDirectory) {
+      for (const date of dirtyDates) await writeCache(join(cacheDirectory, `${date}.jsonl`), caches.get(date)!);
+    }
   }
+
   return {
     signals,
     sponsored,
+    cacheHits,
     written: await writeDatedSignals(directory, byDate, processedPostIds),
     auditWritten: await writeDatedSignals(auditDirectory, sponsoredByDate, processedPostIds),
   };

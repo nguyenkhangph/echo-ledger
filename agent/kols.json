@@ -1,19 +1,5 @@
 [
   {
-    "id": "coin-bureau-insider-test-seed",
-    "handle": "cbinsider",
-    "platform": "telegram",
-    "url": "https://t.me/cbinsider",
-    "trust": 0.5
-  },
-  {
-    "id": "crypto-scanner-100eyes-test-seed",
-    "handle": "CryptoScanner100eyes",
-    "platform": "telegram",
-    "url": "https://t.me/CryptoScanner100eyes",
-    "trust": 0.5
-  },
-  {
     "id": "glassnode-test-seed",
     "handle": "glassnode",
     "platform": "telegram",
@@ -21,10 +7,45 @@
     "trust": 0.5
   },
   {
-    "id": "bitcoin-industry-test-seed",
-    "handle": "bitcoin_industry",
+    "id": "watcher-guru-telegram",
+    "handle": "WatcherGuru",
     "platform": "telegram",
-    "url": "https://t.me/bitcoin_industry",
+    "url": "https://t.me/WatcherGuru",
+    "trust": 0.5
+  },
+  {
+    "id": "cointelegraph-telegram",
+    "handle": "cointelegraph",
+    "platform": "telegram",
+    "url": "https://t.me/cointelegraph",
+    "trust": 0.5
+  },
+  {
+    "id": "wu-blockchain-telegram",
+    "handle": "wublockchainenglish",
+    "platform": "telegram",
+    "url": "https://t.me/wublockchainenglish",
+    "trust": 0.5
+  },
+  {
+    "id": "lookonchain-telegram",
+    "handle": "lookonchainchannel",
+    "platform": "telegram",
+    "url": "https://t.me/lookonchainchannel",
+    "trust": 0.5
+  },
+  {
+    "id": "the-daily-hodl-telegram",
+    "handle": "thedailyhodl",
+    "platform": "telegram",
+    "url": "https://t.me/thedailyhodl",
+    "trust": 0.5
+  },
+  {
+    "id": "cryptoquant-telegram",
+    "handle": "cryptoquant_official",
+    "platform": "telegram",
+    "url": "https://t.me/cryptoquant_official",
     "trust": 0.5
   },
   {

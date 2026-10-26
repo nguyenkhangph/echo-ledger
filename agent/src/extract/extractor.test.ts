@@ -128,6 +128,74 @@ describe("post extraction", () => {
     });
   });
 
+  test("reuses cached LLM output for unchanged posts and re-extracts edited ones", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "echo-extract-"));
+    temporaryDirectories.push(directory);
+    const cacheDirectory = join(directory, "cache");
+    const original = post("x:alice/status/11", "$SOL is breaking out on rising volume.");
+    let calls = 0;
+    const client: SignalExtractionClient = {
+      extract: async (input) => {
+        calls += 1;
+        return signal(input.id, { token: "SOL" });
+      },
+    };
+
+    const first = await extractPostsToFixtures([original], client, directory, join(directory, "audit"), cacheDirectory);
+    const second = await extractPostsToFixtures([original], client, directory, join(directory, "audit"), cacheDirectory);
+    expect(calls).toBe(1);
+    expect(first.cacheHits).toBe(0);
+    expect(second.cacheHits).toBe(1);
+    expect(second.signals).toEqual(first.signals);
+
+    const edited = { ...original, text: "$SOL is breaking out on rising volume and fresh ETF inflows." };
+    const third = await extractPostsToFixtures([edited], client, directory, join(directory, "audit"), cacheDirectory);
+    expect(calls).toBe(2);
+    expect(third.cacheHits).toBe(0);
+  });
+
+  test("applies the sponsorship guard on top of a cached extraction", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "echo-extract-"));
+    temporaryDirectories.push(directory);
+    const cacheDirectory = join(directory, "cache");
+    const promoted = post("x:alice/status/12", "#sponsored $MOON is a bullish gem.");
+    const client: SignalExtractionClient = { extract: async (input) => signal(input.id, { token: "MOON" }) };
+
+    await extractPostsToFixtures([promoted], client, directory, join(directory, "audit"), cacheDirectory);
+    const cachedRun = await extractPostsToFixtures([promoted], client, directory, join(directory, "audit"), cacheDirectory);
+
+    expect(cachedRun.cacheHits).toBe(1);
+    expect(cachedRun.signals).toHaveLength(0);
+    expect(cachedRun.sponsored[0]).toMatchObject({ post_id: promoted.id, is_sponsored: true });
+  });
+
+  test("keeps completed extractions in the cache when a later LLM call fails", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "echo-extract-"));
+    temporaryDirectories.push(directory);
+    const cacheDirectory = join(directory, "cache");
+    const good = post("x:alice/status/13", "$ETH looks strong.");
+    const bad = post("x:alice/status/14", "$ARB looks strong.");
+    const failing: SignalExtractionClient = {
+      extract: async (input) => {
+        if (input.id === bad.id) throw new Error("LLM timeout");
+        return signal(input.id, { token: "ETH" });
+      },
+    };
+
+    await expect(extractPostsToFixtures([good, bad], failing, directory, join(directory, "audit"), cacheDirectory)).rejects.toThrow("LLM timeout");
+
+    let calls = 0;
+    const retry: SignalExtractionClient = {
+      extract: async (input) => {
+        calls += 1;
+        return signal(input.id, { token: "ARB" });
+      },
+    };
+    const result = await extractPostsToFixtures([good, bad], retry, directory, join(directory, "audit"), cacheDirectory);
+    expect(calls).toBe(1);
+    expect(result.cacheHits).toBe(1);
+  });
+
   test("filters a referral-style token promotion", () => {
     const promoted = post(
       "x:alice/status/7",

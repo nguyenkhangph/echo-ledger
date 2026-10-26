@@ -7,4 +7,4 @@ contracts/out/
 contracts/cache/
 contracts/broadcast/
 dashboard/dist/
-.DS_Store
+.DS_Storefixtures/extraction-cache/
