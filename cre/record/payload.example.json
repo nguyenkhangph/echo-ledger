@@ -1,0 +1,60 @@
+{
+  "card": {
+    "card_id": "card-sol-approve-001",
+    "created_at": "2026-10-20T12:30:00.000Z",
+    "token": "SOL",
+    "window_h": 6,
+    "sources": [
+      {
+        "kol": "alice-crypto",
+        "platform": "x",
+        "url": "https://x.com/alice/status/1001",
+        "posted_at": "2026-10-20T11:10:00.000Z",
+        "quote": "SOL validator demand is accelerating independently of price.",
+        "extract": { "sentiment": "bull", "conviction": 0.88, "urgency": 0.7 },
+        "indep": 1
+      },
+      {
+        "kol": "block-research",
+        "platform": "telegram",
+        "url": "https://t.me/blockresearch/2002",
+        "posted_at": "2026-10-20T11:42:00.000Z",
+        "quote": "On-chain activity supports a bullish SOL setup.",
+        "extract": { "sentiment": "bull", "conviction": 0.81, "urgency": 0.61 },
+        "indep": 1
+      }
+    ],
+    "convergence": { "score": 0.84, "independent_kols": 2, "echo_dropped": 0, "threshold": 0.7 },
+    "evidence": {
+      "lead_min": 38,
+      "px_change_before_pct": 0.6,
+      "vol_ratio": 1.42,
+      "price_sources": ["chainlink", "coinbase"]
+    },
+    "debate": {
+      "bull": "Independent sources led price and volume confirms interest.",
+      "bear": "The observation window is short and volatility remains elevated.",
+      "verdict": "APPROVE",
+      "confidence": 0.82,
+      "models": ["openai/gpt-5-mini", "anthropic/claude-sonnet-4-5"]
+    },
+    "risk_rules": {
+      "max_position_pct": 0.05,
+      "max_open": 3,
+      "stop_loss_pct": 0.08,
+      "min_mcap_usd": 10000000,
+      "horizon_h": 24
+    },
+    "models": {
+      "extract_model": "openai/gpt-5-mini",
+      "judge_model": "anthropic/claude-sonnet-4-5",
+      "prompt_hashes": {
+        "extract": "sha256:extract-v1",
+        "debate": "sha256:debate-v1",
+        "judge": "sha256:judge-v1"
+      }
+    },
+    "decision": { "side": "long", "size_pct": 0.04 }
+  },
+  "cardHash": "0x93df14fc85a67c205a9419eb2c27d5f7e3cb918b7a9cde256c00efc128742bfd"
+}

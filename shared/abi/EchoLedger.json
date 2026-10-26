@@ -1,353 +1,463 @@
 [
-    {
-        "type":  "constructor",
-        "inputs":  [
-                       {
-                           "name":  "forwarderAddress",
-                           "type":  "address",
-                           "internalType":  "address"
-                       }
-                   ],
-        "stateMutability":  "nonpayable"
-    },
-    {
-        "type":  "function",
-        "name":  "forwarder",
-        "inputs":  [
-
-                   ],
-        "outputs":  [
-                        {
-                            "name":  "",
-                            "type":  "address",
-                            "internalType":  "address"
-                        }
-                    ],
-        "stateMutability":  "view"
-    },
-    {
-        "type":  "function",
-        "name":  "getPosition",
-        "inputs":  [
-                       {
-                           "name":  "id",
-                           "type":  "bytes32",
-                           "internalType":  "bytes32"
-                       }
-                   ],
-        "outputs":  [
-                        {
-                            "name":  "",
-                            "type":  "tuple",
-                            "internalType":  "struct EchoLedger.Position",
-                            "components":  [
-                                               {
-                                                   "name":  "exists",
-                                                   "type":  "bool",
-                                                   "internalType":  "bool"
-                                               },
-                                               {
-                                                   "name":  "settled",
-                                                   "type":  "bool",
-                                                   "internalType":  "bool"
-                                               },
-                                               {
-                                                   "name":  "token",
-                                                   "type":  "string",
-                                                   "internalType":  "string"
-                                               },
-                                               {
-                                                   "name":  "side",
-                                                   "type":  "uint8",
-                                                   "internalType":  "enum EchoLedger.Side"
-                                               },
-                                               {
-                                                   "name":  "sizeBps",
-                                                   "type":  "uint256",
-                                                   "internalType":  "uint256"
-                                               },
-                                               {
-                                                   "name":  "entryPriceE8",
-                                                   "type":  "uint256",
-                                                   "internalType":  "uint256"
-                                               },
-                                               {
-                                                   "name":  "cardHash",
-                                                   "type":  "bytes32",
-                                                   "internalType":  "bytes32"
-                                               },
-                                               {
-                                                   "name":  "attestation",
-                                                   "type":  "uint8",
-                                                   "internalType":  "enum EchoLedger.Attestation"
-                                               },
-                                               {
-                                                   "name":  "reasonCode",
-                                                   "type":  "uint256",
-                                                   "internalType":  "uint256"
-                                               },
-                                               {
-                                                   "name":  "exitPriceE8",
-                                                   "type":  "uint256",
-                                                   "internalType":  "uint256"
-                                               },
-                                               {
-                                                   "name":  "pnlBps",
-                                                   "type":  "int256",
-                                                   "internalType":  "int256"
-                                               },
-                                               {
-                                                   "name":  "settledAt",
-                                                   "type":  "uint256",
-                                                   "internalType":  "uint256"
-                                               }
-                                           ]
-                        }
-                    ],
-        "stateMutability":  "view"
-    },
-    {
-        "type":  "function",
-        "name":  "kolTrust",
-        "inputs":  [
-                       {
-                           "name":  "kolId",
-                           "type":  "bytes32",
-                           "internalType":  "bytes32"
-                       }
-                   ],
-        "outputs":  [
-                        {
-                            "name":  "",
-                            "type":  "tuple",
-                            "internalType":  "struct EchoLedger.KolTrust",
-                            "components":  [
-                                               {
-                                                   "name":  "score",
-                                                   "type":  "uint256",
-                                                   "internalType":  "uint256"
-                                               },
-                                               {
-                                                   "name":  "trades",
-                                                   "type":  "uint256",
-                                                   "internalType":  "uint256"
-                                               }
-                                           ]
-                        }
-                    ],
-        "stateMutability":  "view"
-    },
-    {
-        "type":  "function",
-        "name":  "onReport",
-        "inputs":  [
-                       {
-                           "name":  "metadata",
-                           "type":  "bytes",
-                           "internalType":  "bytes"
-                       },
-                       {
-                           "name":  "report",
-                           "type":  "bytes",
-                           "internalType":  "bytes"
-                       }
-                   ],
-        "outputs":  [
-
-                    ],
-        "stateMutability":  "nonpayable"
-    },
-    {
-        "type":  "function",
-        "name":  "openPositionIds",
-        "inputs":  [
-
-                   ],
-        "outputs":  [
-                        {
-                            "name":  "",
-                            "type":  "bytes32[]",
-                            "internalType":  "bytes32[]"
-                        }
-                    ],
-        "stateMutability":  "view"
-    },
-    {
-        "type":  "function",
-        "name":  "supportsInterface",
-        "inputs":  [
-                       {
-                           "name":  "interfaceId",
-                           "type":  "bytes4",
-                           "internalType":  "bytes4"
-                       }
-                   ],
-        "outputs":  [
-                        {
-                            "name":  "",
-                            "type":  "bool",
-                            "internalType":  "bool"
-                        }
-                    ],
-        "stateMutability":  "pure"
-    },
-    {
-        "type":  "event",
-        "name":  "PositionOpened",
-        "inputs":  [
-                       {
-                           "name":  "id",
-                           "type":  "bytes32",
-                           "indexed":  true,
-                           "internalType":  "bytes32"
-                       },
-                       {
-                           "name":  "token",
-                           "type":  "string",
-                           "indexed":  false,
-                           "internalType":  "string"
-                       },
-                       {
-                           "name":  "cardHash",
-                           "type":  "bytes32",
-                           "indexed":  true,
-                           "internalType":  "bytes32"
-                       }
-                   ],
-        "anonymous":  false
-    },
-    {
-        "type":  "event",
-        "name":  "PositionSettled",
-        "inputs":  [
-                       {
-                           "name":  "id",
-                           "type":  "bytes32",
-                           "indexed":  true,
-                           "internalType":  "bytes32"
-                       },
-                       {
-                           "name":  "pnlBps",
-                           "type":  "int256",
-                           "indexed":  false,
-                           "internalType":  "int256"
-                       }
-                   ],
-        "anonymous":  false
-    },
-    {
-        "type":  "event",
-        "name":  "TrustUpdated",
-        "inputs":  [
-                       {
-                           "name":  "kolId",
-                           "type":  "bytes32",
-                           "indexed":  true,
-                           "internalType":  "bytes32"
-                       },
-                       {
-                           "name":  "score",
-                           "type":  "uint256",
-                           "indexed":  false,
-                           "internalType":  "uint256"
-                       }
-                   ],
-        "anonymous":  false
-    },
-    {
-        "type":  "error",
-        "name":  "DuplicatePosition",
-        "inputs":  [
-                       {
-                           "name":  "positionId",
-                           "type":  "bytes32",
-                           "internalType":  "bytes32"
-                       }
-                   ]
-    },
-    {
-        "type":  "error",
-        "name":  "EmptyReport",
-        "inputs":  [
-
-                   ]
-    },
-    {
-        "type":  "error",
-        "name":  "InvalidForwarderAddress",
-        "inputs":  [
-
-                   ]
-    },
-    {
-        "type":  "error",
-        "name":  "InvalidReportType",
-        "inputs":  [
-                       {
-                           "name":  "reportType",
-                           "type":  "uint256",
-                           "internalType":  "uint256"
-                       }
-                   ]
-    },
-    {
-        "type":  "error",
-        "name":  "InvalidSender",
-        "inputs":  [
-                       {
-                           "name":  "sender",
-                           "type":  "address",
-                           "internalType":  "address"
-                       },
-                       {
-                           "name":  "expected",
-                           "type":  "address",
-                           "internalType":  "address"
-                       }
-                   ]
-    },
-    {
-        "type":  "error",
-        "name":  "InvalidSizeBps",
-        "inputs":  [
-                       {
-                           "name":  "sizeBps",
-                           "type":  "uint256",
-                           "internalType":  "uint256"
-                       }
-                   ]
-    },
-    {
-        "type":  "error",
-        "name":  "InvalidTrustScore",
-        "inputs":  [
-                       {
-                           "name":  "score",
-                           "type":  "uint256",
-                           "internalType":  "uint256"
-                       }
-                   ]
-    },
-    {
-        "type":  "error",
-        "name":  "PositionNotFound",
-        "inputs":  [
-                       {
-                           "name":  "positionId",
-                           "type":  "bytes32",
-                           "internalType":  "bytes32"
-                       }
-                   ]
-    },
-    {
-        "type":  "error",
-        "name":  "PositionNotOpen",
-        "inputs":  [
-                       {
-                           "name":  "positionId",
-                           "type":  "bytes32",
-                           "internalType":  "bytes32"
-                       }
-                   ]
-    }
+  {
+    "type": "constructor",
+    "inputs": [
+      {
+        "name": "forwarderAddress",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "forwarder",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "getPosition",
+    "inputs": [
+      {
+        "name": "id",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "tuple",
+        "internalType": "struct EchoLedger.Position",
+        "components": [
+          {
+            "name": "exists",
+            "type": "bool",
+            "internalType": "bool"
+          },
+          {
+            "name": "settled",
+            "type": "bool",
+            "internalType": "bool"
+          },
+          {
+            "name": "token",
+            "type": "string",
+            "internalType": "string"
+          },
+          {
+            "name": "side",
+            "type": "uint8",
+            "internalType": "enum EchoLedger.Side"
+          },
+          {
+            "name": "sizeBps",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "entryPriceE8",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "cardHash",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "attestation",
+            "type": "uint8",
+            "internalType": "enum EchoLedger.Attestation"
+          },
+          {
+            "name": "reasonCode",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "exitPriceE8",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "pnlBps",
+            "type": "int256",
+            "internalType": "int256"
+          },
+          {
+            "name": "settledAt",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ]
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "getPositionSources",
+    "inputs": [
+      {
+        "name": "id",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "kolIds",
+        "type": "bytes32[]",
+        "internalType": "bytes32[]"
+      },
+      {
+        "name": "echoFlags",
+        "type": "bool[]",
+        "internalType": "bool[]"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "kolTrust",
+    "inputs": [
+      {
+        "name": "kolId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "tuple",
+        "internalType": "struct EchoLedger.KolTrust",
+        "components": [
+          {
+            "name": "score",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "trades",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ]
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "onReport",
+    "inputs": [
+      {
+        "name": "metadata",
+        "type": "bytes",
+        "internalType": "bytes"
+      },
+      {
+        "name": "report",
+        "type": "bytes",
+        "internalType": "bytes"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "openPositionIds",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bytes32[]",
+        "internalType": "bytes32[]"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "supportsInterface",
+    "inputs": [
+      {
+        "name": "interfaceId",
+        "type": "bytes4",
+        "internalType": "bytes4"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bool",
+        "internalType": "bool"
+      }
+    ],
+    "stateMutability": "pure"
+  },
+  {
+    "type": "event",
+    "name": "PositionOpened",
+    "inputs": [
+      {
+        "name": "id",
+        "type": "bytes32",
+        "indexed": true,
+        "internalType": "bytes32"
+      },
+      {
+        "name": "token",
+        "type": "string",
+        "indexed": false,
+        "internalType": "string"
+      },
+      {
+        "name": "cardHash",
+        "type": "bytes32",
+        "indexed": true,
+        "internalType": "bytes32"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "PositionSettled",
+    "inputs": [
+      {
+        "name": "id",
+        "type": "bytes32",
+        "indexed": true,
+        "internalType": "bytes32"
+      },
+      {
+        "name": "pnlBps",
+        "type": "int256",
+        "indexed": false,
+        "internalType": "int256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "TrustUpdated",
+    "inputs": [
+      {
+        "name": "kolId",
+        "type": "bytes32",
+        "indexed": true,
+        "internalType": "bytes32"
+      },
+      {
+        "name": "score",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "error",
+    "name": "DuplicateKolId",
+    "inputs": [
+      {
+        "name": "kolId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "DuplicatePosition",
+    "inputs": [
+      {
+        "name": "positionId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "EmptyReport",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "InvalidForwarderAddress",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "InvalidReportType",
+    "inputs": [
+      {
+        "name": "reportType",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "InvalidSender",
+    "inputs": [
+      {
+        "name": "sender",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "expected",
+        "type": "address",
+        "internalType": "address"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "InvalidSizeBps",
+    "inputs": [
+      {
+        "name": "sizeBps",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "InvalidTrustScore",
+    "inputs": [
+      {
+        "name": "score",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "KolNotInPosition",
+    "inputs": [
+      {
+        "name": "positionId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "kolId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "MissingSources",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "PositionNotFound",
+    "inputs": [
+      {
+        "name": "positionId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "PositionNotOpen",
+    "inputs": [
+      {
+        "name": "positionId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "SourceLengthMismatch",
+    "inputs": [
+      {
+        "name": "kolIdsLength",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "echoFlagsLength",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "TooManySources",
+    "inputs": [
+      {
+        "name": "count",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "TrustAlreadyUpdated",
+    "inputs": [
+      {
+        "name": "positionId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "kolId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "TrustLengthMismatch",
+    "inputs": [
+      {
+        "name": "kolIdsLength",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "scoresLength",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "tradesLength",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
+  }
 ]

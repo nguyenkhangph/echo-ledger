@@ -7299,6 +7299,19 @@ var bytesToHex3 = (bytes) => {
 var bytesToBase64 = (bytes) => {
   return Buffer.from(bytes).toString("base64");
 };
+var hexToBase64 = (hex) => {
+  const cleanHex = hex.startsWith("0x") ? hex.slice(2) : hex;
+  if (cleanHex.length === 0) {
+    return "";
+  }
+  if (cleanHex.length % 2 !== 0) {
+    throw new Error(`Hex string must have an even number of characters: ${hex}`);
+  }
+  if (!/^[0-9a-fA-F]*$/.test(cleanHex)) {
+    throw new Error(`Invalid hex string: ${hex}`);
+  }
+  return Buffer.from(cleanHex, "hex").toString("base64");
+};
 function createWriteCreReportRequest(input) {
   return {
     receiver: hexToBytes3(input.receiver),
@@ -13924,6 +13937,10 @@ function assertSafeIntegerNumber(value, label) {
     throw new Error(`${label} requires a safe integer number, received ${value}. Pass a bigint or string for larger values`);
   }
 }
+var prepareReportRequestFromBytes = (payload, reportEncoder) => ({
+  encodedPayload: bytesToBase64(payload),
+  ...reportEncoder
+});
 var LAST_FINALIZED_BLOCK_NUMBER = {
   absVal: Buffer.from([3]).toString("base64"),
   sign: "-1"
@@ -13932,6 +13949,26 @@ var LATEST_BLOCK_NUMBER = {
   absVal: Buffer.from([2]).toString("base64"),
   sign: "-1"
 };
+var encodeCallMsg = (payload) => {
+  const encodeField = (fieldName, value) => {
+    try {
+      return hexToBase64(value);
+    } catch (e) {
+      throw new Error(`Invalid hex in '${fieldName}' field of CallMsg: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
+  return {
+    from: encodeField("from", payload.from),
+    to: encodeField("to", payload.to),
+    data: encodeField("data", payload.data)
+  };
+};
+var EVM_DEFAULT_REPORT_ENCODER = {
+  encoderName: "evm",
+  signingAlgo: "ecdsa",
+  hashingAlgo: "keccak256"
+};
+var prepareReportRequest = (hexEncodedPayload, reportEncoder = EVM_DEFAULT_REPORT_ENCODER) => prepareReportRequestFromBytes(hexToBytes3(hexEncodedPayload), reportEncoder);
 var SOLANA_ERROR__BLOCK_HEIGHT_EXCEEDED = 1;
 var SOLANA_ERROR__INVALID_NONCE = 2;
 var SOLANA_ERROR__NONCE_ACCOUNT_NOT_FOUND = 3;
@@ -19577,6 +19614,7 @@ var hostBindings = new Proxy({}, {
     return _hostBindings[prop];
   }
 });
+
 class ConsensusCapability {
   static CAPABILITY_ID = "consensus@1.0.0-alpha";
   static CAPABILITY_NAME = "consensus";
@@ -20270,23 +20308,788 @@ var sendErrorResponse = (error) => {
   }
   hostBindings.sendResponse(payload);
 };
-var version2 = "2.34.0";
-var errorConfig2 = {
-  getDocsUrl: ({ docsBaseUrl, docsPath = "", docsSlug }) => docsPath ? `${docsBaseUrl ?? "https://viem.sh"}${docsPath}${docsSlug ? `#${docsSlug}` : ""}` : undefined,
-  version: `viem@${version2}`
-};
+function execTyped(regex, string) {
+  const match = regex.exec(string);
+  return match?.groups;
+}
+var bytesRegex = /^bytes([1-9]|1[0-9]|2[0-9]|3[0-2])?$/;
+var integerRegex = /^u?int(8|16|24|32|40|48|56|64|72|80|88|96|104|112|120|128|136|144|152|160|168|176|184|192|200|208|216|224|232|240|248|256)?$/;
+var isTupleRegex = /^\(.+?\).*?$/;
+var tupleRegex = /^tuple(?<array>(\[(\d*)\])*)$/;
+function formatAbiParameter(abiParameter) {
+  let type = abiParameter.type;
+  if (tupleRegex.test(abiParameter.type) && "components" in abiParameter) {
+    type = "(";
+    const length = abiParameter.components.length;
+    for (let i = 0;i < length; i++) {
+      const component = abiParameter.components[i];
+      type += formatAbiParameter(component);
+      if (i < length - 1)
+        type += ", ";
+    }
+    const result = execTyped(tupleRegex, abiParameter.type);
+    type += `)${result?.array ?? ""}`;
+    return formatAbiParameter({
+      ...abiParameter,
+      type
+    });
+  }
+  if ("indexed" in abiParameter && abiParameter.indexed)
+    type = `${type} indexed`;
+  if (abiParameter.name)
+    return `${type} ${abiParameter.name}`;
+  return type;
+}
+function formatAbiParameters(abiParameters) {
+  let params = "";
+  const length = abiParameters.length;
+  for (let i = 0;i < length; i++) {
+    const abiParameter = abiParameters[i];
+    params += formatAbiParameter(abiParameter);
+    if (i !== length - 1)
+      params += ", ";
+  }
+  return params;
+}
+function formatAbiItem(abiItem) {
+  if (abiItem.type === "function")
+    return `function ${abiItem.name}(${formatAbiParameters(abiItem.inputs)})${abiItem.stateMutability && abiItem.stateMutability !== "nonpayable" ? ` ${abiItem.stateMutability}` : ""}${abiItem.outputs?.length ? ` returns (${formatAbiParameters(abiItem.outputs)})` : ""}`;
+  if (abiItem.type === "event")
+    return `event ${abiItem.name}(${formatAbiParameters(abiItem.inputs)})`;
+  if (abiItem.type === "error")
+    return `error ${abiItem.name}(${formatAbiParameters(abiItem.inputs)})`;
+  if (abiItem.type === "constructor")
+    return `constructor(${formatAbiParameters(abiItem.inputs)})${abiItem.stateMutability === "payable" ? " payable" : ""}`;
+  if (abiItem.type === "fallback")
+    return `fallback() external${abiItem.stateMutability === "payable" ? " payable" : ""}`;
+  return "receive() external payable";
+}
+var errorSignatureRegex = /^error (?<name>[a-zA-Z$_][a-zA-Z0-9$_]*)\((?<parameters>.*?)\)$/;
+function isErrorSignature(signature) {
+  return errorSignatureRegex.test(signature);
+}
+function execErrorSignature(signature) {
+  return execTyped(errorSignatureRegex, signature);
+}
+var eventSignatureRegex = /^event (?<name>[a-zA-Z$_][a-zA-Z0-9$_]*)\((?<parameters>.*?)\)$/;
+function isEventSignature(signature) {
+  return eventSignatureRegex.test(signature);
+}
+function execEventSignature(signature) {
+  return execTyped(eventSignatureRegex, signature);
+}
+var functionSignatureRegex = /^function (?<name>[a-zA-Z$_][a-zA-Z0-9$_]*)\((?<parameters>.*?)\)(?: (?<scope>external|public{1}))?(?: (?<stateMutability>pure|view|nonpayable|payable{1}))?(?: returns\s?\((?<returns>.*?)\))?$/;
+function isFunctionSignature(signature) {
+  return functionSignatureRegex.test(signature);
+}
+function execFunctionSignature(signature) {
+  return execTyped(functionSignatureRegex, signature);
+}
+var structSignatureRegex = /^struct (?<name>[a-zA-Z$_][a-zA-Z0-9$_]*) \{(?<properties>.*?)\}$/;
+function isStructSignature(signature) {
+  return structSignatureRegex.test(signature);
+}
+function execStructSignature(signature) {
+  return execTyped(structSignatureRegex, signature);
+}
+var constructorSignatureRegex = /^constructor\((?<parameters>.*?)\)(?:\s(?<stateMutability>payable{1}))?$/;
+function isConstructorSignature(signature) {
+  return constructorSignatureRegex.test(signature);
+}
+function execConstructorSignature(signature) {
+  return execTyped(constructorSignatureRegex, signature);
+}
+var fallbackSignatureRegex = /^fallback\(\) external(?:\s(?<stateMutability>payable{1}))?$/;
+function isFallbackSignature(signature) {
+  return fallbackSignatureRegex.test(signature);
+}
+function execFallbackSignature(signature) {
+  return execTyped(fallbackSignatureRegex, signature);
+}
+var receiveSignatureRegex = /^receive\(\) external payable$/;
+function isReceiveSignature(signature) {
+  return receiveSignatureRegex.test(signature);
+}
+var modifiers = new Set([
+  "memory",
+  "indexed",
+  "storage",
+  "calldata"
+]);
+var eventModifiers = new Set(["indexed"]);
+var functionModifiers = new Set([
+  "calldata",
+  "memory",
+  "storage"
+]);
+var version2 = "1.0.8";
 
 class BaseError3 extends Error {
   constructor(shortMessage, args = {}) {
+    const details = args.cause instanceof BaseError3 ? args.cause.details : args.cause?.message ? args.cause.message : args.details;
+    const docsPath = args.cause instanceof BaseError3 ? args.cause.docsPath || args.docsPath : args.docsPath;
+    const message = [
+      shortMessage || "An error occurred.",
+      "",
+      ...args.metaMessages ? [...args.metaMessages, ""] : [],
+      ...docsPath ? [`Docs: https://abitype.dev${docsPath}`] : [],
+      ...details ? [`Details: ${details}`] : [],
+      `Version: abitype@${version2}`
+    ].join(`
+`);
+    super(message);
+    Object.defineProperty(this, "details", {
+      enumerable: true,
+      configurable: true,
+      writable: true,
+      value: undefined
+    });
+    Object.defineProperty(this, "docsPath", {
+      enumerable: true,
+      configurable: true,
+      writable: true,
+      value: undefined
+    });
+    Object.defineProperty(this, "metaMessages", {
+      enumerable: true,
+      configurable: true,
+      writable: true,
+      value: undefined
+    });
+    Object.defineProperty(this, "shortMessage", {
+      enumerable: true,
+      configurable: true,
+      writable: true,
+      value: undefined
+    });
+    Object.defineProperty(this, "name", {
+      enumerable: true,
+      configurable: true,
+      writable: true,
+      value: "AbiTypeError"
+    });
+    if (args.cause)
+      this.cause = args.cause;
+    this.details = details;
+    this.docsPath = docsPath;
+    this.metaMessages = args.metaMessages;
+    this.shortMessage = shortMessage;
+  }
+}
+
+class UnknownTypeError2 extends BaseError3 {
+  constructor({ type }) {
+    super("Unknown type.", {
+      metaMessages: [
+        `Type "${type}" is not a valid ABI type. Perhaps you forgot to include a struct signature?`
+      ]
+    });
+    Object.defineProperty(this, "name", {
+      enumerable: true,
+      configurable: true,
+      writable: true,
+      value: "UnknownTypeError"
+    });
+  }
+}
+
+class UnknownSolidityTypeError extends BaseError3 {
+  constructor({ type }) {
+    super("Unknown type.", {
+      metaMessages: [`Type "${type}" is not a valid ABI type.`]
+    });
+    Object.defineProperty(this, "name", {
+      enumerable: true,
+      configurable: true,
+      writable: true,
+      value: "UnknownSolidityTypeError"
+    });
+  }
+}
+
+class InvalidAbiParametersError2 extends BaseError3 {
+  constructor({ params }) {
+    super("Failed to parse ABI parameters.", {
+      details: `parseAbiParameters(${JSON.stringify(params, null, 2)})`,
+      docsPath: "/api/human#parseabiparameters-1"
+    });
+    Object.defineProperty(this, "name", {
+      enumerable: true,
+      configurable: true,
+      writable: true,
+      value: "InvalidAbiParametersError"
+    });
+  }
+}
+
+class InvalidParameterError2 extends BaseError3 {
+  constructor({ param }) {
+    super("Invalid ABI parameter.", {
+      details: param
+    });
+    Object.defineProperty(this, "name", {
+      enumerable: true,
+      configurable: true,
+      writable: true,
+      value: "InvalidParameterError"
+    });
+  }
+}
+
+class SolidityProtectedKeywordError2 extends BaseError3 {
+  constructor({ param, name }) {
+    super("Invalid ABI parameter.", {
+      details: param,
+      metaMessages: [
+        `"${name}" is a protected Solidity keyword. More info: https://docs.soliditylang.org/en/latest/cheatsheet.html`
+      ]
+    });
+    Object.defineProperty(this, "name", {
+      enumerable: true,
+      configurable: true,
+      writable: true,
+      value: "SolidityProtectedKeywordError"
+    });
+  }
+}
+
+class InvalidModifierError2 extends BaseError3 {
+  constructor({ param, type, modifier }) {
+    super("Invalid ABI parameter.", {
+      details: param,
+      metaMessages: [
+        `Modifier "${modifier}" not allowed${type ? ` in "${type}" type` : ""}.`
+      ]
+    });
+    Object.defineProperty(this, "name", {
+      enumerable: true,
+      configurable: true,
+      writable: true,
+      value: "InvalidModifierError"
+    });
+  }
+}
+
+class InvalidFunctionModifierError2 extends BaseError3 {
+  constructor({ param, type, modifier }) {
+    super("Invalid ABI parameter.", {
+      details: param,
+      metaMessages: [
+        `Modifier "${modifier}" not allowed${type ? ` in "${type}" type` : ""}.`,
+        `Data location can only be specified for array, struct, or mapping types, but "${modifier}" was given.`
+      ]
+    });
+    Object.defineProperty(this, "name", {
+      enumerable: true,
+      configurable: true,
+      writable: true,
+      value: "InvalidFunctionModifierError"
+    });
+  }
+}
+
+class InvalidAbiTypeParameterError2 extends BaseError3 {
+  constructor({ abiParameter }) {
+    super("Invalid ABI parameter.", {
+      details: JSON.stringify(abiParameter, null, 2),
+      metaMessages: ["ABI parameter type is invalid."]
+    });
+    Object.defineProperty(this, "name", {
+      enumerable: true,
+      configurable: true,
+      writable: true,
+      value: "InvalidAbiTypeParameterError"
+    });
+  }
+}
+
+class InvalidSignatureError2 extends BaseError3 {
+  constructor({ signature, type }) {
+    super(`Invalid ${type} signature.`, {
+      details: signature
+    });
+    Object.defineProperty(this, "name", {
+      enumerable: true,
+      configurable: true,
+      writable: true,
+      value: "InvalidSignatureError"
+    });
+  }
+}
+
+class UnknownSignatureError2 extends BaseError3 {
+  constructor({ signature }) {
+    super("Unknown signature.", {
+      details: signature
+    });
+    Object.defineProperty(this, "name", {
+      enumerable: true,
+      configurable: true,
+      writable: true,
+      value: "UnknownSignatureError"
+    });
+  }
+}
+
+class InvalidStructSignatureError2 extends BaseError3 {
+  constructor({ signature }) {
+    super("Invalid struct signature.", {
+      details: signature,
+      metaMessages: ["No properties exist."]
+    });
+    Object.defineProperty(this, "name", {
+      enumerable: true,
+      configurable: true,
+      writable: true,
+      value: "InvalidStructSignatureError"
+    });
+  }
+}
+
+class CircularReferenceError2 extends BaseError3 {
+  constructor({ type }) {
+    super("Circular reference detected.", {
+      metaMessages: [`Struct "${type}" is a circular reference.`]
+    });
+    Object.defineProperty(this, "name", {
+      enumerable: true,
+      configurable: true,
+      writable: true,
+      value: "CircularReferenceError"
+    });
+  }
+}
+
+class InvalidParenthesisError2 extends BaseError3 {
+  constructor({ current, depth }) {
+    super("Unbalanced parentheses.", {
+      metaMessages: [
+        `"${current.trim()}" has too many ${depth > 0 ? "opening" : "closing"} parentheses.`
+      ],
+      details: `Depth "${depth}"`
+    });
+    Object.defineProperty(this, "name", {
+      enumerable: true,
+      configurable: true,
+      writable: true,
+      value: "InvalidParenthesisError"
+    });
+  }
+}
+function getParameterCacheKey(param, type, structs) {
+  let structKey = "";
+  if (structs)
+    for (const struct of Object.entries(structs)) {
+      if (!struct)
+        continue;
+      let propertyKey = "";
+      for (const property of struct[1]) {
+        propertyKey += `[${property.type}${property.name ? `:${property.name}` : ""}]`;
+      }
+      structKey += `(${struct[0]}{${propertyKey}})`;
+    }
+  if (type)
+    return `${type}:${param}${structKey}`;
+  return param;
+}
+var parameterCache = new Map([
+  ["address", { type: "address" }],
+  ["bool", { type: "bool" }],
+  ["bytes", { type: "bytes" }],
+  ["bytes32", { type: "bytes32" }],
+  ["int", { type: "int256" }],
+  ["int256", { type: "int256" }],
+  ["string", { type: "string" }],
+  ["uint", { type: "uint256" }],
+  ["uint8", { type: "uint8" }],
+  ["uint16", { type: "uint16" }],
+  ["uint24", { type: "uint24" }],
+  ["uint32", { type: "uint32" }],
+  ["uint64", { type: "uint64" }],
+  ["uint96", { type: "uint96" }],
+  ["uint112", { type: "uint112" }],
+  ["uint160", { type: "uint160" }],
+  ["uint192", { type: "uint192" }],
+  ["uint256", { type: "uint256" }],
+  ["address owner", { type: "address", name: "owner" }],
+  ["address to", { type: "address", name: "to" }],
+  ["bool approved", { type: "bool", name: "approved" }],
+  ["bytes _data", { type: "bytes", name: "_data" }],
+  ["bytes data", { type: "bytes", name: "data" }],
+  ["bytes signature", { type: "bytes", name: "signature" }],
+  ["bytes32 hash", { type: "bytes32", name: "hash" }],
+  ["bytes32 r", { type: "bytes32", name: "r" }],
+  ["bytes32 root", { type: "bytes32", name: "root" }],
+  ["bytes32 s", { type: "bytes32", name: "s" }],
+  ["string name", { type: "string", name: "name" }],
+  ["string symbol", { type: "string", name: "symbol" }],
+  ["string tokenURI", { type: "string", name: "tokenURI" }],
+  ["uint tokenId", { type: "uint256", name: "tokenId" }],
+  ["uint8 v", { type: "uint8", name: "v" }],
+  ["uint256 balance", { type: "uint256", name: "balance" }],
+  ["uint256 tokenId", { type: "uint256", name: "tokenId" }],
+  ["uint256 value", { type: "uint256", name: "value" }],
+  [
+    "event:address indexed from",
+    { type: "address", name: "from", indexed: true }
+  ],
+  ["event:address indexed to", { type: "address", name: "to", indexed: true }],
+  [
+    "event:uint indexed tokenId",
+    { type: "uint256", name: "tokenId", indexed: true }
+  ],
+  [
+    "event:uint256 indexed tokenId",
+    { type: "uint256", name: "tokenId", indexed: true }
+  ]
+]);
+function parseSignature3(signature, structs = {}) {
+  if (isFunctionSignature(signature))
+    return parseFunctionSignature(signature, structs);
+  if (isEventSignature(signature))
+    return parseEventSignature(signature, structs);
+  if (isErrorSignature(signature))
+    return parseErrorSignature(signature, structs);
+  if (isConstructorSignature(signature))
+    return parseConstructorSignature(signature, structs);
+  if (isFallbackSignature(signature))
+    return parseFallbackSignature(signature);
+  if (isReceiveSignature(signature))
+    return {
+      type: "receive",
+      stateMutability: "payable"
+    };
+  throw new UnknownSignatureError2({ signature });
+}
+function parseFunctionSignature(signature, structs = {}) {
+  const match = execFunctionSignature(signature);
+  if (!match)
+    throw new InvalidSignatureError2({ signature, type: "function" });
+  const inputParams = splitParameters(match.parameters);
+  const inputs = [];
+  const inputLength = inputParams.length;
+  for (let i = 0;i < inputLength; i++) {
+    inputs.push(parseAbiParameter2(inputParams[i], {
+      modifiers: functionModifiers,
+      structs,
+      type: "function"
+    }));
+  }
+  const outputs = [];
+  if (match.returns) {
+    const outputParams = splitParameters(match.returns);
+    const outputLength = outputParams.length;
+    for (let i = 0;i < outputLength; i++) {
+      outputs.push(parseAbiParameter2(outputParams[i], {
+        modifiers: functionModifiers,
+        structs,
+        type: "function"
+      }));
+    }
+  }
+  return {
+    name: match.name,
+    type: "function",
+    stateMutability: match.stateMutability ?? "nonpayable",
+    inputs,
+    outputs
+  };
+}
+function parseEventSignature(signature, structs = {}) {
+  const match = execEventSignature(signature);
+  if (!match)
+    throw new InvalidSignatureError2({ signature, type: "event" });
+  const params = splitParameters(match.parameters);
+  const abiParameters = [];
+  const length = params.length;
+  for (let i = 0;i < length; i++)
+    abiParameters.push(parseAbiParameter2(params[i], {
+      modifiers: eventModifiers,
+      structs,
+      type: "event"
+    }));
+  return { name: match.name, type: "event", inputs: abiParameters };
+}
+function parseErrorSignature(signature, structs = {}) {
+  const match = execErrorSignature(signature);
+  if (!match)
+    throw new InvalidSignatureError2({ signature, type: "error" });
+  const params = splitParameters(match.parameters);
+  const abiParameters = [];
+  const length = params.length;
+  for (let i = 0;i < length; i++)
+    abiParameters.push(parseAbiParameter2(params[i], { structs, type: "error" }));
+  return { name: match.name, type: "error", inputs: abiParameters };
+}
+function parseConstructorSignature(signature, structs = {}) {
+  const match = execConstructorSignature(signature);
+  if (!match)
+    throw new InvalidSignatureError2({ signature, type: "constructor" });
+  const params = splitParameters(match.parameters);
+  const abiParameters = [];
+  const length = params.length;
+  for (let i = 0;i < length; i++)
+    abiParameters.push(parseAbiParameter2(params[i], { structs, type: "constructor" }));
+  return {
+    type: "constructor",
+    stateMutability: match.stateMutability ?? "nonpayable",
+    inputs: abiParameters
+  };
+}
+function parseFallbackSignature(signature) {
+  const match = execFallbackSignature(signature);
+  if (!match)
+    throw new InvalidSignatureError2({ signature, type: "fallback" });
+  return {
+    type: "fallback",
+    stateMutability: match.stateMutability ?? "nonpayable"
+  };
+}
+var abiParameterWithoutTupleRegex = /^(?<type>[a-zA-Z$_][a-zA-Z0-9$_]*)(?<array>(?:\[\d*?\])+?)?(?:\s(?<modifier>calldata|indexed|memory|storage{1}))?(?:\s(?<name>[a-zA-Z$_][a-zA-Z0-9$_]*))?$/;
+var abiParameterWithTupleRegex = /^\((?<type>.+?)\)(?<array>(?:\[\d*?\])+?)?(?:\s(?<modifier>calldata|indexed|memory|storage{1}))?(?:\s(?<name>[a-zA-Z$_][a-zA-Z0-9$_]*))?$/;
+var dynamicIntegerRegex = /^u?int$/;
+function parseAbiParameter2(param, options) {
+  const parameterCacheKey = getParameterCacheKey(param, options?.type, options?.structs);
+  if (parameterCache.has(parameterCacheKey))
+    return parameterCache.get(parameterCacheKey);
+  const isTuple = isTupleRegex.test(param);
+  const match = execTyped(isTuple ? abiParameterWithTupleRegex : abiParameterWithoutTupleRegex, param);
+  if (!match)
+    throw new InvalidParameterError2({ param });
+  if (match.name && isSolidityKeyword(match.name))
+    throw new SolidityProtectedKeywordError2({ param, name: match.name });
+  const name = match.name ? { name: match.name } : {};
+  const indexed = match.modifier === "indexed" ? { indexed: true } : {};
+  const structs = options?.structs ?? {};
+  let type;
+  let components = {};
+  if (isTuple) {
+    type = "tuple";
+    const params = splitParameters(match.type);
+    const components_ = [];
+    const length = params.length;
+    for (let i = 0;i < length; i++) {
+      components_.push(parseAbiParameter2(params[i], { structs }));
+    }
+    components = { components: components_ };
+  } else if (match.type in structs) {
+    type = "tuple";
+    components = { components: structs[match.type] };
+  } else if (dynamicIntegerRegex.test(match.type)) {
+    type = `${match.type}256`;
+  } else {
+    type = match.type;
+    if (!(options?.type === "struct") && !isSolidityType(type))
+      throw new UnknownSolidityTypeError({ type });
+  }
+  if (match.modifier) {
+    if (!options?.modifiers?.has?.(match.modifier))
+      throw new InvalidModifierError2({
+        param,
+        type: options?.type,
+        modifier: match.modifier
+      });
+    if (functionModifiers.has(match.modifier) && !isValidDataLocation(type, !!match.array))
+      throw new InvalidFunctionModifierError2({
+        param,
+        type: options?.type,
+        modifier: match.modifier
+      });
+  }
+  const abiParameter = {
+    type: `${type}${match.array ?? ""}`,
+    ...name,
+    ...indexed,
+    ...components
+  };
+  parameterCache.set(parameterCacheKey, abiParameter);
+  return abiParameter;
+}
+function splitParameters(params, result = [], current = "", depth = 0) {
+  const length = params.trim().length;
+  for (let i = 0;i < length; i++) {
+    const char = params[i];
+    const tail = params.slice(i + 1);
+    switch (char) {
+      case ",":
+        return depth === 0 ? splitParameters(tail, [...result, current.trim()]) : splitParameters(tail, result, `${current}${char}`, depth);
+      case "(":
+        return splitParameters(tail, result, `${current}${char}`, depth + 1);
+      case ")":
+        return splitParameters(tail, result, `${current}${char}`, depth - 1);
+      default:
+        return splitParameters(tail, result, `${current}${char}`, depth);
+    }
+  }
+  if (current === "")
+    return result;
+  if (depth !== 0)
+    throw new InvalidParenthesisError2({ current, depth });
+  result.push(current.trim());
+  return result;
+}
+function isSolidityType(type) {
+  return type === "address" || type === "bool" || type === "function" || type === "string" || bytesRegex.test(type) || integerRegex.test(type);
+}
+var protectedKeywordsRegex = /^(?:after|alias|anonymous|apply|auto|byte|calldata|case|catch|constant|copyof|default|defined|error|event|external|false|final|function|immutable|implements|in|indexed|inline|internal|let|mapping|match|memory|mutable|null|of|override|partial|private|promise|public|pure|reference|relocatable|return|returns|sizeof|static|storage|struct|super|supports|switch|this|true|try|typedef|typeof|var|view|virtual)$/;
+function isSolidityKeyword(name) {
+  return name === "address" || name === "bool" || name === "function" || name === "string" || name === "tuple" || bytesRegex.test(name) || integerRegex.test(name) || protectedKeywordsRegex.test(name);
+}
+function isValidDataLocation(type, isArray) {
+  return isArray || type === "bytes" || type === "string" || type === "tuple";
+}
+function parseStructs(signatures) {
+  const shallowStructs = {};
+  const signaturesLength = signatures.length;
+  for (let i = 0;i < signaturesLength; i++) {
+    const signature = signatures[i];
+    if (!isStructSignature(signature))
+      continue;
+    const match = execStructSignature(signature);
+    if (!match)
+      throw new InvalidSignatureError2({ signature, type: "struct" });
+    const properties = match.properties.split(";");
+    const components = [];
+    const propertiesLength = properties.length;
+    for (let k = 0;k < propertiesLength; k++) {
+      const property = properties[k];
+      const trimmed = property.trim();
+      if (!trimmed)
+        continue;
+      const abiParameter = parseAbiParameter2(trimmed, {
+        type: "struct"
+      });
+      components.push(abiParameter);
+    }
+    if (!components.length)
+      throw new InvalidStructSignatureError2({ signature });
+    shallowStructs[match.name] = components;
+  }
+  const resolvedStructs = {};
+  const entries = Object.entries(shallowStructs);
+  const entriesLength = entries.length;
+  for (let i = 0;i < entriesLength; i++) {
+    const [name, parameters] = entries[i];
+    resolvedStructs[name] = resolveStructs(parameters, shallowStructs);
+  }
+  return resolvedStructs;
+}
+var typeWithoutTupleRegex = /^(?<type>[a-zA-Z$_][a-zA-Z0-9$_]*)(?<array>(?:\[\d*?\])+?)?$/;
+function resolveStructs(abiParameters, structs, ancestors = new Set) {
+  const components = [];
+  const length = abiParameters.length;
+  for (let i = 0;i < length; i++) {
+    const abiParameter = abiParameters[i];
+    const isTuple = isTupleRegex.test(abiParameter.type);
+    if (isTuple)
+      components.push(abiParameter);
+    else {
+      const match = execTyped(typeWithoutTupleRegex, abiParameter.type);
+      if (!match?.type)
+        throw new InvalidAbiTypeParameterError2({ abiParameter });
+      const { array, type } = match;
+      if (type in structs) {
+        if (ancestors.has(type))
+          throw new CircularReferenceError2({ type });
+        components.push({
+          ...abiParameter,
+          type: `tuple${array ?? ""}`,
+          components: resolveStructs(structs[type] ?? [], structs, new Set([...ancestors, type]))
+        });
+      } else {
+        if (isSolidityType(type))
+          components.push(abiParameter);
+        else
+          throw new UnknownTypeError2({ type });
+      }
+    }
+  }
+  return components;
+}
+function parseAbi2(signatures) {
+  const structs = parseStructs(signatures);
+  const abi = [];
+  const length = signatures.length;
+  for (let i = 0;i < length; i++) {
+    const signature = signatures[i];
+    if (isStructSignature(signature))
+      continue;
+    abi.push(parseSignature3(signature, structs));
+  }
+  return abi;
+}
+function parseAbiParameters2(params) {
+  const abiParameters = [];
+  if (typeof params === "string") {
+    const parameters = splitParameters(params);
+    const length = parameters.length;
+    for (let i = 0;i < length; i++) {
+      abiParameters.push(parseAbiParameter2(parameters[i], { modifiers }));
+    }
+  } else {
+    const structs = parseStructs(params);
+    const length = params.length;
+    for (let i = 0;i < length; i++) {
+      const signature = params[i];
+      if (isStructSignature(signature))
+        continue;
+      const parameters = splitParameters(signature);
+      const length = parameters.length;
+      for (let k = 0;k < length; k++) {
+        abiParameters.push(parseAbiParameter2(parameters[k], { modifiers, structs }));
+      }
+    }
+  }
+  if (abiParameters.length === 0)
+    throw new InvalidAbiParametersError2({ params });
+  return abiParameters;
+}
+var zeroAddress2 = "0x0000000000000000000000000000000000000000";
+function formatAbiItem2(abiItem, { includeName = false } = {}) {
+  if (abiItem.type !== "function" && abiItem.type !== "event" && abiItem.type !== "error")
+    throw new InvalidDefinitionTypeError2(abiItem.type);
+  return `${abiItem.name}(${formatAbiParams(abiItem.inputs, { includeName })})`;
+}
+function formatAbiParams(params, { includeName = false } = {}) {
+  if (!params)
+    return "";
+  return params.map((param) => formatAbiParam(param, { includeName })).join(includeName ? ", " : ",");
+}
+function formatAbiParam(param, { includeName }) {
+  if (param.type.startsWith("tuple")) {
+    return `(${formatAbiParams(param.components, { includeName })})${param.type.slice("tuple".length)}`;
+  }
+  return param.type + (includeName && param.name ? ` ${param.name}` : "");
+}
+function isHex3(value, { strict = true } = {}) {
+  if (!value)
+    return false;
+  if (typeof value !== "string")
+    return false;
+  return strict ? /^0x[0-9a-fA-F]*$/.test(value) : value.startsWith("0x");
+}
+function size3(value) {
+  if (isHex3(value, { strict: false }))
+    return Math.ceil((value.length - 2) / 2);
+  return value.length;
+}
+var version3 = "2.34.0";
+var errorConfig2 = {
+  getDocsUrl: ({ docsBaseUrl, docsPath = "", docsSlug }) => docsPath ? `${docsBaseUrl ?? "https://viem.sh"}${docsPath}${docsSlug ? `#${docsSlug}` : ""}` : undefined,
+  version: `viem@${version3}`
+};
+
+class BaseError5 extends Error {
+  constructor(shortMessage, args = {}) {
     const details = (() => {
-      if (args.cause instanceof BaseError3)
+      if (args.cause instanceof BaseError5)
         return args.cause.details;
       if (args.cause?.message)
         return args.cause.message;
       return args.details;
     })();
     const docsPath = (() => {
-      if (args.cause instanceof BaseError3)
+      if (args.cause instanceof BaseError5)
         return args.cause.docsPath || args.docsPath;
       return args.docsPath;
     })();
@@ -20342,7 +21145,7 @@ class BaseError3 extends Error {
     this.metaMessages = args.metaMessages;
     this.name = args.name ?? this.name;
     this.shortMessage = shortMessage;
-    this.version = version2;
+    this.version = version3;
   }
   walk(fn) {
     return walk2(this, fn);
@@ -20356,162 +21159,7 @@ function walk2(err, fn) {
   return fn ? null : err;
 }
 
-class InvalidDecimalNumberError2 extends BaseError3 {
-  constructor({ value }) {
-    super(`Number \`${value}\` is not a valid decimal number.`, {
-      name: "InvalidDecimalNumberError"
-    });
-  }
-}
-function parseUnits2(value, decimals) {
-  if (!/^(-?)([0-9]*)\.?([0-9]*)$/.test(value))
-    throw new InvalidDecimalNumberError2({ value });
-  let [integer, fraction = "0"] = value.split(".");
-  const negative = integer.startsWith("-");
-  if (negative)
-    integer = integer.slice(1);
-  fraction = fraction.replace(/(0+)$/, "");
-  if (decimals === 0) {
-    if (Math.round(Number(`.${fraction}`)) === 1)
-      integer = `${BigInt(integer) + 1n}`;
-    fraction = "";
-  } else if (fraction.length > decimals) {
-    const [left, unit, right] = [
-      fraction.slice(0, decimals - 1),
-      fraction.slice(decimals - 1, decimals),
-      fraction.slice(decimals)
-    ];
-    const rounded = Math.round(Number(`${unit}.${right}`));
-    if (rounded > 9)
-      fraction = `${BigInt(left) + BigInt(1)}0`.padStart(left.length + 1, "0");
-    else
-      fraction = `${left}${rounded}`;
-    if (fraction.length > decimals) {
-      fraction = fraction.slice(1);
-      integer = `${BigInt(integer) + 1n}`;
-    }
-    fraction = fraction.slice(0, decimals);
-  } else {
-    fraction = fraction.padEnd(decimals, "0");
-  }
-  return BigInt(`${negative ? "-" : ""}${integer}${fraction}`);
-}
-var zeroAddress3 = "0x0000000000000000000000000000000000000000";
-function formatAbiItem(abiItem, { includeName = false } = {}) {
-  if (abiItem.type !== "function" && abiItem.type !== "event" && abiItem.type !== "error")
-    throw new InvalidDefinitionTypeError3(abiItem.type);
-  return `${abiItem.name}(${formatAbiParams(abiItem.inputs, { includeName })})`;
-}
-function formatAbiParams(params, { includeName = false } = {}) {
-  if (!params)
-    return "";
-  return params.map((param) => formatAbiParam(param, { includeName })).join(includeName ? ", " : ",");
-}
-function formatAbiParam(param, { includeName }) {
-  if (param.type.startsWith("tuple")) {
-    return `(${formatAbiParams(param.components, { includeName })})${param.type.slice("tuple".length)}`;
-  }
-  return param.type + (includeName && param.name ? ` ${param.name}` : "");
-}
-function isHex4(value, { strict = true } = {}) {
-  if (!value)
-    return false;
-  if (typeof value !== "string")
-    return false;
-  return strict ? /^0x[0-9a-fA-F]*$/.test(value) : value.startsWith("0x");
-}
-function size4(value) {
-  if (isHex4(value, { strict: false }))
-    return Math.ceil((value.length - 2) / 2);
-  return value.length;
-}
-var version3 = "2.34.0";
-var errorConfig3 = {
-  getDocsUrl: ({ docsBaseUrl, docsPath = "", docsSlug }) => docsPath ? `${docsBaseUrl ?? "https://viem.sh"}${docsPath}${docsSlug ? `#${docsSlug}` : ""}` : undefined,
-  version: `viem@${version3}`
-};
-
-class BaseError5 extends Error {
-  constructor(shortMessage, args = {}) {
-    const details = (() => {
-      if (args.cause instanceof BaseError5)
-        return args.cause.details;
-      if (args.cause?.message)
-        return args.cause.message;
-      return args.details;
-    })();
-    const docsPath = (() => {
-      if (args.cause instanceof BaseError5)
-        return args.cause.docsPath || args.docsPath;
-      return args.docsPath;
-    })();
-    const docsUrl = errorConfig3.getDocsUrl?.({ ...args, docsPath });
-    const message = [
-      shortMessage || "An error occurred.",
-      "",
-      ...args.metaMessages ? [...args.metaMessages, ""] : [],
-      ...docsUrl ? [`Docs: ${docsUrl}`] : [],
-      ...details ? [`Details: ${details}`] : [],
-      ...errorConfig3.version ? [`Version: ${errorConfig3.version}`] : []
-    ].join(`
-`);
-    super(message, args.cause ? { cause: args.cause } : undefined);
-    Object.defineProperty(this, "details", {
-      enumerable: true,
-      configurable: true,
-      writable: true,
-      value: undefined
-    });
-    Object.defineProperty(this, "docsPath", {
-      enumerable: true,
-      configurable: true,
-      writable: true,
-      value: undefined
-    });
-    Object.defineProperty(this, "metaMessages", {
-      enumerable: true,
-      configurable: true,
-      writable: true,
-      value: undefined
-    });
-    Object.defineProperty(this, "shortMessage", {
-      enumerable: true,
-      configurable: true,
-      writable: true,
-      value: undefined
-    });
-    Object.defineProperty(this, "version", {
-      enumerable: true,
-      configurable: true,
-      writable: true,
-      value: undefined
-    });
-    Object.defineProperty(this, "name", {
-      enumerable: true,
-      configurable: true,
-      writable: true,
-      value: "BaseError"
-    });
-    this.details = details;
-    this.docsPath = docsPath;
-    this.metaMessages = args.metaMessages;
-    this.name = args.name ?? this.name;
-    this.shortMessage = shortMessage;
-    this.version = version3;
-  }
-  walk(fn) {
-    return walk3(this, fn);
-  }
-}
-function walk3(err, fn) {
-  if (fn?.(err))
-    return err;
-  if (err && typeof err === "object" && "cause" in err && err.cause !== undefined)
-    return walk3(err.cause, fn);
-  return fn ? null : err;
-}
-
-class AbiDecodingDataSizeTooSmallError3 extends BaseError5 {
+class AbiDecodingDataSizeTooSmallError2 extends BaseError5 {
   constructor({ data, params, size }) {
     super([`Data size of ${size} bytes is too small for given parameters.`].join(`
 `), {
@@ -20545,7 +21193,7 @@ class AbiDecodingDataSizeTooSmallError3 extends BaseError5 {
   }
 }
 
-class AbiDecodingZeroDataError3 extends BaseError5 {
+class AbiDecodingZeroDataError2 extends BaseError5 {
   constructor() {
     super('Cannot decode zero data ("0x") with ABI parameters.', {
       name: "AbiDecodingZeroDataError"
@@ -20553,7 +21201,7 @@ class AbiDecodingZeroDataError3 extends BaseError5 {
   }
 }
 
-class AbiEncodingArrayLengthMismatchError3 extends BaseError5 {
+class AbiEncodingArrayLengthMismatchError2 extends BaseError5 {
   constructor({ expectedLength, givenLength, type }) {
     super([
       `ABI encoding array length mismatch for type ${type}.`,
@@ -20564,13 +21212,13 @@ class AbiEncodingArrayLengthMismatchError3 extends BaseError5 {
   }
 }
 
-class AbiEncodingBytesSizeMismatchError3 extends BaseError5 {
+class AbiEncodingBytesSizeMismatchError2 extends BaseError5 {
   constructor({ expectedSize, value }) {
-    super(`Size of bytes "${value}" (bytes${size4(value)}) does not match expected size (bytes${expectedSize}).`, { name: "AbiEncodingBytesSizeMismatchError" });
+    super(`Size of bytes "${value}" (bytes${size3(value)}) does not match expected size (bytes${expectedSize}).`, { name: "AbiEncodingBytesSizeMismatchError" });
   }
 }
 
-class AbiEncodingLengthMismatchError3 extends BaseError5 {
+class AbiEncodingLengthMismatchError2 extends BaseError5 {
   constructor({ expectedLength, givenLength }) {
     super([
       "ABI encoding params/values length mismatch.",
@@ -20581,43 +21229,7 @@ class AbiEncodingLengthMismatchError3 extends BaseError5 {
   }
 }
 
-class AbiEventSignatureEmptyTopicsError3 extends BaseError5 {
-  constructor({ docsPath }) {
-    super("Cannot extract event signature from empty topics.", {
-      docsPath,
-      name: "AbiEventSignatureEmptyTopicsError"
-    });
-  }
-}
-
-class AbiEventSignatureNotFoundError3 extends BaseError5 {
-  constructor(signature, { docsPath }) {
-    super([
-      `Encoded event signature "${signature}" not found on ABI.`,
-      "Make sure you are using the correct ABI and that the event exists on it.",
-      `You can look up the signature here: https://openchain.xyz/signatures?query=${signature}.`
-    ].join(`
-`), {
-      docsPath,
-      name: "AbiEventSignatureNotFoundError"
-    });
-  }
-}
-
-class AbiEventNotFoundError3 extends BaseError5 {
-  constructor(eventName, { docsPath } = {}) {
-    super([
-      `Event ${eventName ? `"${eventName}" ` : ""}not found on ABI.`,
-      "Make sure you are using the correct ABI and that the event exists on it."
-    ].join(`
-`), {
-      docsPath,
-      name: "AbiEventNotFoundError"
-    });
-  }
-}
-
-class AbiFunctionNotFoundError3 extends BaseError5 {
+class AbiFunctionNotFoundError2 extends BaseError5 {
   constructor(functionName, { docsPath } = {}) {
     super([
       `Function ${functionName ? `"${functionName}" ` : ""}not found on ABI.`,
@@ -20630,7 +21242,7 @@ class AbiFunctionNotFoundError3 extends BaseError5 {
   }
 }
 
-class AbiFunctionOutputsNotFoundError3 extends BaseError5 {
+class AbiFunctionOutputsNotFoundError2 extends BaseError5 {
   constructor(functionName, { docsPath }) {
     super([
       `Function "${functionName}" does not contain any \`outputs\` on ABI.`,
@@ -20648,8 +21260,8 @@ class AbiItemAmbiguityError extends BaseError5 {
   constructor(x, y) {
     super("Found ambiguous types in overloaded ABI items.", {
       metaMessages: [
-        `\`${x.type}\` in \`${formatAbiItem(x.abiItem)}\`, and`,
-        `\`${y.type}\` in \`${formatAbiItem(y.abiItem)}\``,
+        `\`${x.type}\` in \`${formatAbiItem2(x.abiItem)}\`, and`,
+        `\`${y.type}\` in \`${formatAbiItem2(y.abiItem)}\``,
         "",
         "These types encode differently and cannot be distinguished at runtime.",
         "Remove one of the ambiguous items in the ABI."
@@ -20659,66 +21271,7 @@ class AbiItemAmbiguityError extends BaseError5 {
   }
 }
 
-class DecodeLogDataMismatch3 extends BaseError5 {
-  constructor({ abiItem, data, params, size }) {
-    super([
-      `Data size of ${size} bytes is too small for non-indexed event parameters.`
-    ].join(`
-`), {
-      metaMessages: [
-        `Params: (${formatAbiParams(params, { includeName: true })})`,
-        `Data:   ${data} (${size} bytes)`
-      ],
-      name: "DecodeLogDataMismatch"
-    });
-    Object.defineProperty(this, "abiItem", {
-      enumerable: true,
-      configurable: true,
-      writable: true,
-      value: undefined
-    });
-    Object.defineProperty(this, "data", {
-      enumerable: true,
-      configurable: true,
-      writable: true,
-      value: undefined
-    });
-    Object.defineProperty(this, "params", {
-      enumerable: true,
-      configurable: true,
-      writable: true,
-      value: undefined
-    });
-    Object.defineProperty(this, "size", {
-      enumerable: true,
-      configurable: true,
-      writable: true,
-      value: undefined
-    });
-    this.abiItem = abiItem;
-    this.data = data;
-    this.params = params;
-    this.size = size;
-  }
-}
-
-class DecodeLogTopicsMismatch3 extends BaseError5 {
-  constructor({ abiItem, param }) {
-    super([
-      `Expected a topic for indexed event parameter${param.name ? ` "${param.name}"` : ""} on event "${formatAbiItem(abiItem, { includeName: true })}".`
-    ].join(`
-`), { name: "DecodeLogTopicsMismatch" });
-    Object.defineProperty(this, "abiItem", {
-      enumerable: true,
-      configurable: true,
-      writable: true,
-      value: undefined
-    });
-    this.abiItem = abiItem;
-  }
-}
-
-class InvalidAbiEncodingTypeError3 extends BaseError5 {
+class InvalidAbiEncodingTypeError2 extends BaseError5 {
   constructor(type, { docsPath }) {
     super([
       `Type "${type}" is not a valid encoding type.`,
@@ -20728,7 +21281,7 @@ class InvalidAbiEncodingTypeError3 extends BaseError5 {
   }
 }
 
-class InvalidAbiDecodingTypeError3 extends BaseError5 {
+class InvalidAbiDecodingTypeError2 extends BaseError5 {
   constructor(type, { docsPath }) {
     super([
       `Type "${type}" is not a valid decoding type.`,
@@ -20738,7 +21291,7 @@ class InvalidAbiDecodingTypeError3 extends BaseError5 {
   }
 }
 
-class InvalidArrayError3 extends BaseError5 {
+class InvalidArrayError2 extends BaseError5 {
   constructor(value) {
     super([`Value "${value}" is not a valid array.`].join(`
 `), {
@@ -20747,7 +21300,7 @@ class InvalidArrayError3 extends BaseError5 {
   }
 }
 
-class InvalidDefinitionTypeError3 extends BaseError5 {
+class InvalidDefinitionTypeError2 extends BaseError5 {
   constructor(type) {
     super([
       `"${type}" is not a valid definition type.`,
@@ -20757,39 +21310,51 @@ class InvalidDefinitionTypeError3 extends BaseError5 {
   }
 }
 
-class SliceOffsetOutOfBoundsError3 extends BaseError5 {
+class InvalidAddressError3 extends BaseError5 {
+  constructor({ address }) {
+    super(`Address "${address}" is invalid.`, {
+      metaMessages: [
+        "- Address must be a hex value of 20 bytes (40 hex characters).",
+        "- Address must match its checksum counterpart."
+      ],
+      name: "InvalidAddressError"
+    });
+  }
+}
+
+class SliceOffsetOutOfBoundsError2 extends BaseError5 {
   constructor({ offset, position, size }) {
     super(`Slice ${position === "start" ? "starting" : "ending"} at offset "${offset}" is out-of-bounds (size: ${size}).`, { name: "SliceOffsetOutOfBoundsError" });
   }
 }
 
-class SizeExceedsPaddingSizeError4 extends BaseError5 {
+class SizeExceedsPaddingSizeError3 extends BaseError5 {
   constructor({ size, targetSize, type }) {
     super(`${type.charAt(0).toUpperCase()}${type.slice(1).toLowerCase()} size (${size}) exceeds padding size (${targetSize}).`, { name: "SizeExceedsPaddingSizeError" });
   }
 }
-function pad4(hexOrBytes, { dir, size = 32 } = {}) {
+function pad3(hexOrBytes, { dir, size = 32 } = {}) {
   if (typeof hexOrBytes === "string")
-    return padHex4(hexOrBytes, { dir, size });
-  return padBytes4(hexOrBytes, { dir, size });
+    return padHex3(hexOrBytes, { dir, size });
+  return padBytes3(hexOrBytes, { dir, size });
 }
-function padHex4(hex_, { dir, size = 32 } = {}) {
+function padHex3(hex_, { dir, size = 32 } = {}) {
   if (size === null)
     return hex_;
   const hex = hex_.replace("0x", "");
   if (hex.length > size * 2)
-    throw new SizeExceedsPaddingSizeError4({
+    throw new SizeExceedsPaddingSizeError3({
       size: Math.ceil(hex.length / 2),
       targetSize: size,
       type: "hex"
     });
   return `0x${hex[dir === "right" ? "padEnd" : "padStart"](size * 2, "0")}`;
 }
-function padBytes4(bytes, { dir, size = 32 } = {}) {
+function padBytes3(bytes, { dir, size = 32 } = {}) {
   if (size === null)
     return bytes;
   if (bytes.length > size)
-    throw new SizeExceedsPaddingSizeError4({
+    throw new SizeExceedsPaddingSizeError3({
       size: bytes.length,
       targetSize: size,
       type: "bytes"
@@ -20802,13 +21367,13 @@ function padBytes4(bytes, { dir, size = 32 } = {}) {
   return paddedBytes;
 }
 
-class IntegerOutOfRangeError4 extends BaseError5 {
+class IntegerOutOfRangeError3 extends BaseError5 {
   constructor({ max, min, signed, size, value }) {
     super(`Number "${value}" is not in safe ${size ? `${size * 8}-bit ${signed ? "signed" : "unsigned"} ` : ""}integer range ${max ? `(${min} to ${max})` : `(above ${min})`}`, { name: "IntegerOutOfRangeError" });
   }
 }
 
-class InvalidBytesBooleanError3 extends BaseError5 {
+class InvalidBytesBooleanError2 extends BaseError5 {
   constructor(bytes) {
     super(`Bytes value "${bytes}" is not a valid boolean. The bytes array must contain a single byte of either a 0 or 1 value.`, {
       name: "InvalidBytesBooleanError"
@@ -20816,12 +21381,12 @@ class InvalidBytesBooleanError3 extends BaseError5 {
   }
 }
 
-class SizeOverflowError4 extends BaseError5 {
+class SizeOverflowError3 extends BaseError5 {
   constructor({ givenSize, maxSize }) {
     super(`Size cannot exceed ${maxSize} bytes. Given size: ${givenSize} bytes.`, { name: "SizeOverflowError" });
   }
 }
-function trim3(hexOrBytes, { dir = "left" } = {}) {
+function trim2(hexOrBytes, { dir = "left" } = {}) {
   let data = typeof hexOrBytes === "string" ? hexOrBytes.replace("0x", "") : hexOrBytes;
   let sliceLength = 0;
   for (let i = 0;i < data.length - 1; i++) {
@@ -20839,13 +21404,13 @@ function trim3(hexOrBytes, { dir = "left" } = {}) {
   return data;
 }
 function assertSize3(hexOrBytes, { size }) {
-  if (size4(hexOrBytes) > size)
-    throw new SizeOverflowError4({
-      givenSize: size4(hexOrBytes),
+  if (size3(hexOrBytes) > size)
+    throw new SizeOverflowError3({
+      givenSize: size3(hexOrBytes),
       maxSize: size
     });
 }
-function hexToBigInt4(hex, opts = {}) {
+function hexToBigInt3(hex, opts = {}) {
   const { signed } = opts;
   if (opts.size)
     assertSize3(hex, { size: opts.size });
@@ -20858,29 +21423,29 @@ function hexToBigInt4(hex, opts = {}) {
     return value;
   return value - BigInt(`0x${"f".padStart(size * 2, "f")}`) - 1n;
 }
-function hexToNumber5(hex, opts = {}) {
-  return Number(hexToBigInt4(hex, opts));
+function hexToNumber4(hex, opts = {}) {
+  return Number(hexToBigInt3(hex, opts));
 }
 var hexes3 = /* @__PURE__ */ Array.from({ length: 256 }, (_v, i) => i.toString(16).padStart(2, "0"));
-function toHex3(value, opts = {}) {
+function toHex2(value, opts = {}) {
   if (typeof value === "number" || typeof value === "bigint")
-    return numberToHex3(value, opts);
+    return numberToHex2(value, opts);
   if (typeof value === "string") {
-    return stringToHex3(value, opts);
+    return stringToHex2(value, opts);
   }
   if (typeof value === "boolean")
-    return boolToHex3(value, opts);
-  return bytesToHex5(value, opts);
+    return boolToHex2(value, opts);
+  return bytesToHex4(value, opts);
 }
-function boolToHex3(value, opts = {}) {
+function boolToHex2(value, opts = {}) {
   const hex = `0x${Number(value)}`;
   if (typeof opts.size === "number") {
     assertSize3(hex, { size: opts.size });
-    return pad4(hex, { size: opts.size });
+    return pad3(hex, { size: opts.size });
   }
   return hex;
 }
-function bytesToHex5(value, opts = {}) {
+function bytesToHex4(value, opts = {}) {
   let string = "";
   for (let i = 0;i < value.length; i++) {
     string += hexes3[value[i]];
@@ -20888,11 +21453,11 @@ function bytesToHex5(value, opts = {}) {
   const hex = `0x${string}`;
   if (typeof opts.size === "number") {
     assertSize3(hex, { size: opts.size });
-    return pad4(hex, { dir: "right", size: opts.size });
+    return pad3(hex, { dir: "right", size: opts.size });
   }
   return hex;
 }
-function numberToHex3(value_, opts = {}) {
+function numberToHex2(value_, opts = {}) {
   const { signed, size } = opts;
   const value = BigInt(value_);
   let maxValue;
@@ -20907,7 +21472,7 @@ function numberToHex3(value_, opts = {}) {
   const minValue = typeof maxValue === "bigint" && signed ? -maxValue - 1n : 0;
   if (maxValue && value > maxValue || value < minValue) {
     const suffix = typeof value_ === "bigint" ? "n" : "";
-    throw new IntegerOutOfRangeError4({
+    throw new IntegerOutOfRangeError3({
       max: maxValue ? `${maxValue}${suffix}` : undefined,
       min: `${minValue}${suffix}`,
       signed,
@@ -20917,30 +21482,30 @@ function numberToHex3(value_, opts = {}) {
   }
   const hex = `0x${(signed && value < 0 ? (1n << BigInt(size * 8)) + BigInt(value) : value).toString(16)}`;
   if (size)
-    return pad4(hex, { size });
+    return pad3(hex, { size });
   return hex;
 }
 var encoder3 = /* @__PURE__ */ new TextEncoder;
-function stringToHex3(value_, opts = {}) {
+function stringToHex2(value_, opts = {}) {
   const value = encoder3.encode(value_);
-  return bytesToHex5(value, opts);
+  return bytesToHex4(value, opts);
 }
 var encoder4 = /* @__PURE__ */ new TextEncoder;
-function toBytes4(value, opts = {}) {
+function toBytes3(value, opts = {}) {
   if (typeof value === "number" || typeof value === "bigint")
-    return numberToBytes3(value, opts);
+    return numberToBytes2(value, opts);
   if (typeof value === "boolean")
-    return boolToBytes3(value, opts);
-  if (isHex4(value))
-    return hexToBytes5(value, opts);
-  return stringToBytes3(value, opts);
+    return boolToBytes2(value, opts);
+  if (isHex3(value))
+    return hexToBytes4(value, opts);
+  return stringToBytes2(value, opts);
 }
-function boolToBytes3(value, opts = {}) {
+function boolToBytes2(value, opts = {}) {
   const bytes = new Uint8Array(1);
   bytes[0] = Number(value);
   if (typeof opts.size === "number") {
     assertSize3(bytes, { size: opts.size });
-    return pad4(bytes, { size: opts.size });
+    return pad3(bytes, { size: opts.size });
   }
   return bytes;
 }
@@ -20961,11 +21526,11 @@ function charCodeToBase162(char) {
     return char - (charCodeMap2.a - 10);
   return;
 }
-function hexToBytes5(hex_, opts = {}) {
+function hexToBytes4(hex_, opts = {}) {
   let hex = hex_;
   if (opts.size) {
     assertSize3(hex, { size: opts.size });
-    hex = pad4(hex, { dir: "right", size: opts.size });
+    hex = pad3(hex, { dir: "right", size: opts.size });
   }
   let hexString = hex.slice(2);
   if (hexString.length % 2)
@@ -20982,15 +21547,15 @@ function hexToBytes5(hex_, opts = {}) {
   }
   return bytes;
 }
-function numberToBytes3(value, opts) {
-  const hex = numberToHex3(value, opts);
-  return hexToBytes5(hex);
+function numberToBytes2(value, opts) {
+  const hex = numberToHex2(value, opts);
+  return hexToBytes4(hex);
 }
-function stringToBytes3(value, opts = {}) {
+function stringToBytes2(value, opts = {}) {
   const bytes = encoder4.encode(value);
   if (typeof opts.size === "number") {
     assertSize3(bytes, { size: opts.size });
-    return pad4(bytes, { dir: "right", size: opts.size });
+    return pad3(bytes, { dir: "right", size: opts.size });
   }
   return bytes;
 }
@@ -21016,7 +21581,7 @@ var rotlSL2 = (h, l, s) => l << s | h >>> 32 - s;
 var rotlBH2 = (h, l, s) => l << s - 32 | h >>> 64 - s;
 var rotlBL2 = (h, l, s) => h << s - 32 | l >>> 64 - s;
 /*! noble-hashes - MIT License (c) 2022 Paul Miller (paulmillr.com) */
-function isBytes5(a) {
+function isBytes4(a) {
   return a instanceof Uint8Array || ArrayBuffer.isView(a) && a.constructor.name === "Uint8Array";
 }
 function anumber2(n) {
@@ -21024,7 +21589,7 @@ function anumber2(n) {
     throw new Error("positive integer expected, got " + n);
 }
 function abytes3(b, ...lengths) {
-  if (!isBytes5(b))
+  if (!isBytes4(b))
     throw new Error("Uint8Array expected");
   if (lengths.length > 0 && !lengths.includes(b.length))
     throw new Error("Uint8Array expected of length " + lengths + ", got length=" + b.length);
@@ -21066,7 +21631,7 @@ function utf8ToBytes3(str) {
     throw new Error("string expected");
   return new Uint8Array(new TextEncoder().encode(str));
 }
-function toBytes5(data) {
+function toBytes4(data) {
   if (typeof data === "string")
     data = utf8ToBytes3(data);
   abytes3(data);
@@ -21076,7 +21641,7 @@ function toBytes5(data) {
 class Hash2 {
 }
 function createHasher2(hashCons) {
-  const hashC = (msg) => hashCons().update(toBytes5(msg)).digest();
+  const hashC = (msg) => hashCons().update(toBytes4(msg)).digest();
   const tmp = hashCons();
   hashC.outputLen = tmp.outputLen;
   hashC.blockLen = tmp.blockLen;
@@ -21181,7 +21746,7 @@ class Keccak2 extends Hash2 {
   }
   update(data) {
     aexists2(this);
-    data = toBytes5(data);
+    data = toBytes4(data);
     abytes3(data);
     const { blockLen, state } = this;
     const len = data.length;
@@ -21262,155 +21827,12 @@ class Keccak2 extends Hash2 {
 }
 var gen2 = (suffix, blockLen, outputLen) => createHasher2(() => new Keccak2(blockLen, suffix, outputLen));
 var keccak_2562 = /* @__PURE__ */ (() => gen2(1, 136, 256 / 8))();
-function keccak2563(value, to_) {
+function keccak2562(value, to_) {
   const to = to_ || "hex";
-  const bytes = keccak_2562(isHex4(value, { strict: false }) ? toBytes4(value) : value);
+  const bytes = keccak_2562(isHex3(value, { strict: false }) ? toBytes3(value) : value);
   if (to === "bytes")
     return bytes;
-  return toHex3(bytes);
-}
-var hash = (value) => keccak2563(toBytes4(value));
-function hashSignature(sig) {
-  return hash(sig);
-}
-function execTyped(regex, string) {
-  const match = regex.exec(string);
-  return match?.groups;
-}
-var tupleRegex = /^tuple(?<array>(\[(\d*)\])*)$/;
-function formatAbiParameter(abiParameter) {
-  let type = abiParameter.type;
-  if (tupleRegex.test(abiParameter.type) && "components" in abiParameter) {
-    type = "(";
-    const length = abiParameter.components.length;
-    for (let i = 0;i < length; i++) {
-      const component = abiParameter.components[i];
-      type += formatAbiParameter(component);
-      if (i < length - 1)
-        type += ", ";
-    }
-    const result = execTyped(tupleRegex, abiParameter.type);
-    type += `)${result?.array ?? ""}`;
-    return formatAbiParameter({
-      ...abiParameter,
-      type
-    });
-  }
-  if ("indexed" in abiParameter && abiParameter.indexed)
-    type = `${type} indexed`;
-  if (abiParameter.name)
-    return `${type} ${abiParameter.name}`;
-  return type;
-}
-function formatAbiParameters(abiParameters) {
-  let params = "";
-  const length = abiParameters.length;
-  for (let i = 0;i < length; i++) {
-    const abiParameter = abiParameters[i];
-    params += formatAbiParameter(abiParameter);
-    if (i !== length - 1)
-      params += ", ";
-  }
-  return params;
-}
-function formatAbiItem2(abiItem) {
-  if (abiItem.type === "function")
-    return `function ${abiItem.name}(${formatAbiParameters(abiItem.inputs)})${abiItem.stateMutability && abiItem.stateMutability !== "nonpayable" ? ` ${abiItem.stateMutability}` : ""}${abiItem.outputs?.length ? ` returns (${formatAbiParameters(abiItem.outputs)})` : ""}`;
-  if (abiItem.type === "event")
-    return `event ${abiItem.name}(${formatAbiParameters(abiItem.inputs)})`;
-  if (abiItem.type === "error")
-    return `error ${abiItem.name}(${formatAbiParameters(abiItem.inputs)})`;
-  if (abiItem.type === "constructor")
-    return `constructor(${formatAbiParameters(abiItem.inputs)})${abiItem.stateMutability === "payable" ? " payable" : ""}`;
-  if (abiItem.type === "fallback")
-    return `fallback() external${abiItem.stateMutability === "payable" ? " payable" : ""}`;
-  return "receive() external payable";
-}
-function normalizeSignature(signature) {
-  let active = true;
-  let current = "";
-  let level = 0;
-  let result = "";
-  let valid = false;
-  for (let i = 0;i < signature.length; i++) {
-    const char = signature[i];
-    if (["(", ")", ","].includes(char))
-      active = true;
-    if (char === "(")
-      level++;
-    if (char === ")")
-      level--;
-    if (!active)
-      continue;
-    if (level === 0) {
-      if (char === " " && ["event", "function", ""].includes(result))
-        result = "";
-      else {
-        result += char;
-        if (char === ")") {
-          valid = true;
-          break;
-        }
-      }
-      continue;
-    }
-    if (char === " ") {
-      if (signature[i - 1] !== "," && current !== "," && current !== ",(") {
-        current = "";
-        active = false;
-      }
-      continue;
-    }
-    result += char;
-    current += char;
-  }
-  if (!valid)
-    throw new BaseError5("Unable to normalize signature.");
-  return result;
-}
-var toSignature = (def) => {
-  const def_ = (() => {
-    if (typeof def === "string")
-      return def;
-    return formatAbiItem2(def);
-  })();
-  return normalizeSignature(def_);
-};
-function toSignatureHash(fn) {
-  return hashSignature(toSignature(fn));
-}
-var toEventSelector5 = toSignatureHash;
-
-class NegativeOffsetError extends BaseError5 {
-  constructor({ offset }) {
-    super(`Offset \`${offset}\` cannot be negative.`, {
-      name: "NegativeOffsetError"
-    });
-  }
-}
-
-class PositionOutOfBoundsError extends BaseError5 {
-  constructor({ length, position }) {
-    super(`Position \`${position}\` is out of bounds (\`0 < position < ${length}\`).`, { name: "PositionOutOfBoundsError" });
-  }
-}
-
-class RecursiveReadLimitExceededError extends BaseError5 {
-  constructor({ count, limit }) {
-    super(`Recursive read limit of \`${limit}\` exceeded (recursive read count: \`${count}\`).`, { name: "RecursiveReadLimitExceededError" });
-  }
-}
-
-class InvalidAddressError4 extends BaseError5 {
-  constructor({ address }) {
-    super(`Address "${address}" is invalid.`, {
-      metaMessages: [
-        "- Address must be a hex value of 20 bytes (40 hex characters).",
-        "- Address must match its checksum counterpart."
-      ],
-      name: "InvalidAddressError"
-    });
-  }
+  return toHex2(bytes);
 }
 
 class LruMap2 extends Map {
@@ -21444,7 +21866,7 @@ class LruMap2 extends Map {
 }
 var addressRegex2 = /^0x[a-fA-F0-9]{40}$/;
 var isAddressCache2 = /* @__PURE__ */ new LruMap2(8192);
-function isAddress4(address, options) {
+function isAddress3(address, options) {
   const { strict = true } = options ?? {};
   const cacheKey = `${address}.${strict}`;
   if (isAddressCache2.has(cacheKey))
@@ -21455,18 +21877,18 @@ function isAddress4(address, options) {
     if (address.toLowerCase() === address)
       return true;
     if (strict)
-      return checksumAddress3(address) === address;
+      return checksumAddress2(address) === address;
     return true;
   })();
   isAddressCache2.set(cacheKey, result);
   return result;
 }
 var checksumAddressCache2 = /* @__PURE__ */ new LruMap2(8192);
-function checksumAddress3(address_, chainId) {
+function checksumAddress2(address_, chainId) {
   if (checksumAddressCache2.has(`${address_}.${chainId}`))
     return checksumAddressCache2.get(`${address_}.${chainId}`);
   const hexAddress = chainId ? `${chainId}${address_.toLowerCase()}` : address_.substring(2).toLowerCase();
-  const hash = keccak2563(stringToBytes3(hexAddress), "bytes");
+  const hash = keccak2562(stringToBytes2(hexAddress), "bytes");
   const address = (chainId ? hexAddress.substring(`${chainId}0x`.length) : hexAddress).split("");
   for (let i = 0;i < 40; i += 2) {
     if (hash[i >> 1] >> 4 >= 8 && address[i]) {
@@ -21479,6 +21901,26 @@ function checksumAddress3(address_, chainId) {
   const result = `0x${address.join("")}`;
   checksumAddressCache2.set(`${address_}.${chainId}`, result);
   return result;
+}
+
+class NegativeOffsetError extends BaseError5 {
+  constructor({ offset }) {
+    super(`Offset \`${offset}\` cannot be negative.`, {
+      name: "NegativeOffsetError"
+    });
+  }
+}
+
+class PositionOutOfBoundsError extends BaseError5 {
+  constructor({ length, position }) {
+    super(`Position \`${position}\` is out of bounds (\`0 < position < ${length}\`).`, { name: "PositionOutOfBoundsError" });
+  }
+}
+
+class RecursiveReadLimitExceededError extends BaseError5 {
+  constructor({ count, limit }) {
+    super(`Recursive read limit of \`${limit}\` exceeded (recursive read count: \`${count}\`).`, { name: "RecursiveReadLimitExceededError" });
+  }
 }
 var staticCursor = {
   bytes: new Uint8Array,
@@ -21647,82 +22089,82 @@ function createCursor(bytes, { recursiveReadLimit = 8192 } = {}) {
   cursor.recursiveReadLimit = recursiveReadLimit;
   return cursor;
 }
-function slice3(value, start, end, { strict } = {}) {
-  if (isHex4(value, { strict: false }))
-    return sliceHex3(value, start, end, {
+function slice2(value, start, end, { strict } = {}) {
+  if (isHex3(value, { strict: false }))
+    return sliceHex2(value, start, end, {
       strict
     });
-  return sliceBytes3(value, start, end, {
+  return sliceBytes2(value, start, end, {
     strict
   });
 }
 function assertStartOffset(value, start) {
-  if (typeof start === "number" && start > 0 && start > size4(value) - 1)
-    throw new SliceOffsetOutOfBoundsError3({
+  if (typeof start === "number" && start > 0 && start > size3(value) - 1)
+    throw new SliceOffsetOutOfBoundsError2({
       offset: start,
       position: "start",
-      size: size4(value)
+      size: size3(value)
     });
 }
 function assertEndOffset(value, start, end) {
-  if (typeof start === "number" && typeof end === "number" && size4(value) !== end - start) {
-    throw new SliceOffsetOutOfBoundsError3({
+  if (typeof start === "number" && typeof end === "number" && size3(value) !== end - start) {
+    throw new SliceOffsetOutOfBoundsError2({
       offset: end,
       position: "end",
-      size: size4(value)
+      size: size3(value)
     });
   }
 }
-function sliceBytes3(value_, start, end, { strict } = {}) {
+function sliceBytes2(value_, start, end, { strict } = {}) {
   assertStartOffset(value_, start);
   const value = value_.slice(start, end);
   if (strict)
     assertEndOffset(value, start, end);
   return value;
 }
-function sliceHex3(value_, start, end, { strict } = {}) {
+function sliceHex2(value_, start, end, { strict } = {}) {
   assertStartOffset(value_, start);
   const value = `0x${value_.replace("0x", "").slice((start ?? 0) * 2, (end ?? value_.length) * 2)}`;
   if (strict)
     assertEndOffset(value, start, end);
   return value;
 }
-function bytesToBigInt3(bytes, opts = {}) {
+function bytesToBigInt2(bytes, opts = {}) {
   if (typeof opts.size !== "undefined")
     assertSize3(bytes, { size: opts.size });
-  const hex = bytesToHex5(bytes, opts);
-  return hexToBigInt4(hex, opts);
+  const hex = bytesToHex4(bytes, opts);
+  return hexToBigInt3(hex, opts);
 }
-function bytesToBool3(bytes_, opts = {}) {
+function bytesToBool2(bytes_, opts = {}) {
   let bytes = bytes_;
   if (typeof opts.size !== "undefined") {
     assertSize3(bytes, { size: opts.size });
-    bytes = trim3(bytes);
+    bytes = trim2(bytes);
   }
   if (bytes.length > 1 || bytes[0] > 1)
-    throw new InvalidBytesBooleanError3(bytes);
+    throw new InvalidBytesBooleanError2(bytes);
   return Boolean(bytes[0]);
 }
-function bytesToNumber3(bytes, opts = {}) {
+function bytesToNumber2(bytes, opts = {}) {
   if (typeof opts.size !== "undefined")
     assertSize3(bytes, { size: opts.size });
-  const hex = bytesToHex5(bytes, opts);
-  return hexToNumber5(hex, opts);
+  const hex = bytesToHex4(bytes, opts);
+  return hexToNumber4(hex, opts);
 }
-function bytesToString3(bytes_, opts = {}) {
+function bytesToString2(bytes_, opts = {}) {
   let bytes = bytes_;
   if (typeof opts.size !== "undefined") {
     assertSize3(bytes, { size: opts.size });
-    bytes = trim3(bytes, { dir: "right" });
+    bytes = trim2(bytes, { dir: "right" });
   }
   return new TextDecoder().decode(bytes);
 }
-function concat3(values) {
+function concat2(values) {
   if (typeof values[0] === "string")
-    return concatHex3(values);
-  return concatBytes6(values);
+    return concatHex2(values);
+  return concatBytes5(values);
 }
-function concatBytes6(values) {
+function concatBytes5(values) {
   let length = 0;
   for (const arr of values) {
     length += arr.length;
@@ -21735,13 +22177,13 @@ function concatBytes6(values) {
   }
   return result;
 }
-function concatHex3(values) {
+function concatHex2(values) {
   return `0x${values.reduce((acc, x) => acc + x.replace("0x", ""), "")}`;
 }
-var integerRegex = /^(u?int)(8|16|24|32|40|48|56|64|72|80|88|96|104|112|120|128|136|144|152|160|168|176|184|192|200|208|216|224|232|240|248|256)?$/;
-function encodeAbiParameters3(params, values) {
+var integerRegex2 = /^(u?int)(8|16|24|32|40|48|56|64|72|80|88|96|104|112|120|128|136|144|152|160|168|176|184|192|200|208|216|224|232|240|248|256)?$/;
+function encodeAbiParameters2(params, values) {
   if (params.length !== values.length)
-    throw new AbiEncodingLengthMismatchError3({
+    throw new AbiEncodingLengthMismatchError2({
       expectedLength: params.length,
       givenLength: values.length
     });
@@ -21780,7 +22222,7 @@ function prepareParam({ param, value }) {
   }
   if (param.type.startsWith("uint") || param.type.startsWith("int")) {
     const signed = param.type.startsWith("int");
-    const [, , size = "256"] = integerRegex.exec(param.type) ?? [];
+    const [, , size = "256"] = integerRegex2.exec(param.type) ?? [];
     return encodeNumber(value, {
       signed,
       size: Number(size)
@@ -21792,7 +22234,7 @@ function prepareParam({ param, value }) {
   if (param.type === "string") {
     return encodeString(value);
   }
-  throw new InvalidAbiEncodingTypeError3(param.type, {
+  throw new InvalidAbiEncodingTypeError2(param.type, {
     docsPath: "/docs/contract/encodeAbiParameters"
   });
 }
@@ -21803,7 +22245,7 @@ function encodeParams(preparedParams) {
     if (dynamic)
       staticSize += 32;
     else
-      staticSize += size4(encoded);
+      staticSize += size3(encoded);
   }
   const staticParams = [];
   const dynamicParams = [];
@@ -21811,26 +22253,26 @@ function encodeParams(preparedParams) {
   for (let i = 0;i < preparedParams.length; i++) {
     const { dynamic, encoded } = preparedParams[i];
     if (dynamic) {
-      staticParams.push(numberToHex3(staticSize + dynamicSize, { size: 32 }));
+      staticParams.push(numberToHex2(staticSize + dynamicSize, { size: 32 }));
       dynamicParams.push(encoded);
-      dynamicSize += size4(encoded);
+      dynamicSize += size3(encoded);
     } else {
       staticParams.push(encoded);
     }
   }
-  return concat3([...staticParams, ...dynamicParams]);
+  return concat2([...staticParams, ...dynamicParams]);
 }
 function encodeAddress(value) {
-  if (!isAddress4(value))
-    throw new InvalidAddressError4({ address: value });
-  return { dynamic: false, encoded: padHex4(value.toLowerCase()) };
+  if (!isAddress3(value))
+    throw new InvalidAddressError3({ address: value });
+  return { dynamic: false, encoded: padHex3(value.toLowerCase()) };
 }
 function encodeArray(value, { length, param }) {
   const dynamic = length === null;
   if (!Array.isArray(value))
-    throw new InvalidArrayError3(value);
+    throw new InvalidArrayError2(value);
   if (!dynamic && value.length !== length)
-    throw new AbiEncodingArrayLengthMismatchError3({
+    throw new AbiEncodingArrayLengthMismatchError2({
       expectedLength: length,
       givenLength: value.length,
       type: `${param.type}[${length}]`
@@ -21846,10 +22288,10 @@ function encodeArray(value, { length, param }) {
   if (dynamic || dynamicChild) {
     const data = encodeParams(preparedParams);
     if (dynamic) {
-      const length = numberToHex3(preparedParams.length, { size: 32 });
+      const length = numberToHex2(preparedParams.length, { size: 32 });
       return {
         dynamic: true,
-        encoded: preparedParams.length > 0 ? concat3([length, data]) : length
+        encoded: preparedParams.length > 0 ? concat2([length, data]) : length
       };
     }
     if (dynamicChild)
@@ -21857,42 +22299,42 @@ function encodeArray(value, { length, param }) {
   }
   return {
     dynamic: false,
-    encoded: concat3(preparedParams.map(({ encoded }) => encoded))
+    encoded: concat2(preparedParams.map(({ encoded }) => encoded))
   };
 }
 function encodeBytes(value, { param }) {
   const [, paramSize] = param.type.split("bytes");
-  const bytesSize = size4(value);
+  const bytesSize = size3(value);
   if (!paramSize) {
     let value_ = value;
     if (bytesSize % 32 !== 0)
-      value_ = padHex4(value_, {
+      value_ = padHex3(value_, {
         dir: "right",
         size: Math.ceil((value.length - 2) / 2 / 32) * 32
       });
     return {
       dynamic: true,
-      encoded: concat3([padHex4(numberToHex3(bytesSize, { size: 32 })), value_])
+      encoded: concat2([padHex3(numberToHex2(bytesSize, { size: 32 })), value_])
     };
   }
   if (bytesSize !== Number.parseInt(paramSize))
-    throw new AbiEncodingBytesSizeMismatchError3({
+    throw new AbiEncodingBytesSizeMismatchError2({
       expectedSize: Number.parseInt(paramSize),
       value
     });
-  return { dynamic: false, encoded: padHex4(value, { dir: "right" }) };
+  return { dynamic: false, encoded: padHex3(value, { dir: "right" }) };
 }
 function encodeBool(value) {
   if (typeof value !== "boolean")
     throw new BaseError5(`Invalid boolean value: "${value}" (type: ${typeof value}). Expected: \`true\` or \`false\`.`);
-  return { dynamic: false, encoded: padHex4(boolToHex3(value)) };
+  return { dynamic: false, encoded: padHex3(boolToHex2(value)) };
 }
 function encodeNumber(value, { signed, size = 256 }) {
   if (typeof size === "number") {
     const max = 2n ** (BigInt(size) - (signed ? 1n : 0n)) - 1n;
     const min = signed ? -max - 1n : 0n;
     if (value > max || value < min)
-      throw new IntegerOutOfRangeError4({
+      throw new IntegerOutOfRangeError3({
         max: max.toString(),
         min: min.toString(),
         signed,
@@ -21902,25 +22344,25 @@ function encodeNumber(value, { signed, size = 256 }) {
   }
   return {
     dynamic: false,
-    encoded: numberToHex3(value, {
+    encoded: numberToHex2(value, {
       size: 32,
       signed
     })
   };
 }
 function encodeString(value) {
-  const hexValue = stringToHex3(value);
-  const partsLength = Math.ceil(size4(hexValue) / 32);
+  const hexValue = stringToHex2(value);
+  const partsLength = Math.ceil(size3(hexValue) / 32);
   const parts = [];
   for (let i = 0;i < partsLength; i++) {
-    parts.push(padHex4(slice3(hexValue, i * 32, (i + 1) * 32), {
+    parts.push(padHex3(slice2(hexValue, i * 32, (i + 1) * 32), {
       dir: "right"
     }));
   }
   return {
     dynamic: true,
-    encoded: concat3([
-      padHex4(numberToHex3(size4(hexValue), { size: 32 })),
+    encoded: concat2([
+      padHex3(numberToHex2(size3(hexValue), { size: 32 })),
       ...parts
     ])
   };
@@ -21941,23 +22383,23 @@ function encodeTuple(value, { param }) {
   }
   return {
     dynamic,
-    encoded: dynamic ? encodeParams(preparedParams) : concat3(preparedParams.map(({ encoded }) => encoded))
+    encoded: dynamic ? encodeParams(preparedParams) : concat2(preparedParams.map(({ encoded }) => encoded))
   };
 }
 function getArrayComponents(type) {
   const matches = type.match(/^(.*)\[(\d+)?\]$/);
   return matches ? [matches[2] ? Number(matches[2]) : null, matches[1]] : undefined;
 }
-function decodeAbiParameters3(params, data) {
-  const bytes = typeof data === "string" ? hexToBytes5(data) : data;
+function decodeAbiParameters2(params, data) {
+  const bytes = typeof data === "string" ? hexToBytes4(data) : data;
   const cursor = createCursor(bytes);
-  if (size4(bytes) === 0 && params.length > 0)
-    throw new AbiDecodingZeroDataError3;
-  if (size4(data) && size4(data) < 32)
-    throw new AbiDecodingDataSizeTooSmallError3({
-      data: typeof data === "string" ? data : bytesToHex5(data),
+  if (size3(bytes) === 0 && params.length > 0)
+    throw new AbiDecodingZeroDataError2;
+  if (size3(data) && size3(data) < 32)
+    throw new AbiDecodingDataSizeTooSmallError2({
+      data: typeof data === "string" ? data : bytesToHex4(data),
       params,
-      size: size4(data)
+      size: size3(data)
     });
   let consumed = 0;
   const values = [];
@@ -21990,7 +22432,7 @@ function decodeParameter(cursor, param, { staticPosition }) {
     return decodeNumber(cursor, param);
   if (param.type === "string")
     return decodeString(cursor, { staticPosition });
-  throw new InvalidAbiDecodingTypeError3(param.type, {
+  throw new InvalidAbiDecodingTypeError2(param.type, {
     docsPath: "/docs/contract/decodeAbiParameters"
   });
 }
@@ -21998,15 +22440,15 @@ var sizeOfLength = 32;
 var sizeOfOffset = 32;
 function decodeAddress(cursor) {
   const value = cursor.readBytes(32);
-  return [checksumAddress3(bytesToHex5(sliceBytes3(value, -20))), 32];
+  return [checksumAddress2(bytesToHex4(sliceBytes2(value, -20))), 32];
 }
 function decodeArray(cursor, param, { length, staticPosition }) {
   if (!length) {
-    const offset = bytesToNumber3(cursor.readBytes(sizeOfOffset));
+    const offset = bytesToNumber2(cursor.readBytes(sizeOfOffset));
     const start = staticPosition + offset;
     const startOfData = start + sizeOfLength;
     cursor.setPosition(start);
-    const length = bytesToNumber3(cursor.readBytes(sizeOfLength));
+    const length = bytesToNumber2(cursor.readBytes(sizeOfLength));
     const dynamicChild = hasDynamicChild(param);
     let consumed = 0;
     const value = [];
@@ -22022,7 +22464,7 @@ function decodeArray(cursor, param, { length, staticPosition }) {
     return [value, 32];
   }
   if (hasDynamicChild(param)) {
-    const offset = bytesToNumber3(cursor.readBytes(sizeOfOffset));
+    const offset = bytesToNumber2(cursor.readBytes(sizeOfOffset));
     const start = staticPosition + offset;
     const value = [];
     for (let i = 0;i < length; ++i) {
@@ -22047,23 +22489,23 @@ function decodeArray(cursor, param, { length, staticPosition }) {
   return [value, consumed];
 }
 function decodeBool(cursor) {
-  return [bytesToBool3(cursor.readBytes(32), { size: 32 }), 32];
+  return [bytesToBool2(cursor.readBytes(32), { size: 32 }), 32];
 }
 function decodeBytes(cursor, param, { staticPosition }) {
   const [_, size] = param.type.split("bytes");
   if (!size) {
-    const offset = bytesToNumber3(cursor.readBytes(32));
+    const offset = bytesToNumber2(cursor.readBytes(32));
     cursor.setPosition(staticPosition + offset);
-    const length = bytesToNumber3(cursor.readBytes(32));
+    const length = bytesToNumber2(cursor.readBytes(32));
     if (length === 0) {
       cursor.setPosition(staticPosition + 32);
       return ["0x", 32];
     }
     const data = cursor.readBytes(length);
     cursor.setPosition(staticPosition + 32);
-    return [bytesToHex5(data), 32];
+    return [bytesToHex4(data), 32];
   }
-  const value = bytesToHex5(cursor.readBytes(Number.parseInt(size), 32));
+  const value = bytesToHex4(cursor.readBytes(Number.parseInt(size), 32));
   return [value, 32];
 }
 function decodeNumber(cursor, param) {
@@ -22071,7 +22513,7 @@ function decodeNumber(cursor, param) {
   const size = Number.parseInt(param.type.split("int")[1] || "256");
   const value = cursor.readBytes(32);
   return [
-    size > 48 ? bytesToBigInt3(value, { signed }) : bytesToNumber3(value, { signed }),
+    size > 48 ? bytesToBigInt2(value, { signed }) : bytesToNumber2(value, { signed }),
     32
   ];
 }
@@ -22080,7 +22522,7 @@ function decodeTuple(cursor, param, { staticPosition }) {
   const value = hasUnnamedChild ? [] : {};
   let consumed = 0;
   if (hasDynamicChild(param)) {
-    const offset = bytesToNumber3(cursor.readBytes(sizeOfOffset));
+    const offset = bytesToNumber2(cursor.readBytes(sizeOfOffset));
     const start = staticPosition + offset;
     for (let i = 0;i < param.components.length; ++i) {
       const component = param.components[i];
@@ -22105,16 +22547,16 @@ function decodeTuple(cursor, param, { staticPosition }) {
   return [value, consumed];
 }
 function decodeString(cursor, { staticPosition }) {
-  const offset = bytesToNumber3(cursor.readBytes(32));
+  const offset = bytesToNumber2(cursor.readBytes(32));
   const start = staticPosition + offset;
   cursor.setPosition(start);
-  const length = bytesToNumber3(cursor.readBytes(32));
+  const length = bytesToNumber2(cursor.readBytes(32));
   if (length === 0) {
     cursor.setPosition(staticPosition + 32);
     return ["", 32];
   }
   const data = cursor.readBytes(length, 32);
-  const value = bytesToString3(trim3(data));
+  const value = bytesToString2(trim2(data));
   cursor.setPosition(staticPosition + 32);
   return [value, 32];
 }
@@ -22133,88 +22575,74 @@ function hasDynamicChild(param) {
     return true;
   return false;
 }
-var docsPath = "/docs/contract/decodeEventLog";
-function decodeEventLog3(parameters) {
-  const { abi, data, strict: strict_, topics } = parameters;
-  const strict = strict_ ?? true;
-  const [signature, ...argTopics] = topics;
-  if (!signature)
-    throw new AbiEventSignatureEmptyTopicsError3({ docsPath });
-  const abiItem = abi.find((x) => x.type === "event" && signature === toEventSelector5(formatAbiItem(x)));
-  if (!(abiItem && ("name" in abiItem)) || abiItem.type !== "event")
-    throw new AbiEventSignatureNotFoundError3(signature, { docsPath });
-  const { name, inputs } = abiItem;
-  const isUnnamed = inputs?.some((x) => !(("name" in x) && x.name));
-  const args = isUnnamed ? [] : {};
-  const indexedInputs = inputs.map((x, i) => [x, i]).filter(([x]) => ("indexed" in x) && x.indexed);
-  for (let i = 0;i < indexedInputs.length; i++) {
-    const [param, argIndex] = indexedInputs[i];
-    const topic = argTopics[i];
-    if (!topic)
-      throw new DecodeLogTopicsMismatch3({
-        abiItem,
-        param
-      });
-    args[isUnnamed ? argIndex : param.name || argIndex] = decodeTopic({
-      param,
-      value: topic
-    });
-  }
-  const nonIndexedInputs = inputs.filter((x) => !(("indexed" in x) && x.indexed));
-  if (nonIndexedInputs.length > 0) {
-    if (data && data !== "0x") {
-      try {
-        const decodedData = decodeAbiParameters3(nonIndexedInputs, data);
-        if (decodedData) {
-          if (isUnnamed)
-            for (let i = 0;i < inputs.length; i++)
-              args[i] = args[i] ?? decodedData.shift();
-          else
-            for (let i = 0;i < nonIndexedInputs.length; i++)
-              args[nonIndexedInputs[i].name] = decodedData[i];
-        }
-      } catch (err) {
-        if (strict) {
-          if (err instanceof AbiDecodingDataSizeTooSmallError3 || err instanceof PositionOutOfBoundsError)
-            throw new DecodeLogDataMismatch3({
-              abiItem,
-              data,
-              params: nonIndexedInputs,
-              size: size4(data)
-            });
-          throw err;
+var hash = (value) => keccak2562(toBytes3(value));
+function hashSignature(sig) {
+  return hash(sig);
+}
+function normalizeSignature(signature) {
+  let active = true;
+  let current = "";
+  let level = 0;
+  let result = "";
+  let valid = false;
+  for (let i = 0;i < signature.length; i++) {
+    const char = signature[i];
+    if (["(", ")", ","].includes(char))
+      active = true;
+    if (char === "(")
+      level++;
+    if (char === ")")
+      level--;
+    if (!active)
+      continue;
+    if (level === 0) {
+      if (char === " " && ["event", "function", ""].includes(result))
+        result = "";
+      else {
+        result += char;
+        if (char === ")") {
+          valid = true;
+          break;
         }
       }
-    } else if (strict) {
-      throw new DecodeLogDataMismatch3({
-        abiItem,
-        data: "0x",
-        params: nonIndexedInputs,
-        size: 0
-      });
+      continue;
     }
+    if (char === " ") {
+      if (signature[i - 1] !== "," && current !== "," && current !== ",(") {
+        current = "";
+        active = false;
+      }
+      continue;
+    }
+    result += char;
+    current += char;
   }
-  return {
-    eventName: name,
-    args: Object.values(args).length > 0 ? args : undefined
-  };
+  if (!valid)
+    throw new BaseError5("Unable to normalize signature.");
+  return result;
 }
-function decodeTopic({ param, value }) {
-  if (param.type === "string" || param.type === "bytes" || param.type === "tuple" || param.type.match(/^(.*)\[(\d+)?\]$/))
-    return value;
-  const decodedArg = decodeAbiParameters3([param], value) || [];
-  return decodedArg[0];
+var toSignature = (def) => {
+  const def_ = (() => {
+    if (typeof def === "string")
+      return def;
+    return formatAbiItem(def);
+  })();
+  return normalizeSignature(def_);
+};
+function toSignatureHash(fn) {
+  return hashSignature(toSignature(fn));
 }
-var toFunctionSelector5 = (fn) => slice3(toSignatureHash(fn), 0, 4);
-function getAbiItem3(parameters) {
+var toEventSelector3 = toSignatureHash;
+var toFunctionSelector3 = (fn) => slice2(toSignatureHash(fn), 0, 4);
+function getAbiItem2(parameters) {
   const { abi, args = [], name } = parameters;
-  const isSelector = isHex4(name, { strict: false });
+  const isSelector = isHex3(name, { strict: false });
   const abiItems = abi.filter((abiItem) => {
     if (isSelector) {
       if (abiItem.type === "function")
-        return toFunctionSelector5(abiItem) === name;
+        return toFunctionSelector3(abiItem) === name;
       if (abiItem.type === "event")
-        return toEventSelector5(abiItem) === name;
+        return toEventSelector3(abiItem) === name;
       return false;
     }
     return "name" in abiItem && abiItem.name === name;
@@ -22268,7 +22696,7 @@ function isArgOfType(arg, abiParameter) {
   const abiParameterType = abiParameter.type;
   switch (abiParameterType) {
     case "address":
-      return isAddress4(arg, { strict: false });
+      return isAddress3(arg, { strict: false });
     case "bool":
       return argType === "boolean";
     case "function":
@@ -22305,9 +22733,9 @@ function getAmbiguousTypes(sourceParameters, targetParameters, args) {
       if (types.includes("address") && types.includes("bytes20"))
         return true;
       if (types.includes("address") && types.includes("string"))
-        return isAddress4(args[parameterIndex], { strict: false });
+        return isAddress3(args[parameterIndex], { strict: false });
       if (types.includes("address") && types.includes("bytes"))
-        return isAddress4(args[parameterIndex], { strict: false });
+        return isAddress3(args[parameterIndex], { strict: false });
       return false;
     })();
     if (ambiguous)
@@ -22315,13950 +22743,289 @@ function getAmbiguousTypes(sourceParameters, targetParameters, args) {
   }
   return;
 }
-var docsPath2 = "/docs/contract/decodeFunctionResult";
-function decodeFunctionResult3(parameters) {
+var docsPath = "/docs/contract/decodeFunctionResult";
+function decodeFunctionResult2(parameters) {
   const { abi, args, functionName, data } = parameters;
   let abiItem = abi[0];
   if (functionName) {
-    const item = getAbiItem3({ abi, args, name: functionName });
+    const item = getAbiItem2({ abi, args, name: functionName });
     if (!item)
-      throw new AbiFunctionNotFoundError3(functionName, { docsPath: docsPath2 });
+      throw new AbiFunctionNotFoundError2(functionName, { docsPath });
     abiItem = item;
   }
   if (abiItem.type !== "function")
-    throw new AbiFunctionNotFoundError3(undefined, { docsPath: docsPath2 });
+    throw new AbiFunctionNotFoundError2(undefined, { docsPath });
   if (!abiItem.outputs)
-    throw new AbiFunctionOutputsNotFoundError3(abiItem.name, { docsPath: docsPath2 });
-  const values = decodeAbiParameters3(abiItem.outputs, data);
+    throw new AbiFunctionOutputsNotFoundError2(abiItem.name, { docsPath });
+  const values = decodeAbiParameters2(abiItem.outputs, data);
   if (values && values.length > 1)
     return values;
   if (values && values.length === 1)
     return values[0];
   return;
 }
-
-class FilterTypeNotSupportedError3 extends BaseError5 {
-  constructor(type) {
-    super(`Filter type "${type}" is not supported.`, {
-      name: "FilterTypeNotSupportedError"
-    });
-  }
-}
-var docsPath3 = "/docs/contract/encodeEventTopics";
-function encodeEventTopics3(parameters) {
-  const { abi, eventName, args } = parameters;
-  let abiItem = abi[0];
-  if (eventName) {
-    const item = getAbiItem3({ abi, name: eventName });
-    if (!item)
-      throw new AbiEventNotFoundError3(eventName, { docsPath: docsPath3 });
-    abiItem = item;
-  }
-  if (abiItem.type !== "event")
-    throw new AbiEventNotFoundError3(undefined, { docsPath: docsPath3 });
-  const definition = formatAbiItem(abiItem);
-  const signature = toEventSelector5(definition);
-  let topics = [];
-  if (args && "inputs" in abiItem) {
-    const indexedInputs = abiItem.inputs?.filter((param) => ("indexed" in param) && param.indexed);
-    const args_ = Array.isArray(args) ? args : Object.values(args).length > 0 ? indexedInputs?.map((x) => args[x.name]) ?? [] : [];
-    if (args_.length > 0) {
-      topics = indexedInputs?.map((param, i) => {
-        if (Array.isArray(args_[i]))
-          return args_[i].map((_, j) => encodeArg({ param, value: args_[i][j] }));
-        return typeof args_[i] !== "undefined" && args_[i] !== null ? encodeArg({ param, value: args_[i] }) : null;
-      }) ?? [];
-    }
-  }
-  return [signature, ...topics];
-}
-function encodeArg({ param, value }) {
-  if (param.type === "string" || param.type === "bytes")
-    return keccak2563(toBytes4(value));
-  if (param.type === "tuple" || param.type.match(/^(.*)\[(\d+)?\]$/))
-    throw new FilterTypeNotSupportedError3(param.type);
-  return encodeAbiParameters3([param], [value]);
-}
-var docsPath4 = "/docs/contract/encodeFunctionData";
-function prepareEncodeFunctionData3(parameters) {
+var docsPath2 = "/docs/contract/encodeFunctionData";
+function prepareEncodeFunctionData2(parameters) {
   const { abi, args, functionName } = parameters;
   let abiItem = abi[0];
   if (functionName) {
-    const item = getAbiItem3({
+    const item = getAbiItem2({
       abi,
       args,
       name: functionName
     });
     if (!item)
-      throw new AbiFunctionNotFoundError3(functionName, { docsPath: docsPath4 });
+      throw new AbiFunctionNotFoundError2(functionName, { docsPath: docsPath2 });
     abiItem = item;
   }
   if (abiItem.type !== "function")
-    throw new AbiFunctionNotFoundError3(undefined, { docsPath: docsPath4 });
+    throw new AbiFunctionNotFoundError2(undefined, { docsPath: docsPath2 });
   return {
     abi: [abiItem],
-    functionName: toFunctionSelector5(formatAbiItem(abiItem))
+    functionName: toFunctionSelector3(formatAbiItem2(abiItem))
   };
 }
-function encodeFunctionData3(parameters) {
+function encodeFunctionData2(parameters) {
   const { args } = parameters;
   const { abi, functionName } = (() => {
     if (parameters.abi.length === 1 && parameters.functionName?.startsWith("0x"))
       return parameters;
-    return prepareEncodeFunctionData3(parameters);
+    return prepareEncodeFunctionData2(parameters);
   })();
   const abiItem = abi[0];
   const signature = functionName;
-  const data = "inputs" in abiItem && abiItem.inputs ? encodeAbiParameters3(abiItem.inputs, args ?? []) : undefined;
-  return concatHex3([signature, data ?? "0x"]);
-}
-var Canceled2 = 1;
-var Unknown2 = 2;
-var InvalidArgument2 = 3;
-var DeadlineExceeded2 = 4;
-var NotFound2 = 5;
-var AlreadyExists2 = 6;
-var PermissionDenied2 = 7;
-var ResourceExhausted2 = 8;
-var FailedPrecondition2 = 9;
-var Aborted2 = 10;
-var OutOfRange2 = 11;
-var Unimplemented2 = 12;
-var Internal2 = 13;
-var Unavailable2 = 14;
-var DataLoss2 = 15;
-var Unauthenticated2 = 16;
-var ConsensusFailed2 = 100;
-var LimitExceeded2 = 101;
-var InsufficientObservations2 = 102;
-var errorCodeToString2 = new Map([
-  [Canceled2, "Canceled"],
-  [Unknown2, "Unknown"],
-  [InvalidArgument2, "InvalidArgument"],
-  [DeadlineExceeded2, "DeadlineExceeded"],
-  [NotFound2, "NotFound"],
-  [AlreadyExists2, "AlreadyExists"],
-  [PermissionDenied2, "PermissionDenied"],
-  [ResourceExhausted2, "ResourceExhausted"],
-  [FailedPrecondition2, "FailedPrecondition"],
-  [Aborted2, "Aborted"],
-  [OutOfRange2, "OutOfRange"],
-  [Unimplemented2, "Unimplemented"],
-  [Internal2, "Internal"],
-  [Unavailable2, "Unavailable"],
-  [DataLoss2, "DataLoss"],
-  [Unauthenticated2, "Unauthenticated"],
-  [ConsensusFailed2, "ConsensusFailed"],
-  [LimitExceeded2, "LimitExceeded"],
-  [InsufficientObservations2, "InsufficientObservations"]
-]);
-var stringToErrorCode2 = new Map(Array.from(errorCodeToString2.entries()).map(([code, name]) => [name, code]));
-function isMessage2(arg, schema) {
-  const isMessage = arg !== null && typeof arg == "object" && "$typeName" in arg && typeof arg.$typeName == "string";
-  if (!isMessage) {
-    return false;
-  }
-  if (schema === undefined) {
-    return true;
-  }
-  return schema.typeName === arg.$typeName;
-}
-var ScalarType2;
-(function(ScalarType) {
-  ScalarType[ScalarType["DOUBLE"] = 1] = "DOUBLE";
-  ScalarType[ScalarType["FLOAT"] = 2] = "FLOAT";
-  ScalarType[ScalarType["INT64"] = 3] = "INT64";
-  ScalarType[ScalarType["UINT64"] = 4] = "UINT64";
-  ScalarType[ScalarType["INT32"] = 5] = "INT32";
-  ScalarType[ScalarType["FIXED64"] = 6] = "FIXED64";
-  ScalarType[ScalarType["FIXED32"] = 7] = "FIXED32";
-  ScalarType[ScalarType["BOOL"] = 8] = "BOOL";
-  ScalarType[ScalarType["STRING"] = 9] = "STRING";
-  ScalarType[ScalarType["BYTES"] = 12] = "BYTES";
-  ScalarType[ScalarType["UINT32"] = 13] = "UINT32";
-  ScalarType[ScalarType["SFIXED32"] = 15] = "SFIXED32";
-  ScalarType[ScalarType["SFIXED64"] = 16] = "SFIXED64";
-  ScalarType[ScalarType["SINT32"] = 17] = "SINT32";
-  ScalarType[ScalarType["SINT64"] = 18] = "SINT64";
-})(ScalarType2 || (ScalarType2 = {}));
-function varint64read2() {
-  let lowBits = 0;
-  let highBits = 0;
-  for (let shift = 0;shift < 28; shift += 7) {
-    let b = this.buf[this.pos++];
-    lowBits |= (b & 127) << shift;
-    if ((b & 128) == 0) {
-      this.assertBounds();
-      return [lowBits, highBits];
-    }
-  }
-  let middleByte = this.buf[this.pos++];
-  lowBits |= (middleByte & 15) << 28;
-  highBits = (middleByte & 112) >> 4;
-  if ((middleByte & 128) == 0) {
-    this.assertBounds();
-    return [lowBits, highBits];
-  }
-  for (let shift = 3;shift <= 31; shift += 7) {
-    let b = this.buf[this.pos++];
-    highBits |= (b & 127) << shift;
-    if ((b & 128) == 0) {
-      this.assertBounds();
-      return [lowBits, highBits];
-    }
-  }
-  throw new Error("invalid varint");
-}
-function varint64write2(lo, hi, bytes) {
-  for (let i = 0;i < 28; i = i + 7) {
-    const shift = lo >>> i;
-    const hasNext = !(shift >>> 7 == 0 && hi == 0);
-    const byte = (hasNext ? shift | 128 : shift) & 255;
-    bytes.push(byte);
-    if (!hasNext) {
-      return;
-    }
-  }
-  const splitBits = lo >>> 28 & 15 | (hi & 7) << 4;
-  const hasMoreBits = !(hi >> 3 == 0);
-  bytes.push((hasMoreBits ? splitBits | 128 : splitBits) & 255);
-  if (!hasMoreBits) {
-    return;
-  }
-  for (let i = 3;i < 31; i = i + 7) {
-    const shift = hi >>> i;
-    const hasNext = !(shift >>> 7 == 0);
-    const byte = (hasNext ? shift | 128 : shift) & 255;
-    bytes.push(byte);
-    if (!hasNext) {
-      return;
-    }
-  }
-  bytes.push(hi >>> 31 & 1);
-}
-var TWO_PWR_32_DBL2 = 4294967296;
-function int64FromString2(dec) {
-  const minus = dec[0] === "-";
-  if (minus) {
-    dec = dec.slice(1);
-  }
-  const base = 1e6;
-  let lowBits = 0;
-  let highBits = 0;
-  function add1e6digit(begin, end) {
-    const digit1e6 = Number(dec.slice(begin, end));
-    highBits *= base;
-    lowBits = lowBits * base + digit1e6;
-    if (lowBits >= TWO_PWR_32_DBL2) {
-      highBits = highBits + (lowBits / TWO_PWR_32_DBL2 | 0);
-      lowBits = lowBits % TWO_PWR_32_DBL2;
-    }
-  }
-  add1e6digit(-24, -18);
-  add1e6digit(-18, -12);
-  add1e6digit(-12, -6);
-  add1e6digit(-6);
-  return minus ? negate2(lowBits, highBits) : newBits2(lowBits, highBits);
-}
-function int64ToString2(lo, hi) {
-  let bits = newBits2(lo, hi);
-  const negative = bits.hi & 2147483648;
-  if (negative) {
-    bits = negate2(bits.lo, bits.hi);
-  }
-  const result = uInt64ToString2(bits.lo, bits.hi);
-  return negative ? "-" + result : result;
-}
-function uInt64ToString2(lo, hi) {
-  ({ lo, hi } = toUnsigned2(lo, hi));
-  if (hi <= 2097151) {
-    return String(TWO_PWR_32_DBL2 * hi + lo);
-  }
-  const low = lo & 16777215;
-  const mid = (lo >>> 24 | hi << 8) & 16777215;
-  const high = hi >> 16 & 65535;
-  let digitA = low + mid * 6777216 + high * 6710656;
-  let digitB = mid + high * 8147497;
-  let digitC = high * 2;
-  const base = 1e7;
-  if (digitA >= base) {
-    digitB += Math.floor(digitA / base);
-    digitA %= base;
-  }
-  if (digitB >= base) {
-    digitC += Math.floor(digitB / base);
-    digitB %= base;
-  }
-  return digitC.toString() + decimalFrom1e7WithLeadingZeros2(digitB) + decimalFrom1e7WithLeadingZeros2(digitA);
-}
-function toUnsigned2(lo, hi) {
-  return { lo: lo >>> 0, hi: hi >>> 0 };
-}
-function newBits2(lo, hi) {
-  return { lo: lo | 0, hi: hi | 0 };
-}
-function negate2(lowBits, highBits) {
-  highBits = ~highBits;
-  if (lowBits) {
-    lowBits = ~lowBits + 1;
-  } else {
-    highBits += 1;
-  }
-  return newBits2(lowBits, highBits);
-}
-var decimalFrom1e7WithLeadingZeros2 = (digit1e7) => {
-  const partial = String(digit1e7);
-  return "0000000".slice(partial.length) + partial;
-};
-function varint32write2(value, bytes) {
-  if (value >= 0) {
-    while (value > 127) {
-      bytes.push(value & 127 | 128);
-      value = value >>> 7;
-    }
-    bytes.push(value);
-  } else {
-    for (let i = 0;i < 9; i++) {
-      bytes.push(value & 127 | 128);
-      value = value >> 7;
-    }
-    bytes.push(1);
-  }
-}
-function varint32read2() {
-  let b = this.buf[this.pos++];
-  let result = b & 127;
-  if ((b & 128) == 0) {
-    this.assertBounds();
-    return result;
-  }
-  b = this.buf[this.pos++];
-  result |= (b & 127) << 7;
-  if ((b & 128) == 0) {
-    this.assertBounds();
-    return result;
-  }
-  b = this.buf[this.pos++];
-  result |= (b & 127) << 14;
-  if ((b & 128) == 0) {
-    this.assertBounds();
-    return result;
-  }
-  b = this.buf[this.pos++];
-  result |= (b & 127) << 21;
-  if ((b & 128) == 0) {
-    this.assertBounds();
-    return result;
-  }
-  b = this.buf[this.pos++];
-  result |= (b & 15) << 28;
-  for (let readBytes = 5;(b & 128) !== 0 && readBytes < 10; readBytes++)
-    b = this.buf[this.pos++];
-  if ((b & 128) != 0)
-    throw new Error("invalid varint");
-  this.assertBounds();
-  return result >>> 0;
-}
-var protoInt642 = /* @__PURE__ */ makeInt64Support2();
-function makeInt64Support2() {
-  const dv = new DataView(new ArrayBuffer(8));
-  const ok = typeof BigInt === "function" && typeof dv.getBigInt64 === "function" && typeof dv.getBigUint64 === "function" && typeof dv.setBigInt64 === "function" && typeof dv.setBigUint64 === "function" && (typeof process != "object" || typeof process.env != "object" || process.env.BUF_BIGINT_DISABLE !== "1");
-  if (ok) {
-    const MIN = BigInt("-9223372036854775808");
-    const MAX = BigInt("9223372036854775807");
-    const UMIN = BigInt("0");
-    const UMAX = BigInt("18446744073709551615");
-    return {
-      zero: BigInt(0),
-      supported: true,
-      parse(value) {
-        const bi = typeof value == "bigint" ? value : BigInt(value);
-        if (bi > MAX || bi < MIN) {
-          throw new Error(`invalid int64: ${value}`);
-        }
-        return bi;
-      },
-      uParse(value) {
-        const bi = typeof value == "bigint" ? value : BigInt(value);
-        if (bi > UMAX || bi < UMIN) {
-          throw new Error(`invalid uint64: ${value}`);
-        }
-        return bi;
-      },
-      enc(value) {
-        dv.setBigInt64(0, this.parse(value), true);
-        return {
-          lo: dv.getInt32(0, true),
-          hi: dv.getInt32(4, true)
-        };
-      },
-      uEnc(value) {
-        dv.setBigInt64(0, this.uParse(value), true);
-        return {
-          lo: dv.getInt32(0, true),
-          hi: dv.getInt32(4, true)
-        };
-      },
-      dec(lo, hi) {
-        dv.setInt32(0, lo, true);
-        dv.setInt32(4, hi, true);
-        return dv.getBigInt64(0, true);
-      },
-      uDec(lo, hi) {
-        dv.setInt32(0, lo, true);
-        dv.setInt32(4, hi, true);
-        return dv.getBigUint64(0, true);
-      }
-    };
-  }
-  return {
-    zero: "0",
-    supported: false,
-    parse(value) {
-      if (typeof value != "string") {
-        value = value.toString();
-      }
-      assertInt64String2(value);
-      return value;
-    },
-    uParse(value) {
-      if (typeof value != "string") {
-        value = value.toString();
-      }
-      assertUInt64String2(value);
-      return value;
-    },
-    enc(value) {
-      if (typeof value != "string") {
-        value = value.toString();
-      }
-      assertInt64String2(value);
-      return int64FromString2(value);
-    },
-    uEnc(value) {
-      if (typeof value != "string") {
-        value = value.toString();
-      }
-      assertUInt64String2(value);
-      return int64FromString2(value);
-    },
-    dec(lo, hi) {
-      return int64ToString2(lo, hi);
-    },
-    uDec(lo, hi) {
-      return uInt64ToString2(lo, hi);
-    }
-  };
-}
-function assertInt64String2(value) {
-  if (!/^-?[0-9]+$/.test(value)) {
-    throw new Error("invalid int64: " + value);
-  }
-}
-function assertUInt64String2(value) {
-  if (!/^[0-9]+$/.test(value)) {
-    throw new Error("invalid uint64: " + value);
-  }
-}
-function scalarZeroValue2(type, longAsString) {
-  switch (type) {
-    case ScalarType2.STRING:
-      return "";
-    case ScalarType2.BOOL:
-      return false;
-    case ScalarType2.DOUBLE:
-    case ScalarType2.FLOAT:
-      return 0;
-    case ScalarType2.INT64:
-    case ScalarType2.UINT64:
-    case ScalarType2.SFIXED64:
-    case ScalarType2.FIXED64:
-    case ScalarType2.SINT64:
-      return longAsString ? "0" : protoInt642.zero;
-    case ScalarType2.BYTES:
-      return new Uint8Array(0);
-    default:
-      return 0;
-  }
-}
-function isScalarZeroValue2(type, value) {
-  switch (type) {
-    case ScalarType2.BOOL:
-      return value === false;
-    case ScalarType2.STRING:
-      return value === "";
-    case ScalarType2.BYTES:
-      return value instanceof Uint8Array && !value.byteLength;
-    default:
-      return value == 0;
-  }
-}
-var IMPLICIT4 = 2;
-var unsafeLocal2 = Symbol.for("reflect unsafe local");
-function unsafeOneofCase2(target, oneof) {
-  const c = target[oneof.localName].case;
-  if (c === undefined) {
-    return c;
-  }
-  return oneof.fields.find((f) => f.localName === c);
-}
-function unsafeIsSet2(target, field) {
-  const name = field.localName;
-  if (field.oneof) {
-    return target[field.oneof.localName].case === name;
-  }
-  if (field.presence != IMPLICIT4) {
-    return target[name] !== undefined && Object.prototype.hasOwnProperty.call(target, name);
-  }
-  switch (field.fieldKind) {
-    case "list":
-      return target[name].length > 0;
-    case "map":
-      return Object.keys(target[name]).length > 0;
-    case "scalar":
-      return !isScalarZeroValue2(field.scalar, target[name]);
-    case "enum":
-      return target[name] !== field.enum.values[0].number;
-  }
-  throw new Error("message field with implicit presence");
-}
-function unsafeIsSetExplicit2(target, localName) {
-  return Object.prototype.hasOwnProperty.call(target, localName) && target[localName] !== undefined;
-}
-function unsafeGet2(target, field) {
-  if (field.oneof) {
-    const oneof = target[field.oneof.localName];
-    if (oneof.case === field.localName) {
-      return oneof.value;
-    }
-    return;
-  }
-  return target[field.localName];
-}
-function unsafeSet2(target, field, value) {
-  if (field.oneof) {
-    target[field.oneof.localName] = {
-      case: field.localName,
-      value
-    };
-  } else {
-    target[field.localName] = value;
-  }
-}
-function unsafeClear2(target, field) {
-  const name = field.localName;
-  if (field.oneof) {
-    const oneofLocalName = field.oneof.localName;
-    if (target[oneofLocalName].case === name) {
-      target[oneofLocalName] = { case: undefined };
-    }
-  } else if (field.presence != IMPLICIT4) {
-    delete target[name];
-  } else {
-    switch (field.fieldKind) {
-      case "map":
-        target[name] = {};
-        break;
-      case "list":
-        target[name] = [];
-        break;
-      case "enum":
-        target[name] = field.enum.values[0].number;
-        break;
-      case "scalar":
-        target[name] = scalarZeroValue2(field.scalar, field.longAsString);
-        break;
-    }
-  }
-}
-function isObject2(arg) {
-  return arg !== null && typeof arg == "object" && !Array.isArray(arg);
-}
-function isReflectList2(arg, field) {
-  var _a, _b, _c, _d;
-  if (isObject2(arg) && unsafeLocal2 in arg && "add" in arg && "field" in arg && typeof arg.field == "function") {
-    if (field !== undefined) {
-      const a = field;
-      const b = arg.field();
-      return a.listKind == b.listKind && a.scalar === b.scalar && ((_a = a.message) === null || _a === undefined ? undefined : _a.typeName) === ((_b = b.message) === null || _b === undefined ? undefined : _b.typeName) && ((_c = a.enum) === null || _c === undefined ? undefined : _c.typeName) === ((_d = b.enum) === null || _d === undefined ? undefined : _d.typeName);
-    }
-    return true;
-  }
-  return false;
-}
-function isReflectMap2(arg, field) {
-  var _a, _b, _c, _d;
-  if (isObject2(arg) && unsafeLocal2 in arg && "has" in arg && "field" in arg && typeof arg.field == "function") {
-    if (field !== undefined) {
-      const a = field, b = arg.field();
-      return a.mapKey === b.mapKey && a.mapKind == b.mapKind && a.scalar === b.scalar && ((_a = a.message) === null || _a === undefined ? undefined : _a.typeName) === ((_b = b.message) === null || _b === undefined ? undefined : _b.typeName) && ((_c = a.enum) === null || _c === undefined ? undefined : _c.typeName) === ((_d = b.enum) === null || _d === undefined ? undefined : _d.typeName);
-    }
-    return true;
-  }
-  return false;
-}
-function isReflectMessage2(arg, messageDesc) {
-  return isObject2(arg) && unsafeLocal2 in arg && "desc" in arg && isObject2(arg.desc) && arg.desc.kind === "message" && (messageDesc === undefined || arg.desc.typeName == messageDesc.typeName);
-}
-function isWrapper2(arg) {
-  return isWrapperTypeName2(arg.$typeName);
-}
-function isWrapperDesc2(messageDesc) {
-  const f = messageDesc.fields[0];
-  return isWrapperTypeName2(messageDesc.typeName) && f !== undefined && f.fieldKind == "scalar" && f.name == "value" && f.number == 1;
-}
-function isWrapperTypeName2(name) {
-  return name.startsWith("google.protobuf.") && [
-    "DoubleValue",
-    "FloatValue",
-    "Int64Value",
-    "UInt64Value",
-    "Int32Value",
-    "UInt32Value",
-    "BoolValue",
-    "StringValue",
-    "BytesValue"
-  ].includes(name.substring(16));
-}
-var EDITION_PROTO33 = 999;
-var EDITION_PROTO23 = 998;
-var IMPLICIT5 = 2;
-function create3(schema, init) {
-  if (isMessage2(init, schema)) {
-    return init;
-  }
-  const message = createZeroMessage2(schema);
-  if (init !== undefined) {
-    initMessage2(schema, message, init);
-  }
-  return message;
-}
-function initMessage2(messageDesc, message, init) {
-  for (const member of messageDesc.members) {
-    let value = init[member.localName];
-    if (value == null) {
-      continue;
-    }
-    let field;
-    if (member.kind == "oneof") {
-      const oneofField = unsafeOneofCase2(init, member);
-      if (!oneofField) {
-        continue;
-      }
-      field = oneofField;
-      value = unsafeGet2(init, oneofField);
-    } else {
-      field = member;
-    }
-    switch (field.fieldKind) {
-      case "message":
-        value = toMessage2(field, value);
-        break;
-      case "scalar":
-        value = initScalar2(field, value);
-        break;
-      case "list":
-        value = initList2(field, value);
-        break;
-      case "map":
-        value = initMap2(field, value);
-        break;
-    }
-    unsafeSet2(message, field, value);
-  }
-  return message;
-}
-function initScalar2(field, value) {
-  if (field.scalar == ScalarType2.BYTES) {
-    return toU8Arr2(value);
-  }
-  return value;
-}
-function initMap2(field, value) {
-  if (isObject2(value)) {
-    if (field.scalar == ScalarType2.BYTES) {
-      return convertObjectValues2(value, toU8Arr2);
-    }
-    if (field.mapKind == "message") {
-      return convertObjectValues2(value, (val) => toMessage2(field, val));
-    }
-  }
-  return value;
-}
-function initList2(field, value) {
-  if (Array.isArray(value)) {
-    if (field.scalar == ScalarType2.BYTES) {
-      return value.map(toU8Arr2);
-    }
-    if (field.listKind == "message") {
-      return value.map((item) => toMessage2(field, item));
-    }
-  }
-  return value;
-}
-function toMessage2(field, value) {
-  if (field.fieldKind == "message" && !field.oneof && isWrapperDesc2(field.message)) {
-    return initScalar2(field.message.fields[0], value);
-  }
-  if (isObject2(value)) {
-    if (field.message.typeName == "google.protobuf.Struct" && field.parent.typeName !== "google.protobuf.Value") {
-      return value;
-    }
-    if (!isMessage2(value, field.message)) {
-      return create3(field.message, value);
-    }
-  }
-  return value;
-}
-function toU8Arr2(value) {
-  return Array.isArray(value) ? new Uint8Array(value) : value;
-}
-function convertObjectValues2(obj, fn) {
-  const ret = {};
-  for (const entry of Object.entries(obj)) {
-    ret[entry[0]] = fn(entry[1]);
-  }
-  return ret;
-}
-var tokenZeroMessageField2 = Symbol();
-var messagePrototypes2 = new WeakMap;
-function createZeroMessage2(desc) {
-  let msg;
-  if (!needsPrototypeChain2(desc)) {
-    msg = {
-      $typeName: desc.typeName
-    };
-    for (const member of desc.members) {
-      if (member.kind == "oneof" || member.presence == IMPLICIT5) {
-        msg[member.localName] = createZeroField2(member);
-      }
-    }
-  } else {
-    const cached = messagePrototypes2.get(desc);
-    let prototype;
-    let members;
-    if (cached) {
-      ({ prototype, members } = cached);
-    } else {
-      prototype = {};
-      members = new Set;
-      for (const member of desc.members) {
-        if (member.kind == "oneof") {
-          continue;
-        }
-        if (member.fieldKind != "scalar" && member.fieldKind != "enum") {
-          continue;
-        }
-        if (member.presence == IMPLICIT5) {
-          continue;
-        }
-        members.add(member);
-        prototype[member.localName] = createZeroField2(member);
-      }
-      messagePrototypes2.set(desc, { prototype, members });
-    }
-    msg = Object.create(prototype);
-    msg.$typeName = desc.typeName;
-    for (const member of desc.members) {
-      if (members.has(member)) {
-        continue;
-      }
-      if (member.kind == "field") {
-        if (member.fieldKind == "message") {
-          continue;
-        }
-        if (member.fieldKind == "scalar" || member.fieldKind == "enum") {
-          if (member.presence != IMPLICIT5) {
-            continue;
-          }
-        }
-      }
-      msg[member.localName] = createZeroField2(member);
-    }
-  }
-  return msg;
-}
-function needsPrototypeChain2(desc) {
-  switch (desc.file.edition) {
-    case EDITION_PROTO33:
-      return false;
-    case EDITION_PROTO23:
-      return true;
-    default:
-      return desc.fields.some((f) => f.presence != IMPLICIT5 && f.fieldKind != "message" && !f.oneof);
-  }
-}
-function createZeroField2(field) {
-  if (field.kind == "oneof") {
-    return { case: undefined };
-  }
-  if (field.fieldKind == "list") {
-    return [];
-  }
-  if (field.fieldKind == "map") {
-    return {};
-  }
-  if (field.fieldKind == "message") {
-    return tokenZeroMessageField2;
-  }
-  const defaultValue = field.getDefaultValue();
-  if (defaultValue !== undefined) {
-    return field.fieldKind == "scalar" && field.longAsString ? defaultValue.toString() : defaultValue;
-  }
-  return field.fieldKind == "scalar" ? scalarZeroValue2(field.scalar, field.longAsString) : field.enum.values[0].number;
-}
-var errorNames2 = [
-  "FieldValueInvalidError",
-  "FieldListRangeError",
-  "ForeignFieldError"
-];
-
-class FieldError2 extends Error {
-  constructor(fieldOrOneof, message, name = "FieldValueInvalidError") {
-    super(message);
-    this.name = name;
-    this.field = () => fieldOrOneof;
-  }
-}
-function isFieldError2(arg) {
-  return arg instanceof Error && errorNames2.includes(arg.name) && "field" in arg && typeof arg.field == "function";
-}
-var symbol2 = Symbol.for("@bufbuild/protobuf/text-encoding");
-function getTextEncoding2() {
-  if (globalThis[symbol2] == undefined) {
-    const te = new globalThis.TextEncoder;
-    const td = new globalThis.TextDecoder;
-    globalThis[symbol2] = {
-      encodeUtf8(text) {
-        return te.encode(text);
-      },
-      decodeUtf8(bytes) {
-        return td.decode(bytes);
-      },
-      checkUtf8(text) {
-        try {
-          encodeURIComponent(text);
-          return true;
-        } catch (_) {
-          return false;
-        }
-      }
-    };
-  }
-  return globalThis[symbol2];
-}
-var WireType2;
-(function(WireType) {
-  WireType[WireType["Varint"] = 0] = "Varint";
-  WireType[WireType["Bit64"] = 1] = "Bit64";
-  WireType[WireType["LengthDelimited"] = 2] = "LengthDelimited";
-  WireType[WireType["StartGroup"] = 3] = "StartGroup";
-  WireType[WireType["EndGroup"] = 4] = "EndGroup";
-  WireType[WireType["Bit32"] = 5] = "Bit32";
-})(WireType2 || (WireType2 = {}));
-var FLOAT32_MAX2 = 340282346638528860000000000000000000000;
-var FLOAT32_MIN2 = -340282346638528860000000000000000000000;
-var UINT32_MAX2 = 4294967295;
-var INT32_MAX2 = 2147483647;
-var INT32_MIN2 = -2147483648;
-
-class BinaryWriter2 {
-  constructor(encodeUtf8 = getTextEncoding2().encodeUtf8) {
-    this.encodeUtf8 = encodeUtf8;
-    this.stack = [];
-    this.chunks = [];
-    this.buf = [];
-  }
-  finish() {
-    if (this.buf.length) {
-      this.chunks.push(new Uint8Array(this.buf));
-      this.buf = [];
-    }
-    let len = 0;
-    for (let i = 0;i < this.chunks.length; i++)
-      len += this.chunks[i].length;
-    let bytes = new Uint8Array(len);
-    let offset = 0;
-    for (let i = 0;i < this.chunks.length; i++) {
-      bytes.set(this.chunks[i], offset);
-      offset += this.chunks[i].length;
-    }
-    this.chunks = [];
-    return bytes;
-  }
-  fork() {
-    this.stack.push({ chunks: this.chunks, buf: this.buf });
-    this.chunks = [];
-    this.buf = [];
-    return this;
-  }
-  join() {
-    let chunk = this.finish();
-    let prev = this.stack.pop();
-    if (!prev)
-      throw new Error("invalid state, fork stack empty");
-    this.chunks = prev.chunks;
-    this.buf = prev.buf;
-    this.uint32(chunk.byteLength);
-    return this.raw(chunk);
-  }
-  tag(fieldNo, type) {
-    return this.uint32((fieldNo << 3 | type) >>> 0);
-  }
-  raw(chunk) {
-    if (this.buf.length) {
-      this.chunks.push(new Uint8Array(this.buf));
-      this.buf = [];
-    }
-    this.chunks.push(chunk);
-    return this;
-  }
-  uint32(value) {
-    assertUInt322(value);
-    while (value > 127) {
-      this.buf.push(value & 127 | 128);
-      value = value >>> 7;
-    }
-    this.buf.push(value);
-    return this;
-  }
-  int32(value) {
-    assertInt322(value);
-    varint32write2(value, this.buf);
-    return this;
-  }
-  bool(value) {
-    this.buf.push(value ? 1 : 0);
-    return this;
-  }
-  bytes(value) {
-    this.uint32(value.byteLength);
-    return this.raw(value);
-  }
-  string(value) {
-    let chunk = this.encodeUtf8(value);
-    this.uint32(chunk.byteLength);
-    return this.raw(chunk);
-  }
-  float(value) {
-    assertFloat322(value);
-    let chunk = new Uint8Array(4);
-    new DataView(chunk.buffer).setFloat32(0, value, true);
-    return this.raw(chunk);
-  }
-  double(value) {
-    let chunk = new Uint8Array(8);
-    new DataView(chunk.buffer).setFloat64(0, value, true);
-    return this.raw(chunk);
-  }
-  fixed32(value) {
-    assertUInt322(value);
-    let chunk = new Uint8Array(4);
-    new DataView(chunk.buffer).setUint32(0, value, true);
-    return this.raw(chunk);
-  }
-  sfixed32(value) {
-    assertInt322(value);
-    let chunk = new Uint8Array(4);
-    new DataView(chunk.buffer).setInt32(0, value, true);
-    return this.raw(chunk);
-  }
-  sint32(value) {
-    assertInt322(value);
-    value = (value << 1 ^ value >> 31) >>> 0;
-    varint32write2(value, this.buf);
-    return this;
-  }
-  sfixed64(value) {
-    let chunk = new Uint8Array(8), view = new DataView(chunk.buffer), tc = protoInt642.enc(value);
-    view.setInt32(0, tc.lo, true);
-    view.setInt32(4, tc.hi, true);
-    return this.raw(chunk);
-  }
-  fixed64(value) {
-    let chunk = new Uint8Array(8), view = new DataView(chunk.buffer), tc = protoInt642.uEnc(value);
-    view.setInt32(0, tc.lo, true);
-    view.setInt32(4, tc.hi, true);
-    return this.raw(chunk);
-  }
-  int64(value) {
-    let tc = protoInt642.enc(value);
-    varint64write2(tc.lo, tc.hi, this.buf);
-    return this;
-  }
-  sint64(value) {
-    const tc = protoInt642.enc(value), sign = tc.hi >> 31, lo = tc.lo << 1 ^ sign, hi = (tc.hi << 1 | tc.lo >>> 31) ^ sign;
-    varint64write2(lo, hi, this.buf);
-    return this;
-  }
-  uint64(value) {
-    const tc = protoInt642.uEnc(value);
-    varint64write2(tc.lo, tc.hi, this.buf);
-    return this;
-  }
-}
-
-class BinaryReader2 {
-  constructor(buf, decodeUtf8 = getTextEncoding2().decodeUtf8) {
-    this.decodeUtf8 = decodeUtf8;
-    this.varint64 = varint64read2;
-    this.uint32 = varint32read2;
-    this.buf = buf;
-    this.len = buf.length;
-    this.pos = 0;
-    this.view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
-  }
-  tag() {
-    let tag = this.uint32(), fieldNo = tag >>> 3, wireType = tag & 7;
-    if (fieldNo <= 0 || wireType < 0 || wireType > 5)
-      throw new Error("illegal tag: field no " + fieldNo + " wire type " + wireType);
-    return [fieldNo, wireType];
-  }
-  skip(wireType, fieldNo) {
-    let start = this.pos;
-    switch (wireType) {
-      case WireType2.Varint:
-        while (this.buf[this.pos++] & 128) {}
-        break;
-      case WireType2.Bit64:
-        this.pos += 4;
-      case WireType2.Bit32:
-        this.pos += 4;
-        break;
-      case WireType2.LengthDelimited:
-        let len = this.uint32();
-        this.pos += len;
-        break;
-      case WireType2.StartGroup:
-        for (;; ) {
-          const [fn, wt] = this.tag();
-          if (wt === WireType2.EndGroup) {
-            if (fieldNo !== undefined && fn !== fieldNo) {
-              throw new Error("invalid end group tag");
-            }
-            break;
-          }
-          this.skip(wt, fn);
-        }
-        break;
-      default:
-        throw new Error("cant skip wire type " + wireType);
-    }
-    this.assertBounds();
-    return this.buf.subarray(start, this.pos);
-  }
-  assertBounds() {
-    if (this.pos > this.len)
-      throw new RangeError("premature EOF");
-  }
-  int32() {
-    return this.uint32() | 0;
-  }
-  sint32() {
-    let zze = this.uint32();
-    return zze >>> 1 ^ -(zze & 1);
-  }
-  int64() {
-    return protoInt642.dec(...this.varint64());
-  }
-  uint64() {
-    return protoInt642.uDec(...this.varint64());
-  }
-  sint64() {
-    let [lo, hi] = this.varint64();
-    let s = -(lo & 1);
-    lo = (lo >>> 1 | (hi & 1) << 31) ^ s;
-    hi = hi >>> 1 ^ s;
-    return protoInt642.dec(lo, hi);
-  }
-  bool() {
-    let [lo, hi] = this.varint64();
-    return lo !== 0 || hi !== 0;
-  }
-  fixed32() {
-    return this.view.getUint32((this.pos += 4) - 4, true);
-  }
-  sfixed32() {
-    return this.view.getInt32((this.pos += 4) - 4, true);
-  }
-  fixed64() {
-    return protoInt642.uDec(this.sfixed32(), this.sfixed32());
-  }
-  sfixed64() {
-    return protoInt642.dec(this.sfixed32(), this.sfixed32());
-  }
-  float() {
-    return this.view.getFloat32((this.pos += 4) - 4, true);
-  }
-  double() {
-    return this.view.getFloat64((this.pos += 8) - 8, true);
-  }
-  bytes() {
-    let len = this.uint32(), start = this.pos;
-    this.pos += len;
-    this.assertBounds();
-    return this.buf.subarray(start, start + len);
-  }
-  string() {
-    return this.decodeUtf8(this.bytes());
-  }
-}
-function assertInt322(arg) {
-  if (typeof arg == "string") {
-    arg = Number(arg);
-  } else if (typeof arg != "number") {
-    throw new Error("invalid int32: " + typeof arg);
-  }
-  if (!Number.isInteger(arg) || arg > INT32_MAX2 || arg < INT32_MIN2)
-    throw new Error("invalid int32: " + arg);
-}
-function assertUInt322(arg) {
-  if (typeof arg == "string") {
-    arg = Number(arg);
-  } else if (typeof arg != "number") {
-    throw new Error("invalid uint32: " + typeof arg);
-  }
-  if (!Number.isInteger(arg) || arg > UINT32_MAX2 || arg < 0)
-    throw new Error("invalid uint32: " + arg);
-}
-function assertFloat322(arg) {
-  if (typeof arg == "string") {
-    const o = arg;
-    arg = Number(arg);
-    if (Number.isNaN(arg) && o !== "NaN") {
-      throw new Error("invalid float32: " + o);
-    }
-  } else if (typeof arg != "number") {
-    throw new Error("invalid float32: " + typeof arg);
-  }
-  if (Number.isFinite(arg) && (arg > FLOAT32_MAX2 || arg < FLOAT32_MIN2))
-    throw new Error("invalid float32: " + arg);
-}
-function checkField2(field, value) {
-  const check = field.fieldKind == "list" ? isReflectList2(value, field) : field.fieldKind == "map" ? isReflectMap2(value, field) : checkSingular2(field, value);
-  if (check === true) {
-    return;
-  }
-  let reason;
-  switch (field.fieldKind) {
-    case "list":
-      reason = `expected ${formatReflectList2(field)}, got ${formatVal2(value)}`;
-      break;
-    case "map":
-      reason = `expected ${formatReflectMap2(field)}, got ${formatVal2(value)}`;
-      break;
-    default: {
-      reason = reasonSingular2(field, value, check);
-    }
-  }
-  return new FieldError2(field, reason);
-}
-function checkListItem2(field, index, value) {
-  const check = checkSingular2(field, value);
-  if (check !== true) {
-    return new FieldError2(field, `list item #${index + 1}: ${reasonSingular2(field, value, check)}`);
-  }
-  return;
-}
-function checkMapEntry2(field, key, value) {
-  const checkKey = checkScalarValue2(key, field.mapKey);
-  if (checkKey !== true) {
-    return new FieldError2(field, `invalid map key: ${reasonSingular2({ scalar: field.mapKey }, key, checkKey)}`);
-  }
-  const checkVal = checkSingular2(field, value);
-  if (checkVal !== true) {
-    return new FieldError2(field, `map entry ${formatVal2(key)}: ${reasonSingular2(field, value, checkVal)}`);
-  }
-  return;
-}
-function checkSingular2(field, value) {
-  if (field.scalar !== undefined) {
-    return checkScalarValue2(value, field.scalar);
-  }
-  if (field.enum !== undefined) {
-    if (field.enum.open) {
-      return Number.isInteger(value);
-    }
-    return field.enum.values.some((v) => v.number === value);
-  }
-  return isReflectMessage2(value, field.message);
-}
-function checkScalarValue2(value, scalar) {
-  switch (scalar) {
-    case ScalarType2.DOUBLE:
-      return typeof value == "number";
-    case ScalarType2.FLOAT:
-      if (typeof value != "number") {
-        return false;
-      }
-      if (Number.isNaN(value) || !Number.isFinite(value)) {
-        return true;
-      }
-      if (value > FLOAT32_MAX2 || value < FLOAT32_MIN2) {
-        return `${value.toFixed()} out of range`;
-      }
-      return true;
-    case ScalarType2.INT32:
-    case ScalarType2.SFIXED32:
-    case ScalarType2.SINT32:
-      if (typeof value !== "number" || !Number.isInteger(value)) {
-        return false;
-      }
-      if (value > INT32_MAX2 || value < INT32_MIN2) {
-        return `${value.toFixed()} out of range`;
-      }
-      return true;
-    case ScalarType2.FIXED32:
-    case ScalarType2.UINT32:
-      if (typeof value !== "number" || !Number.isInteger(value)) {
-        return false;
-      }
-      if (value > UINT32_MAX2 || value < 0) {
-        return `${value.toFixed()} out of range`;
-      }
-      return true;
-    case ScalarType2.BOOL:
-      return typeof value == "boolean";
-    case ScalarType2.STRING:
-      if (typeof value != "string") {
-        return false;
-      }
-      return getTextEncoding2().checkUtf8(value) || "invalid UTF8";
-    case ScalarType2.BYTES:
-      return value instanceof Uint8Array;
-    case ScalarType2.INT64:
-    case ScalarType2.SFIXED64:
-    case ScalarType2.SINT64:
-      if (typeof value == "bigint" || typeof value == "number" || typeof value == "string" && value.length > 0) {
-        try {
-          protoInt642.parse(value);
-          return true;
-        } catch (_) {
-          return `${value} out of range`;
-        }
-      }
-      return false;
-    case ScalarType2.FIXED64:
-    case ScalarType2.UINT64:
-      if (typeof value == "bigint" || typeof value == "number" || typeof value == "string" && value.length > 0) {
-        try {
-          protoInt642.uParse(value);
-          return true;
-        } catch (_) {
-          return `${value} out of range`;
-        }
-      }
-      return false;
-  }
-}
-function reasonSingular2(field, val, details) {
-  details = typeof details == "string" ? `: ${details}` : `, got ${formatVal2(val)}`;
-  if (field.scalar !== undefined) {
-    return `expected ${scalarTypeDescription2(field.scalar)}` + details;
-  }
-  if (field.enum !== undefined) {
-    return `expected ${field.enum.toString()}` + details;
-  }
-  return `expected ${formatReflectMessage2(field.message)}` + details;
-}
-function formatVal2(val) {
-  switch (typeof val) {
-    case "object":
-      if (val === null) {
-        return "null";
-      }
-      if (val instanceof Uint8Array) {
-        return `Uint8Array(${val.length})`;
-      }
-      if (Array.isArray(val)) {
-        return `Array(${val.length})`;
-      }
-      if (isReflectList2(val)) {
-        return formatReflectList2(val.field());
-      }
-      if (isReflectMap2(val)) {
-        return formatReflectMap2(val.field());
-      }
-      if (isReflectMessage2(val)) {
-        return formatReflectMessage2(val.desc);
-      }
-      if (isMessage2(val)) {
-        return `message ${val.$typeName}`;
-      }
-      return "object";
-    case "string":
-      return val.length > 30 ? "string" : `"${val.split('"').join("\\\"")}"`;
-    case "boolean":
-      return String(val);
-    case "number":
-      return String(val);
-    case "bigint":
-      return String(val) + "n";
-    default:
-      return typeof val;
-  }
-}
-function formatReflectMessage2(desc) {
-  return `ReflectMessage (${desc.typeName})`;
-}
-function formatReflectList2(field) {
-  switch (field.listKind) {
-    case "message":
-      return `ReflectList (${field.message.toString()})`;
-    case "enum":
-      return `ReflectList (${field.enum.toString()})`;
-    case "scalar":
-      return `ReflectList (${ScalarType2[field.scalar]})`;
-  }
-}
-function formatReflectMap2(field) {
-  switch (field.mapKind) {
-    case "message":
-      return `ReflectMap (${ScalarType2[field.mapKey]}, ${field.message.toString()})`;
-    case "enum":
-      return `ReflectMap (${ScalarType2[field.mapKey]}, ${field.enum.toString()})`;
-    case "scalar":
-      return `ReflectMap (${ScalarType2[field.mapKey]}, ${ScalarType2[field.scalar]})`;
-  }
-}
-function scalarTypeDescription2(scalar) {
-  switch (scalar) {
-    case ScalarType2.STRING:
-      return "string";
-    case ScalarType2.BOOL:
-      return "boolean";
-    case ScalarType2.INT64:
-    case ScalarType2.SINT64:
-    case ScalarType2.SFIXED64:
-      return "bigint (int64)";
-    case ScalarType2.UINT64:
-    case ScalarType2.FIXED64:
-      return "bigint (uint64)";
-    case ScalarType2.BYTES:
-      return "Uint8Array";
-    case ScalarType2.DOUBLE:
-      return "number (float64)";
-    case ScalarType2.FLOAT:
-      return "number (float32)";
-    case ScalarType2.FIXED32:
-    case ScalarType2.UINT32:
-      return "number (uint32)";
-    case ScalarType2.INT32:
-    case ScalarType2.SFIXED32:
-    case ScalarType2.SINT32:
-      return "number (int32)";
-  }
-}
-function reflect2(messageDesc, message, check = true) {
-  return new ReflectMessageImpl2(messageDesc, message, check);
-}
-
-class ReflectMessageImpl2 {
-  get sortedFields() {
-    var _a;
-    return (_a = this._sortedFields) !== null && _a !== undefined ? _a : this._sortedFields = this.desc.fields.concat().sort((a, b) => a.number - b.number);
-  }
-  constructor(messageDesc, message, check = true) {
-    this.lists = new Map;
-    this.maps = new Map;
-    this.check = check;
-    this.desc = messageDesc;
-    this.message = this[unsafeLocal2] = message !== null && message !== undefined ? message : create3(messageDesc);
-    this.fields = messageDesc.fields;
-    this.oneofs = messageDesc.oneofs;
-    this.members = messageDesc.members;
-  }
-  findNumber(number) {
-    if (!this._fieldsByNumber) {
-      this._fieldsByNumber = new Map(this.desc.fields.map((f) => [f.number, f]));
-    }
-    return this._fieldsByNumber.get(number);
-  }
-  oneofCase(oneof) {
-    assertOwn2(this.message, oneof);
-    return unsafeOneofCase2(this.message, oneof);
-  }
-  isSet(field) {
-    assertOwn2(this.message, field);
-    return unsafeIsSet2(this.message, field);
-  }
-  clear(field) {
-    assertOwn2(this.message, field);
-    unsafeClear2(this.message, field);
-  }
-  get(field) {
-    assertOwn2(this.message, field);
-    const value = unsafeGet2(this.message, field);
-    switch (field.fieldKind) {
-      case "list":
-        let list = this.lists.get(field);
-        if (!list || list[unsafeLocal2] !== value) {
-          this.lists.set(field, list = new ReflectListImpl2(field, value, this.check));
-        }
-        return list;
-      case "map":
-        let map = this.maps.get(field);
-        if (!map || map[unsafeLocal2] !== value) {
-          this.maps.set(field, map = new ReflectMapImpl2(field, value, this.check));
-        }
-        return map;
-      case "message":
-        return messageToReflect2(field, value, this.check);
-      case "scalar":
-        return value === undefined ? scalarZeroValue2(field.scalar, false) : longToReflect2(field, value);
-      case "enum":
-        return value !== null && value !== undefined ? value : field.enum.values[0].number;
-    }
-  }
-  set(field, value) {
-    assertOwn2(this.message, field);
-    if (this.check) {
-      const err = checkField2(field, value);
-      if (err) {
-        throw err;
-      }
-    }
-    let local;
-    if (field.fieldKind == "message") {
-      local = messageToLocal2(field, value);
-    } else if (isReflectMap2(value) || isReflectList2(value)) {
-      local = value[unsafeLocal2];
-    } else {
-      local = longToLocal2(field, value);
-    }
-    unsafeSet2(this.message, field, local);
-  }
-  getUnknown() {
-    return this.message.$unknown;
-  }
-  setUnknown(value) {
-    this.message.$unknown = value;
-  }
-}
-function assertOwn2(owner, member) {
-  if (member.parent.typeName !== owner.$typeName) {
-    throw new FieldError2(member, `cannot use ${member.toString()} with message ${owner.$typeName}`, "ForeignFieldError");
-  }
-}
-
-class ReflectListImpl2 {
-  field() {
-    return this._field;
-  }
-  get size() {
-    return this._arr.length;
-  }
-  constructor(field, unsafeInput, check) {
-    this._field = field;
-    this._arr = this[unsafeLocal2] = unsafeInput;
-    this.check = check;
-  }
-  get(index) {
-    const item = this._arr[index];
-    return item === undefined ? undefined : listItemToReflect2(this._field, item, this.check);
-  }
-  set(index, item) {
-    if (index < 0 || index >= this._arr.length) {
-      throw new FieldError2(this._field, `list item #${index + 1}: out of range`);
-    }
-    if (this.check) {
-      const err = checkListItem2(this._field, index, item);
-      if (err) {
-        throw err;
-      }
-    }
-    this._arr[index] = listItemToLocal2(this._field, item);
-  }
-  add(item) {
-    if (this.check) {
-      const err = checkListItem2(this._field, this._arr.length, item);
-      if (err) {
-        throw err;
-      }
-    }
-    this._arr.push(listItemToLocal2(this._field, item));
-    return;
-  }
-  clear() {
-    this._arr.splice(0, this._arr.length);
-  }
-  [Symbol.iterator]() {
-    return this.values();
-  }
-  keys() {
-    return this._arr.keys();
-  }
-  *values() {
-    for (const item of this._arr) {
-      yield listItemToReflect2(this._field, item, this.check);
-    }
-  }
-  *entries() {
-    for (let i = 0;i < this._arr.length; i++) {
-      yield [i, listItemToReflect2(this._field, this._arr[i], this.check)];
-    }
-  }
-}
-
-class ReflectMapImpl2 {
-  constructor(field, unsafeInput, check = true) {
-    this.obj = this[unsafeLocal2] = unsafeInput !== null && unsafeInput !== undefined ? unsafeInput : {};
-    this.check = check;
-    this._field = field;
-  }
-  field() {
-    return this._field;
-  }
-  set(key, value) {
-    if (this.check) {
-      const err = checkMapEntry2(this._field, key, value);
-      if (err) {
-        throw err;
-      }
-    }
-    this.obj[mapKeyToLocal2(key)] = mapValueToLocal2(this._field, value);
-    return this;
-  }
-  delete(key) {
-    const k = mapKeyToLocal2(key);
-    const has = Object.prototype.hasOwnProperty.call(this.obj, k);
-    if (has) {
-      delete this.obj[k];
-    }
-    return has;
-  }
-  clear() {
-    for (const key of Object.keys(this.obj)) {
-      delete this.obj[key];
-    }
-  }
-  get(key) {
-    let val = this.obj[mapKeyToLocal2(key)];
-    if (val !== undefined) {
-      val = mapValueToReflect2(this._field, val, this.check);
-    }
-    return val;
-  }
-  has(key) {
-    return Object.prototype.hasOwnProperty.call(this.obj, mapKeyToLocal2(key));
-  }
-  *keys() {
-    for (const objKey of Object.keys(this.obj)) {
-      yield mapKeyToReflect2(objKey, this._field.mapKey);
-    }
-  }
-  *entries() {
-    for (const objEntry of Object.entries(this.obj)) {
-      yield [
-        mapKeyToReflect2(objEntry[0], this._field.mapKey),
-        mapValueToReflect2(this._field, objEntry[1], this.check)
-      ];
-    }
-  }
-  [Symbol.iterator]() {
-    return this.entries();
-  }
-  get size() {
-    return Object.keys(this.obj).length;
-  }
-  *values() {
-    for (const val of Object.values(this.obj)) {
-      yield mapValueToReflect2(this._field, val, this.check);
-    }
-  }
-  forEach(callbackfn, thisArg) {
-    for (const mapEntry of this.entries()) {
-      callbackfn.call(thisArg, mapEntry[1], mapEntry[0], this);
-    }
-  }
-}
-function messageToLocal2(field, value) {
-  if (!isReflectMessage2(value)) {
-    return value;
-  }
-  if (isWrapper2(value.message) && !field.oneof && field.fieldKind == "message") {
-    return value.message.value;
-  }
-  if (value.desc.typeName == "google.protobuf.Struct" && field.parent.typeName != "google.protobuf.Value") {
-    return wktStructToLocal2(value.message);
-  }
-  return value.message;
-}
-function messageToReflect2(field, value, check) {
-  if (value !== undefined) {
-    if (isWrapperDesc2(field.message) && !field.oneof && field.fieldKind == "message") {
-      value = {
-        $typeName: field.message.typeName,
-        value: longToReflect2(field.message.fields[0], value)
-      };
-    } else if (field.message.typeName == "google.protobuf.Struct" && field.parent.typeName != "google.protobuf.Value" && isObject2(value)) {
-      value = wktStructToReflect2(value);
-    }
-  }
-  return new ReflectMessageImpl2(field.message, value, check);
-}
-function listItemToLocal2(field, value) {
-  if (field.listKind == "message") {
-    return messageToLocal2(field, value);
-  }
-  return longToLocal2(field, value);
-}
-function listItemToReflect2(field, value, check) {
-  if (field.listKind == "message") {
-    return messageToReflect2(field, value, check);
-  }
-  return longToReflect2(field, value);
-}
-function mapValueToLocal2(field, value) {
-  if (field.mapKind == "message") {
-    return messageToLocal2(field, value);
-  }
-  return longToLocal2(field, value);
-}
-function mapValueToReflect2(field, value, check) {
-  if (field.mapKind == "message") {
-    return messageToReflect2(field, value, check);
-  }
-  return value;
-}
-function mapKeyToLocal2(key) {
-  return typeof key == "string" || typeof key == "number" ? key : String(key);
-}
-function mapKeyToReflect2(key, type) {
-  switch (type) {
-    case ScalarType2.STRING:
-      return key;
-    case ScalarType2.INT32:
-    case ScalarType2.FIXED32:
-    case ScalarType2.UINT32:
-    case ScalarType2.SFIXED32:
-    case ScalarType2.SINT32: {
-      const n = Number.parseInt(key);
-      if (Number.isFinite(n)) {
-        return n;
-      }
-      break;
-    }
-    case ScalarType2.BOOL:
-      switch (key) {
-        case "true":
-          return true;
-        case "false":
-          return false;
-      }
-      break;
-    case ScalarType2.UINT64:
-    case ScalarType2.FIXED64:
-      try {
-        return protoInt642.uParse(key);
-      } catch (_a) {}
-      break;
-    default:
-      try {
-        return protoInt642.parse(key);
-      } catch (_b) {}
-      break;
-  }
-  return key;
-}
-function longToReflect2(field, value) {
-  switch (field.scalar) {
-    case ScalarType2.INT64:
-    case ScalarType2.SFIXED64:
-    case ScalarType2.SINT64:
-      if ("longAsString" in field && field.longAsString && typeof value == "string") {
-        value = protoInt642.parse(value);
-      }
-      break;
-    case ScalarType2.FIXED64:
-    case ScalarType2.UINT64:
-      if ("longAsString" in field && field.longAsString && typeof value == "string") {
-        value = protoInt642.uParse(value);
-      }
-      break;
-  }
-  return value;
-}
-function longToLocal2(field, value) {
-  switch (field.scalar) {
-    case ScalarType2.INT64:
-    case ScalarType2.SFIXED64:
-    case ScalarType2.SINT64:
-      if ("longAsString" in field && field.longAsString) {
-        value = String(value);
-      } else if (typeof value == "string" || typeof value == "number") {
-        value = protoInt642.parse(value);
-      }
-      break;
-    case ScalarType2.FIXED64:
-    case ScalarType2.UINT64:
-      if ("longAsString" in field && field.longAsString) {
-        value = String(value);
-      } else if (typeof value == "string" || typeof value == "number") {
-        value = protoInt642.uParse(value);
-      }
-      break;
-  }
-  return value;
-}
-function wktStructToReflect2(json) {
-  const struct = {
-    $typeName: "google.protobuf.Struct",
-    fields: {}
-  };
-  if (isObject2(json)) {
-    for (const [k, v] of Object.entries(json)) {
-      struct.fields[k] = wktValueToReflect2(v);
-    }
-  }
-  return struct;
-}
-function wktStructToLocal2(val) {
-  const json = {};
-  for (const [k, v] of Object.entries(val.fields)) {
-    json[k] = wktValueToLocal2(v);
-  }
-  return json;
-}
-function wktValueToLocal2(val) {
-  switch (val.kind.case) {
-    case "structValue":
-      return wktStructToLocal2(val.kind.value);
-    case "listValue":
-      return val.kind.value.values.map(wktValueToLocal2);
-    case "nullValue":
-    case undefined:
-      return null;
-    default:
-      return val.kind.value;
-  }
-}
-function wktValueToReflect2(json) {
-  const value = {
-    $typeName: "google.protobuf.Value",
-    kind: { case: undefined }
-  };
-  switch (typeof json) {
-    case "number":
-      value.kind = { case: "numberValue", value: json };
-      break;
-    case "string":
-      value.kind = { case: "stringValue", value: json };
-      break;
-    case "boolean":
-      value.kind = { case: "boolValue", value: json };
-      break;
-    case "object":
-      if (json === null) {
-        const nullValue = 0;
-        value.kind = { case: "nullValue", value: nullValue };
-      } else if (Array.isArray(json)) {
-        const listValue = {
-          $typeName: "google.protobuf.ListValue",
-          values: []
-        };
-        if (Array.isArray(json)) {
-          for (const e of json) {
-            listValue.values.push(wktValueToReflect2(e));
-          }
-        }
-        value.kind = {
-          case: "listValue",
-          value: listValue
-        };
-      } else {
-        value.kind = {
-          case: "structValue",
-          value: wktStructToReflect2(json)
-        };
-      }
-      break;
-  }
-  return value;
-}
-function base64Decode2(base64Str) {
-  const table = getDecodeTable2();
-  let es = base64Str.length * 3 / 4;
-  if (base64Str[base64Str.length - 2] == "=")
-    es -= 2;
-  else if (base64Str[base64Str.length - 1] == "=")
-    es -= 1;
-  let bytes = new Uint8Array(es), bytePos = 0, groupPos = 0, b, p = 0;
-  for (let i = 0;i < base64Str.length; i++) {
-    b = table[base64Str.charCodeAt(i)];
-    if (b === undefined) {
-      switch (base64Str[i]) {
-        case "=":
-          groupPos = 0;
-        case `
-`:
-        case "\r":
-        case "\t":
-        case " ":
-          continue;
-        default:
-          throw Error("invalid base64 string");
-      }
-    }
-    switch (groupPos) {
-      case 0:
-        p = b;
-        groupPos = 1;
-        break;
-      case 1:
-        bytes[bytePos++] = p << 2 | (b & 48) >> 4;
-        p = b;
-        groupPos = 2;
-        break;
-      case 2:
-        bytes[bytePos++] = (p & 15) << 4 | (b & 60) >> 2;
-        p = b;
-        groupPos = 3;
-        break;
-      case 3:
-        bytes[bytePos++] = (p & 3) << 6 | b;
-        groupPos = 0;
-        break;
-    }
-  }
-  if (groupPos == 1)
-    throw Error("invalid base64 string");
-  return bytes.subarray(0, bytePos);
-}
-var encodeTableStd2;
-var encodeTableUrl2;
-var decodeTable2;
-function getEncodeTable2(encoding) {
-  if (!encodeTableStd2) {
-    encodeTableStd2 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/".split("");
-    encodeTableUrl2 = encodeTableStd2.slice(0, -2).concat("-", "_");
-  }
-  return encoding == "url" ? encodeTableUrl2 : encodeTableStd2;
-}
-function getDecodeTable2() {
-  if (!decodeTable2) {
-    decodeTable2 = [];
-    const encodeTable = getEncodeTable2("std");
-    for (let i = 0;i < encodeTable.length; i++)
-      decodeTable2[encodeTable[i].charCodeAt(0)] = i;
-    decodeTable2[45] = encodeTable.indexOf("+");
-    decodeTable2[95] = encodeTable.indexOf("/");
-  }
-  return decodeTable2;
-}
-function protoCamelCase2(snakeCase) {
-  let capNext = false;
-  const b = [];
-  for (let i = 0;i < snakeCase.length; i++) {
-    let c = snakeCase.charAt(i);
-    switch (c) {
-      case "_":
-        capNext = true;
-        break;
-      case "0":
-      case "1":
-      case "2":
-      case "3":
-      case "4":
-      case "5":
-      case "6":
-      case "7":
-      case "8":
-      case "9":
-        b.push(c);
-        capNext = false;
-        break;
-      default:
-        if (capNext) {
-          capNext = false;
-          c = c.toUpperCase();
-        }
-        b.push(c);
-        break;
-    }
-  }
-  return b.join("");
-}
-var reservedObjectProperties2 = new Set([
-  "constructor",
-  "toString",
-  "toJSON",
-  "valueOf"
-]);
-function safeObjectProperty2(name) {
-  return reservedObjectProperties2.has(name) ? name + "$" : name;
-}
-function restoreJsonNames2(message) {
-  for (const f of message.field) {
-    if (!unsafeIsSetExplicit2(f, "jsonName")) {
-      f.jsonName = protoCamelCase2(f.name);
-    }
-  }
-  message.nestedType.forEach(restoreJsonNames2);
-}
-function parseTextFormatEnumValue2(descEnum, value) {
-  const enumValue = descEnum.values.find((v) => v.name === value);
-  if (!enumValue) {
-    throw new Error(`cannot parse ${descEnum} default value: ${value}`);
-  }
-  return enumValue.number;
-}
-function parseTextFormatScalarValue2(type, value) {
-  switch (type) {
-    case ScalarType2.STRING:
-      return value;
-    case ScalarType2.BYTES: {
-      const u = unescapeBytesDefaultValue2(value);
-      if (u === false) {
-        throw new Error(`cannot parse ${ScalarType2[type]} default value: ${value}`);
-      }
-      return u;
-    }
-    case ScalarType2.INT64:
-    case ScalarType2.SFIXED64:
-    case ScalarType2.SINT64:
-      return protoInt642.parse(value);
-    case ScalarType2.UINT64:
-    case ScalarType2.FIXED64:
-      return protoInt642.uParse(value);
-    case ScalarType2.DOUBLE:
-    case ScalarType2.FLOAT:
-      switch (value) {
-        case "inf":
-          return Number.POSITIVE_INFINITY;
-        case "-inf":
-          return Number.NEGATIVE_INFINITY;
-        case "nan":
-          return Number.NaN;
-        default:
-          return parseFloat(value);
-      }
-    case ScalarType2.BOOL:
-      return value === "true";
-    case ScalarType2.INT32:
-    case ScalarType2.UINT32:
-    case ScalarType2.SINT32:
-    case ScalarType2.FIXED32:
-    case ScalarType2.SFIXED32:
-      return parseInt(value, 10);
-  }
-}
-function unescapeBytesDefaultValue2(str) {
-  const b = [];
-  const input = {
-    tail: str,
-    c: "",
-    next() {
-      if (this.tail.length == 0) {
-        return false;
-      }
-      this.c = this.tail[0];
-      this.tail = this.tail.substring(1);
-      return true;
-    },
-    take(n) {
-      if (this.tail.length >= n) {
-        const r = this.tail.substring(0, n);
-        this.tail = this.tail.substring(n);
-        return r;
-      }
-      return false;
-    }
-  };
-  while (input.next()) {
-    switch (input.c) {
-      case "\\":
-        if (input.next()) {
-          switch (input.c) {
-            case "\\":
-              b.push(input.c.charCodeAt(0));
-              break;
-            case "b":
-              b.push(8);
-              break;
-            case "f":
-              b.push(12);
-              break;
-            case "n":
-              b.push(10);
-              break;
-            case "r":
-              b.push(13);
-              break;
-            case "t":
-              b.push(9);
-              break;
-            case "v":
-              b.push(11);
-              break;
-            case "0":
-            case "1":
-            case "2":
-            case "3":
-            case "4":
-            case "5":
-            case "6":
-            case "7": {
-              const s = input.c;
-              const t = input.take(2);
-              if (t === false) {
-                return false;
-              }
-              const n = parseInt(s + t, 8);
-              if (Number.isNaN(n)) {
-                return false;
-              }
-              b.push(n);
-              break;
-            }
-            case "x": {
-              const s = input.c;
-              const t = input.take(2);
-              if (t === false) {
-                return false;
-              }
-              const n = parseInt(s + t, 16);
-              if (Number.isNaN(n)) {
-                return false;
-              }
-              b.push(n);
-              break;
-            }
-            case "u": {
-              const s = input.c;
-              const t = input.take(4);
-              if (t === false) {
-                return false;
-              }
-              const n = parseInt(s + t, 16);
-              if (Number.isNaN(n)) {
-                return false;
-              }
-              const chunk = new Uint8Array(4);
-              const view = new DataView(chunk.buffer);
-              view.setInt32(0, n, true);
-              b.push(chunk[0], chunk[1], chunk[2], chunk[3]);
-              break;
-            }
-            case "U": {
-              const s = input.c;
-              const t = input.take(8);
-              if (t === false) {
-                return false;
-              }
-              const tc = protoInt642.uEnc(s + t);
-              const chunk = new Uint8Array(8);
-              const view = new DataView(chunk.buffer);
-              view.setInt32(0, tc.lo, true);
-              view.setInt32(4, tc.hi, true);
-              b.push(chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7]);
-              break;
-            }
-          }
-        }
-        break;
-      default:
-        b.push(input.c.charCodeAt(0));
-    }
-  }
-  return new Uint8Array(b);
-}
-function* nestedTypes2(desc) {
-  switch (desc.kind) {
-    case "file":
-      for (const message of desc.messages) {
-        yield message;
-        yield* nestedTypes2(message);
-      }
-      yield* desc.enums;
-      yield* desc.services;
-      yield* desc.extensions;
-      break;
-    case "message":
-      for (const message of desc.nestedMessages) {
-        yield message;
-        yield* nestedTypes2(message);
-      }
-      yield* desc.nestedEnums;
-      yield* desc.nestedExtensions;
-      break;
-  }
-}
-function createFileRegistry2(...args) {
-  const registry = createBaseRegistry2();
-  if (!args.length) {
-    return registry;
-  }
-  if ("$typeName" in args[0] && args[0].$typeName == "google.protobuf.FileDescriptorSet") {
-    for (const file of args[0].file) {
-      addFile2(file, registry);
-    }
-    return registry;
-  }
-  if ("$typeName" in args[0]) {
-    let recurseDeps = function(file) {
-      const deps = [];
-      for (const protoFileName of file.dependency) {
-        if (registry.getFile(protoFileName) != null) {
-          continue;
-        }
-        if (seen.has(protoFileName)) {
-          continue;
-        }
-        const dep = resolve(protoFileName);
-        if (!dep) {
-          throw new Error(`Unable to resolve ${protoFileName}, imported by ${file.name}`);
-        }
-        if ("kind" in dep) {
-          registry.addFile(dep, false, true);
-        } else {
-          seen.add(dep.name);
-          deps.push(dep);
-        }
-      }
-      return deps.concat(...deps.map(recurseDeps));
-    };
-    const input = args[0];
-    const resolve = args[1];
-    const seen = new Set;
-    for (const file of [input, ...recurseDeps(input)].reverse()) {
-      addFile2(file, registry);
-    }
-  } else {
-    for (const fileReg of args) {
-      for (const file of fileReg.files) {
-        registry.addFile(file);
-      }
-    }
-  }
-  return registry;
-}
-function createBaseRegistry2() {
-  const types = new Map;
-  const extendees = new Map;
-  const files = new Map;
-  return {
-    kind: "registry",
-    types,
-    extendees,
-    [Symbol.iterator]() {
-      return types.values();
-    },
-    get files() {
-      return files.values();
-    },
-    addFile(file, skipTypes, withDeps) {
-      files.set(file.proto.name, file);
-      if (!skipTypes) {
-        for (const type of nestedTypes2(file)) {
-          this.add(type);
-        }
-      }
-      if (withDeps) {
-        for (const f of file.dependencies) {
-          this.addFile(f, skipTypes, withDeps);
-        }
-      }
-    },
-    add(desc) {
-      if (desc.kind == "extension") {
-        let numberToExt = extendees.get(desc.extendee.typeName);
-        if (!numberToExt) {
-          extendees.set(desc.extendee.typeName, numberToExt = new Map);
-        }
-        numberToExt.set(desc.number, desc);
-      }
-      types.set(desc.typeName, desc);
-    },
-    get(typeName) {
-      return types.get(typeName);
-    },
-    getFile(fileName) {
-      return files.get(fileName);
-    },
-    getMessage(typeName) {
-      const t = types.get(typeName);
-      return (t === null || t === undefined ? undefined : t.kind) == "message" ? t : undefined;
-    },
-    getEnum(typeName) {
-      const t = types.get(typeName);
-      return (t === null || t === undefined ? undefined : t.kind) == "enum" ? t : undefined;
-    },
-    getExtension(typeName) {
-      const t = types.get(typeName);
-      return (t === null || t === undefined ? undefined : t.kind) == "extension" ? t : undefined;
-    },
-    getExtensionFor(extendee, no) {
-      var _a;
-      return (_a = extendees.get(extendee.typeName)) === null || _a === undefined ? undefined : _a.get(no);
-    },
-    getService(typeName) {
-      const t = types.get(typeName);
-      return (t === null || t === undefined ? undefined : t.kind) == "service" ? t : undefined;
-    }
-  };
-}
-var EDITION_PROTO24 = 998;
-var EDITION_PROTO34 = 999;
-var TYPE_STRING2 = 9;
-var TYPE_GROUP2 = 10;
-var TYPE_MESSAGE2 = 11;
-var TYPE_BYTES2 = 12;
-var TYPE_ENUM2 = 14;
-var LABEL_REPEATED2 = 3;
-var LABEL_REQUIRED2 = 2;
-var JS_STRING2 = 1;
-var IDEMPOTENCY_UNKNOWN2 = 0;
-var EXPLICIT2 = 1;
-var IMPLICIT6 = 2;
-var LEGACY_REQUIRED3 = 3;
-var PACKED2 = 1;
-var DELIMITED2 = 2;
-var OPEN2 = 1;
-var featureDefaults2 = {
-  998: {
-    fieldPresence: 1,
-    enumType: 2,
-    repeatedFieldEncoding: 2,
-    utf8Validation: 3,
-    messageEncoding: 1,
-    jsonFormat: 2,
-    enforceNamingStyle: 2,
-    defaultSymbolVisibility: 1
-  },
-  999: {
-    fieldPresence: 2,
-    enumType: 1,
-    repeatedFieldEncoding: 1,
-    utf8Validation: 2,
-    messageEncoding: 1,
-    jsonFormat: 1,
-    enforceNamingStyle: 2,
-    defaultSymbolVisibility: 1
-  },
-  1000: {
-    fieldPresence: 1,
-    enumType: 1,
-    repeatedFieldEncoding: 1,
-    utf8Validation: 2,
-    messageEncoding: 1,
-    jsonFormat: 1,
-    enforceNamingStyle: 2,
-    defaultSymbolVisibility: 1
-  }
-};
-function addFile2(proto, reg) {
-  var _a, _b;
-  const file = {
-    kind: "file",
-    proto,
-    deprecated: (_b = (_a = proto.options) === null || _a === undefined ? undefined : _a.deprecated) !== null && _b !== undefined ? _b : false,
-    edition: getFileEdition2(proto),
-    name: proto.name.replace(/\.proto$/, ""),
-    dependencies: findFileDependencies2(proto, reg),
-    enums: [],
-    messages: [],
-    extensions: [],
-    services: [],
-    toString() {
-      return `file ${proto.name}`;
-    }
-  };
-  const mapEntriesStore = new Map;
-  const mapEntries = {
-    get(typeName) {
-      return mapEntriesStore.get(typeName);
-    },
-    add(desc) {
-      var _a;
-      assert2(((_a = desc.proto.options) === null || _a === undefined ? undefined : _a.mapEntry) === true);
-      mapEntriesStore.set(desc.typeName, desc);
-    }
-  };
-  for (const enumProto of proto.enumType) {
-    addEnum2(enumProto, file, undefined, reg);
-  }
-  for (const messageProto of proto.messageType) {
-    addMessage2(messageProto, file, undefined, reg, mapEntries);
-  }
-  for (const serviceProto of proto.service) {
-    addService2(serviceProto, file, reg);
-  }
-  addExtensions2(file, reg);
-  for (const mapEntry of mapEntriesStore.values()) {
-    addFields2(mapEntry, reg, mapEntries);
-  }
-  for (const message of file.messages) {
-    addFields2(message, reg, mapEntries);
-    addExtensions2(message, reg);
-  }
-  reg.addFile(file, true);
-}
-function addExtensions2(desc, reg) {
-  switch (desc.kind) {
-    case "file":
-      for (const proto of desc.proto.extension) {
-        const ext = newField2(proto, desc, reg);
-        desc.extensions.push(ext);
-        reg.add(ext);
-      }
-      break;
-    case "message":
-      for (const proto of desc.proto.extension) {
-        const ext = newField2(proto, desc, reg);
-        desc.nestedExtensions.push(ext);
-        reg.add(ext);
-      }
-      for (const message of desc.nestedMessages) {
-        addExtensions2(message, reg);
-      }
-      break;
-  }
-}
-function addFields2(message, reg, mapEntries) {
-  const allOneofs = message.proto.oneofDecl.map((proto) => newOneof2(proto, message));
-  const oneofsSeen = new Set;
-  for (const proto of message.proto.field) {
-    const oneof = findOneof2(proto, allOneofs);
-    const field = newField2(proto, message, reg, oneof, mapEntries);
-    message.fields.push(field);
-    message.field[field.localName] = field;
-    if (oneof === undefined) {
-      message.members.push(field);
-    } else {
-      oneof.fields.push(field);
-      if (!oneofsSeen.has(oneof)) {
-        oneofsSeen.add(oneof);
-        message.members.push(oneof);
-      }
-    }
-  }
-  for (const oneof of allOneofs.filter((o) => oneofsSeen.has(o))) {
-    message.oneofs.push(oneof);
-  }
-  for (const child of message.nestedMessages) {
-    addFields2(child, reg, mapEntries);
-  }
-}
-function addEnum2(proto, file, parent, reg) {
-  var _a, _b, _c, _d, _e;
-  const sharedPrefix = findEnumSharedPrefix2(proto.name, proto.value);
-  const desc = {
-    kind: "enum",
-    proto,
-    deprecated: (_b = (_a = proto.options) === null || _a === undefined ? undefined : _a.deprecated) !== null && _b !== undefined ? _b : false,
-    file,
-    parent,
-    open: true,
-    name: proto.name,
-    typeName: makeTypeName2(proto, parent, file),
-    value: {},
-    values: [],
-    sharedPrefix,
-    toString() {
-      return `enum ${this.typeName}`;
-    }
-  };
-  desc.open = isEnumOpen2(desc);
-  reg.add(desc);
-  for (const p of proto.value) {
-    const name = p.name;
-    desc.values.push(desc.value[p.number] = {
-      kind: "enum_value",
-      proto: p,
-      deprecated: (_d = (_c = p.options) === null || _c === undefined ? undefined : _c.deprecated) !== null && _d !== undefined ? _d : false,
-      parent: desc,
-      name,
-      localName: safeObjectProperty2(sharedPrefix == undefined ? name : name.substring(sharedPrefix.length)),
-      number: p.number,
-      toString() {
-        return `enum value ${desc.typeName}.${name}`;
-      }
-    });
-  }
-  ((_e = parent === null || parent === undefined ? undefined : parent.nestedEnums) !== null && _e !== undefined ? _e : file.enums).push(desc);
-}
-function addMessage2(proto, file, parent, reg, mapEntries) {
-  var _a, _b, _c, _d;
-  const desc = {
-    kind: "message",
-    proto,
-    deprecated: (_b = (_a = proto.options) === null || _a === undefined ? undefined : _a.deprecated) !== null && _b !== undefined ? _b : false,
-    file,
-    parent,
-    name: proto.name,
-    typeName: makeTypeName2(proto, parent, file),
-    fields: [],
-    field: {},
-    oneofs: [],
-    members: [],
-    nestedEnums: [],
-    nestedMessages: [],
-    nestedExtensions: [],
-    toString() {
-      return `message ${this.typeName}`;
-    }
-  };
-  if (((_c = proto.options) === null || _c === undefined ? undefined : _c.mapEntry) === true) {
-    mapEntries.add(desc);
-  } else {
-    ((_d = parent === null || parent === undefined ? undefined : parent.nestedMessages) !== null && _d !== undefined ? _d : file.messages).push(desc);
-    reg.add(desc);
-  }
-  for (const enumProto of proto.enumType) {
-    addEnum2(enumProto, file, desc, reg);
-  }
-  for (const messageProto of proto.nestedType) {
-    addMessage2(messageProto, file, desc, reg, mapEntries);
-  }
-}
-function addService2(proto, file, reg) {
-  var _a, _b;
-  const desc = {
-    kind: "service",
-    proto,
-    deprecated: (_b = (_a = proto.options) === null || _a === undefined ? undefined : _a.deprecated) !== null && _b !== undefined ? _b : false,
-    file,
-    name: proto.name,
-    typeName: makeTypeName2(proto, undefined, file),
-    methods: [],
-    method: {},
-    toString() {
-      return `service ${this.typeName}`;
-    }
-  };
-  file.services.push(desc);
-  reg.add(desc);
-  for (const methodProto of proto.method) {
-    const method = newMethod2(methodProto, desc, reg);
-    desc.methods.push(method);
-    desc.method[method.localName] = method;
-  }
-}
-function newMethod2(proto, parent, reg) {
-  var _a, _b, _c, _d;
-  let methodKind;
-  if (proto.clientStreaming && proto.serverStreaming) {
-    methodKind = "bidi_streaming";
-  } else if (proto.clientStreaming) {
-    methodKind = "client_streaming";
-  } else if (proto.serverStreaming) {
-    methodKind = "server_streaming";
-  } else {
-    methodKind = "unary";
-  }
-  const input = reg.getMessage(trimLeadingDot2(proto.inputType));
-  const output = reg.getMessage(trimLeadingDot2(proto.outputType));
-  assert2(input, `invalid MethodDescriptorProto: input_type ${proto.inputType} not found`);
-  assert2(output, `invalid MethodDescriptorProto: output_type ${proto.inputType} not found`);
-  const name = proto.name;
-  return {
-    kind: "rpc",
-    proto,
-    deprecated: (_b = (_a = proto.options) === null || _a === undefined ? undefined : _a.deprecated) !== null && _b !== undefined ? _b : false,
-    parent,
-    name,
-    localName: safeObjectProperty2(name.length ? safeObjectProperty2(name[0].toLowerCase() + name.substring(1)) : name),
-    methodKind,
-    input,
-    output,
-    idempotency: (_d = (_c = proto.options) === null || _c === undefined ? undefined : _c.idempotencyLevel) !== null && _d !== undefined ? _d : IDEMPOTENCY_UNKNOWN2,
-    toString() {
-      return `rpc ${parent.typeName}.${name}`;
-    }
-  };
-}
-function newOneof2(proto, parent) {
-  return {
-    kind: "oneof",
-    proto,
-    deprecated: false,
-    parent,
-    fields: [],
-    name: proto.name,
-    localName: safeObjectProperty2(protoCamelCase2(proto.name)),
-    toString() {
-      return `oneof ${parent.typeName}.${this.name}`;
-    }
-  };
-}
-function newField2(proto, parentOrFile, reg, oneof, mapEntries) {
-  var _a, _b, _c;
-  const isExtension = mapEntries === undefined;
-  const field = {
-    kind: "field",
-    proto,
-    deprecated: (_b = (_a = proto.options) === null || _a === undefined ? undefined : _a.deprecated) !== null && _b !== undefined ? _b : false,
-    name: proto.name,
-    number: proto.number,
-    scalar: undefined,
-    message: undefined,
-    enum: undefined,
-    presence: getFieldPresence2(proto, oneof, isExtension, parentOrFile),
-    listKind: undefined,
-    mapKind: undefined,
-    mapKey: undefined,
-    delimitedEncoding: undefined,
-    packed: undefined,
-    longAsString: false,
-    getDefaultValue: undefined
-  };
-  if (isExtension) {
-    const file = parentOrFile.kind == "file" ? parentOrFile : parentOrFile.file;
-    const parent = parentOrFile.kind == "file" ? undefined : parentOrFile;
-    const typeName = makeTypeName2(proto, parent, file);
-    field.kind = "extension";
-    field.file = file;
-    field.parent = parent;
-    field.oneof = undefined;
-    field.typeName = typeName;
-    field.jsonName = `[${typeName}]`;
-    field.toString = () => `extension ${typeName}`;
-    const extendee = reg.getMessage(trimLeadingDot2(proto.extendee));
-    assert2(extendee, `invalid FieldDescriptorProto: extendee ${proto.extendee} not found`);
-    field.extendee = extendee;
-  } else {
-    const parent = parentOrFile;
-    assert2(parent.kind == "message");
-    field.parent = parent;
-    field.oneof = oneof;
-    field.localName = oneof ? protoCamelCase2(proto.name) : safeObjectProperty2(protoCamelCase2(proto.name));
-    field.jsonName = proto.jsonName;
-    field.toString = () => `field ${parent.typeName}.${proto.name}`;
-  }
-  const label = proto.label;
-  const type = proto.type;
-  const jstype = (_c = proto.options) === null || _c === undefined ? undefined : _c.jstype;
-  if (label === LABEL_REPEATED2) {
-    const mapEntry = type == TYPE_MESSAGE2 ? mapEntries === null || mapEntries === undefined ? undefined : mapEntries.get(trimLeadingDot2(proto.typeName)) : undefined;
-    if (mapEntry) {
-      field.fieldKind = "map";
-      const { key, value } = findMapEntryFields2(mapEntry);
-      field.mapKey = key.scalar;
-      field.mapKind = value.fieldKind;
-      field.message = value.message;
-      field.delimitedEncoding = false;
-      field.enum = value.enum;
-      field.scalar = value.scalar;
-      return field;
-    }
-    field.fieldKind = "list";
-    switch (type) {
-      case TYPE_MESSAGE2:
-      case TYPE_GROUP2:
-        field.listKind = "message";
-        field.message = reg.getMessage(trimLeadingDot2(proto.typeName));
-        assert2(field.message);
-        field.delimitedEncoding = isDelimitedEncoding2(proto, parentOrFile);
-        break;
-      case TYPE_ENUM2:
-        field.listKind = "enum";
-        field.enum = reg.getEnum(trimLeadingDot2(proto.typeName));
-        assert2(field.enum);
-        break;
-      default:
-        field.listKind = "scalar";
-        field.scalar = type;
-        field.longAsString = jstype == JS_STRING2;
-        break;
-    }
-    field.packed = isPackedField2(proto, parentOrFile);
-    return field;
-  }
-  switch (type) {
-    case TYPE_MESSAGE2:
-    case TYPE_GROUP2:
-      field.fieldKind = "message";
-      field.message = reg.getMessage(trimLeadingDot2(proto.typeName));
-      assert2(field.message, `invalid FieldDescriptorProto: type_name ${proto.typeName} not found`);
-      field.delimitedEncoding = isDelimitedEncoding2(proto, parentOrFile);
-      field.getDefaultValue = () => {
-        return;
-      };
-      break;
-    case TYPE_ENUM2: {
-      const enumeration = reg.getEnum(trimLeadingDot2(proto.typeName));
-      assert2(enumeration !== undefined, `invalid FieldDescriptorProto: type_name ${proto.typeName} not found`);
-      field.fieldKind = "enum";
-      field.enum = reg.getEnum(trimLeadingDot2(proto.typeName));
-      field.getDefaultValue = () => {
-        return unsafeIsSetExplicit2(proto, "defaultValue") ? parseTextFormatEnumValue2(enumeration, proto.defaultValue) : undefined;
-      };
-      break;
-    }
-    default: {
-      field.fieldKind = "scalar";
-      field.scalar = type;
-      field.longAsString = jstype == JS_STRING2;
-      field.getDefaultValue = () => {
-        return unsafeIsSetExplicit2(proto, "defaultValue") ? parseTextFormatScalarValue2(type, proto.defaultValue) : undefined;
-      };
-      break;
-    }
-  }
-  return field;
-}
-function getFileEdition2(proto) {
-  switch (proto.syntax) {
-    case "":
-    case "proto2":
-      return EDITION_PROTO24;
-    case "proto3":
-      return EDITION_PROTO34;
-    case "editions":
-      if (proto.edition in featureDefaults2) {
-        return proto.edition;
-      }
-      throw new Error(`${proto.name}: unsupported edition`);
-    default:
-      throw new Error(`${proto.name}: unsupported syntax "${proto.syntax}"`);
-  }
-}
-function findFileDependencies2(proto, reg) {
-  return proto.dependency.map((wantName) => {
-    const dep = reg.getFile(wantName);
-    if (!dep) {
-      throw new Error(`Cannot find ${wantName}, imported by ${proto.name}`);
-    }
-    return dep;
-  });
-}
-function findEnumSharedPrefix2(enumName, values) {
-  const prefix = camelToSnakeCase2(enumName) + "_";
-  for (const value of values) {
-    if (!value.name.toLowerCase().startsWith(prefix)) {
-      return;
-    }
-    const shortName = value.name.substring(prefix.length);
-    if (shortName.length == 0) {
-      return;
-    }
-    if (/^\d/.test(shortName)) {
-      return;
-    }
-  }
-  return prefix;
-}
-function camelToSnakeCase2(camel) {
-  return (camel.substring(0, 1) + camel.substring(1).replace(/[A-Z]/g, (c) => "_" + c)).toLowerCase();
-}
-function makeTypeName2(proto, parent, file) {
-  let typeName;
-  if (parent) {
-    typeName = `${parent.typeName}.${proto.name}`;
-  } else if (file.proto.package.length > 0) {
-    typeName = `${file.proto.package}.${proto.name}`;
-  } else {
-    typeName = `${proto.name}`;
-  }
-  return typeName;
-}
-function trimLeadingDot2(typeName) {
-  return typeName.startsWith(".") ? typeName.substring(1) : typeName;
-}
-function findOneof2(proto, allOneofs) {
-  if (!unsafeIsSetExplicit2(proto, "oneofIndex")) {
-    return;
-  }
-  if (proto.proto3Optional) {
-    return;
-  }
-  const oneof = allOneofs[proto.oneofIndex];
-  assert2(oneof, `invalid FieldDescriptorProto: oneof #${proto.oneofIndex} for field #${proto.number} not found`);
-  return oneof;
-}
-function getFieldPresence2(proto, oneof, isExtension, parent) {
-  if (proto.label == LABEL_REQUIRED2) {
-    return LEGACY_REQUIRED3;
-  }
-  if (proto.label == LABEL_REPEATED2) {
-    return IMPLICIT6;
-  }
-  if (!!oneof || proto.proto3Optional) {
-    return EXPLICIT2;
-  }
-  if (isExtension) {
-    return EXPLICIT2;
-  }
-  const resolved = resolveFeature2("fieldPresence", { proto, parent });
-  if (resolved == IMPLICIT6 && (proto.type == TYPE_MESSAGE2 || proto.type == TYPE_GROUP2)) {
-    return EXPLICIT2;
-  }
-  return resolved;
-}
-function isPackedField2(proto, parent) {
-  if (proto.label != LABEL_REPEATED2) {
-    return false;
-  }
-  switch (proto.type) {
-    case TYPE_STRING2:
-    case TYPE_BYTES2:
-    case TYPE_GROUP2:
-    case TYPE_MESSAGE2:
-      return false;
-  }
-  const o = proto.options;
-  if (o && unsafeIsSetExplicit2(o, "packed")) {
-    return o.packed;
-  }
-  return PACKED2 == resolveFeature2("repeatedFieldEncoding", {
-    proto,
-    parent
-  });
-}
-function findMapEntryFields2(mapEntry) {
-  const key = mapEntry.fields.find((f) => f.number === 1);
-  const value = mapEntry.fields.find((f) => f.number === 2);
-  assert2(key && key.fieldKind == "scalar" && key.scalar != ScalarType2.BYTES && key.scalar != ScalarType2.FLOAT && key.scalar != ScalarType2.DOUBLE && value && value.fieldKind != "list" && value.fieldKind != "map");
-  return { key, value };
-}
-function isEnumOpen2(desc) {
-  var _a;
-  return OPEN2 == resolveFeature2("enumType", {
-    proto: desc.proto,
-    parent: (_a = desc.parent) !== null && _a !== undefined ? _a : desc.file
-  });
-}
-function isDelimitedEncoding2(proto, parent) {
-  if (proto.type == TYPE_GROUP2) {
-    return true;
-  }
-  return DELIMITED2 == resolveFeature2("messageEncoding", {
-    proto,
-    parent
-  });
-}
-function resolveFeature2(name, ref) {
-  var _a, _b;
-  const featureSet = (_a = ref.proto.options) === null || _a === undefined ? undefined : _a.features;
-  if (featureSet) {
-    const val = featureSet[name];
-    if (val != 0) {
-      return val;
-    }
-  }
-  if ("kind" in ref) {
-    if (ref.kind == "message") {
-      return resolveFeature2(name, (_b = ref.parent) !== null && _b !== undefined ? _b : ref.file);
-    }
-    const editionDefaults = featureDefaults2[ref.edition];
-    if (!editionDefaults) {
-      throw new Error(`feature default for edition ${ref.edition} not found`);
-    }
-    return editionDefaults[name];
-  }
-  return resolveFeature2(name, ref.parent);
-}
-function assert2(condition, msg) {
-  if (!condition) {
-    throw new Error(msg);
-  }
-}
-function boot2(boot) {
-  const root = bootFileDescriptorProto2(boot);
-  root.messageType.forEach(restoreJsonNames2);
-  const reg = createFileRegistry2(root, () => {
-    return;
-  });
-  return reg.getFile(root.name);
-}
-function bootFileDescriptorProto2(init) {
-  const proto = Object.create({
-    syntax: "",
-    edition: 0
-  });
-  return Object.assign(proto, Object.assign(Object.assign({ $typeName: "google.protobuf.FileDescriptorProto", dependency: [], publicDependency: [], weakDependency: [], optionDependency: [], service: [], extension: [] }, init), { messageType: init.messageType.map(bootDescriptorProto2), enumType: init.enumType.map(bootEnumDescriptorProto2) }));
-}
-function bootDescriptorProto2(init) {
-  var _a, _b, _c, _d, _e, _f, _g, _h;
-  const proto = Object.create({
-    visibility: 0
-  });
-  return Object.assign(proto, {
-    $typeName: "google.protobuf.DescriptorProto",
-    name: init.name,
-    field: (_b = (_a = init.field) === null || _a === undefined ? undefined : _a.map(bootFieldDescriptorProto2)) !== null && _b !== undefined ? _b : [],
-    extension: [],
-    nestedType: (_d = (_c = init.nestedType) === null || _c === undefined ? undefined : _c.map(bootDescriptorProto2)) !== null && _d !== undefined ? _d : [],
-    enumType: (_f = (_e = init.enumType) === null || _e === undefined ? undefined : _e.map(bootEnumDescriptorProto2)) !== null && _f !== undefined ? _f : [],
-    extensionRange: (_h = (_g = init.extensionRange) === null || _g === undefined ? undefined : _g.map((e) => Object.assign({ $typeName: "google.protobuf.DescriptorProto.ExtensionRange" }, e))) !== null && _h !== undefined ? _h : [],
-    oneofDecl: [],
-    reservedRange: [],
-    reservedName: []
-  });
-}
-function bootFieldDescriptorProto2(init) {
-  const proto = Object.create({
-    label: 1,
-    typeName: "",
-    extendee: "",
-    defaultValue: "",
-    oneofIndex: 0,
-    jsonName: "",
-    proto3Optional: false
-  });
-  return Object.assign(proto, Object.assign(Object.assign({ $typeName: "google.protobuf.FieldDescriptorProto" }, init), { options: init.options ? bootFieldOptions2(init.options) : undefined }));
-}
-function bootFieldOptions2(init) {
-  var _a, _b, _c;
-  const proto = Object.create({
-    ctype: 0,
-    packed: false,
-    jstype: 0,
-    lazy: false,
-    unverifiedLazy: false,
-    deprecated: false,
-    weak: false,
-    debugRedact: false,
-    retention: 0
-  });
-  return Object.assign(proto, Object.assign(Object.assign({ $typeName: "google.protobuf.FieldOptions" }, init), { targets: (_a = init.targets) !== null && _a !== undefined ? _a : [], editionDefaults: (_c = (_b = init.editionDefaults) === null || _b === undefined ? undefined : _b.map((e) => Object.assign({ $typeName: "google.protobuf.FieldOptions.EditionDefault" }, e))) !== null && _c !== undefined ? _c : [], uninterpretedOption: [] }));
-}
-function bootEnumDescriptorProto2(init) {
-  const proto = Object.create({
-    visibility: 0
-  });
-  return Object.assign(proto, {
-    $typeName: "google.protobuf.EnumDescriptorProto",
-    name: init.name,
-    reservedName: [],
-    reservedRange: [],
-    value: init.value.map((e) => Object.assign({ $typeName: "google.protobuf.EnumValueDescriptorProto" }, e))
-  });
-}
-function messageDesc2(file, path, ...paths) {
-  return paths.reduce((acc, cur) => acc.nestedMessages[cur], file.messages[path]);
-}
-var file_google_protobuf_descriptor2 = /* @__PURE__ */ boot2({ name: "google/protobuf/descriptor.proto", package: "google.protobuf", messageType: [{ name: "FileDescriptorSet", field: [{ name: "file", number: 1, type: 11, label: 3, typeName: ".google.protobuf.FileDescriptorProto" }], extensionRange: [{ start: 536000000, end: 536000001 }] }, { name: "FileDescriptorProto", field: [{ name: "name", number: 1, type: 9, label: 1 }, { name: "package", number: 2, type: 9, label: 1 }, { name: "dependency", number: 3, type: 9, label: 3 }, { name: "public_dependency", number: 10, type: 5, label: 3 }, { name: "weak_dependency", number: 11, type: 5, label: 3 }, { name: "option_dependency", number: 15, type: 9, label: 3 }, { name: "message_type", number: 4, type: 11, label: 3, typeName: ".google.protobuf.DescriptorProto" }, { name: "enum_type", number: 5, type: 11, label: 3, typeName: ".google.protobuf.EnumDescriptorProto" }, { name: "service", number: 6, type: 11, label: 3, typeName: ".google.protobuf.ServiceDescriptorProto" }, { name: "extension", number: 7, type: 11, label: 3, typeName: ".google.protobuf.FieldDescriptorProto" }, { name: "options", number: 8, type: 11, label: 1, typeName: ".google.protobuf.FileOptions" }, { name: "source_code_info", number: 9, type: 11, label: 1, typeName: ".google.protobuf.SourceCodeInfo" }, { name: "syntax", number: 12, type: 9, label: 1 }, { name: "edition", number: 14, type: 14, label: 1, typeName: ".google.protobuf.Edition" }] }, { name: "DescriptorProto", field: [{ name: "name", number: 1, type: 9, label: 1 }, { name: "field", number: 2, type: 11, label: 3, typeName: ".google.protobuf.FieldDescriptorProto" }, { name: "extension", number: 6, type: 11, label: 3, typeName: ".google.protobuf.FieldDescriptorProto" }, { name: "nested_type", number: 3, type: 11, label: 3, typeName: ".google.protobuf.DescriptorProto" }, { name: "enum_type", number: 4, type: 11, label: 3, typeName: ".google.protobuf.EnumDescriptorProto" }, { name: "extension_range", number: 5, type: 11, label: 3, typeName: ".google.protobuf.DescriptorProto.ExtensionRange" }, { name: "oneof_decl", number: 8, type: 11, label: 3, typeName: ".google.protobuf.OneofDescriptorProto" }, { name: "options", number: 7, type: 11, label: 1, typeName: ".google.protobuf.MessageOptions" }, { name: "reserved_range", number: 9, type: 11, label: 3, typeName: ".google.protobuf.DescriptorProto.ReservedRange" }, { name: "reserved_name", number: 10, type: 9, label: 3 }, { name: "visibility", number: 11, type: 14, label: 1, typeName: ".google.protobuf.SymbolVisibility" }], nestedType: [{ name: "ExtensionRange", field: [{ name: "start", number: 1, type: 5, label: 1 }, { name: "end", number: 2, type: 5, label: 1 }, { name: "options", number: 3, type: 11, label: 1, typeName: ".google.protobuf.ExtensionRangeOptions" }] }, { name: "ReservedRange", field: [{ name: "start", number: 1, type: 5, label: 1 }, { name: "end", number: 2, type: 5, label: 1 }] }] }, { name: "ExtensionRangeOptions", field: [{ name: "uninterpreted_option", number: 999, type: 11, label: 3, typeName: ".google.protobuf.UninterpretedOption" }, { name: "declaration", number: 2, type: 11, label: 3, typeName: ".google.protobuf.ExtensionRangeOptions.Declaration", options: { retention: 2 } }, { name: "features", number: 50, type: 11, label: 1, typeName: ".google.protobuf.FeatureSet" }, { name: "verification", number: 3, type: 14, label: 1, typeName: ".google.protobuf.ExtensionRangeOptions.VerificationState", defaultValue: "UNVERIFIED", options: { retention: 2 } }], nestedType: [{ name: "Declaration", field: [{ name: "number", number: 1, type: 5, label: 1 }, { name: "full_name", number: 2, type: 9, label: 1 }, { name: "type", number: 3, type: 9, label: 1 }, { name: "reserved", number: 5, type: 8, label: 1 }, { name: "repeated", number: 6, type: 8, label: 1 }] }], enumType: [{ name: "VerificationState", value: [{ name: "DECLARATION", number: 0 }, { name: "UNVERIFIED", number: 1 }] }], extensionRange: [{ start: 1000, end: 536870912 }] }, { name: "FieldDescriptorProto", field: [{ name: "name", number: 1, type: 9, label: 1 }, { name: "number", number: 3, type: 5, label: 1 }, { name: "label", number: 4, type: 14, label: 1, typeName: ".google.protobuf.FieldDescriptorProto.Label" }, { name: "type", number: 5, type: 14, label: 1, typeName: ".google.protobuf.FieldDescriptorProto.Type" }, { name: "type_name", number: 6, type: 9, label: 1 }, { name: "extendee", number: 2, type: 9, label: 1 }, { name: "default_value", number: 7, type: 9, label: 1 }, { name: "oneof_index", number: 9, type: 5, label: 1 }, { name: "json_name", number: 10, type: 9, label: 1 }, { name: "options", number: 8, type: 11, label: 1, typeName: ".google.protobuf.FieldOptions" }, { name: "proto3_optional", number: 17, type: 8, label: 1 }], enumType: [{ name: "Type", value: [{ name: "TYPE_DOUBLE", number: 1 }, { name: "TYPE_FLOAT", number: 2 }, { name: "TYPE_INT64", number: 3 }, { name: "TYPE_UINT64", number: 4 }, { name: "TYPE_INT32", number: 5 }, { name: "TYPE_FIXED64", number: 6 }, { name: "TYPE_FIXED32", number: 7 }, { name: "TYPE_BOOL", number: 8 }, { name: "TYPE_STRING", number: 9 }, { name: "TYPE_GROUP", number: 10 }, { name: "TYPE_MESSAGE", number: 11 }, { name: "TYPE_BYTES", number: 12 }, { name: "TYPE_UINT32", number: 13 }, { name: "TYPE_ENUM", number: 14 }, { name: "TYPE_SFIXED32", number: 15 }, { name: "TYPE_SFIXED64", number: 16 }, { name: "TYPE_SINT32", number: 17 }, { name: "TYPE_SINT64", number: 18 }] }, { name: "Label", value: [{ name: "LABEL_OPTIONAL", number: 1 }, { name: "LABEL_REPEATED", number: 3 }, { name: "LABEL_REQUIRED", number: 2 }] }] }, { name: "OneofDescriptorProto", field: [{ name: "name", number: 1, type: 9, label: 1 }, { name: "options", number: 2, type: 11, label: 1, typeName: ".google.protobuf.OneofOptions" }] }, { name: "EnumDescriptorProto", field: [{ name: "name", number: 1, type: 9, label: 1 }, { name: "value", number: 2, type: 11, label: 3, typeName: ".google.protobuf.EnumValueDescriptorProto" }, { name: "options", number: 3, type: 11, label: 1, typeName: ".google.protobuf.EnumOptions" }, { name: "reserved_range", number: 4, type: 11, label: 3, typeName: ".google.protobuf.EnumDescriptorProto.EnumReservedRange" }, { name: "reserved_name", number: 5, type: 9, label: 3 }, { name: "visibility", number: 6, type: 14, label: 1, typeName: ".google.protobuf.SymbolVisibility" }], nestedType: [{ name: "EnumReservedRange", field: [{ name: "start", number: 1, type: 5, label: 1 }, { name: "end", number: 2, type: 5, label: 1 }] }] }, { name: "EnumValueDescriptorProto", field: [{ name: "name", number: 1, type: 9, label: 1 }, { name: "number", number: 2, type: 5, label: 1 }, { name: "options", number: 3, type: 11, label: 1, typeName: ".google.protobuf.EnumValueOptions" }] }, { name: "ServiceDescriptorProto", field: [{ name: "name", number: 1, type: 9, label: 1 }, { name: "method", number: 2, type: 11, label: 3, typeName: ".google.protobuf.MethodDescriptorProto" }, { name: "options", number: 3, type: 11, label: 1, typeName: ".google.protobuf.ServiceOptions" }] }, { name: "MethodDescriptorProto", field: [{ name: "name", number: 1, type: 9, label: 1 }, { name: "input_type", number: 2, type: 9, label: 1 }, { name: "output_type", number: 3, type: 9, label: 1 }, { name: "options", number: 4, type: 11, label: 1, typeName: ".google.protobuf.MethodOptions" }, { name: "client_streaming", number: 5, type: 8, label: 1, defaultValue: "false" }, { name: "server_streaming", number: 6, type: 8, label: 1, defaultValue: "false" }] }, { name: "FileOptions", field: [{ name: "java_package", number: 1, type: 9, label: 1 }, { name: "java_outer_classname", number: 8, type: 9, label: 1 }, { name: "java_multiple_files", number: 10, type: 8, label: 1, defaultValue: "false" }, { name: "java_generate_equals_and_hash", number: 20, type: 8, label: 1, options: { deprecated: true } }, { name: "java_string_check_utf8", number: 27, type: 8, label: 1, defaultValue: "false" }, { name: "optimize_for", number: 9, type: 14, label: 1, typeName: ".google.protobuf.FileOptions.OptimizeMode", defaultValue: "SPEED" }, { name: "go_package", number: 11, type: 9, label: 1 }, { name: "cc_generic_services", number: 16, type: 8, label: 1, defaultValue: "false" }, { name: "java_generic_services", number: 17, type: 8, label: 1, defaultValue: "false" }, { name: "py_generic_services", number: 18, type: 8, label: 1, defaultValue: "false" }, { name: "deprecated", number: 23, type: 8, label: 1, defaultValue: "false" }, { name: "cc_enable_arenas", number: 31, type: 8, label: 1, defaultValue: "true" }, { name: "objc_class_prefix", number: 36, type: 9, label: 1 }, { name: "csharp_namespace", number: 37, type: 9, label: 1 }, { name: "swift_prefix", number: 39, type: 9, label: 1 }, { name: "php_class_prefix", number: 40, type: 9, label: 1 }, { name: "php_namespace", number: 41, type: 9, label: 1 }, { name: "php_metadata_namespace", number: 44, type: 9, label: 1 }, { name: "ruby_package", number: 45, type: 9, label: 1 }, { name: "features", number: 50, type: 11, label: 1, typeName: ".google.protobuf.FeatureSet" }, { name: "uninterpreted_option", number: 999, type: 11, label: 3, typeName: ".google.protobuf.UninterpretedOption" }], enumType: [{ name: "OptimizeMode", value: [{ name: "SPEED", number: 1 }, { name: "CODE_SIZE", number: 2 }, { name: "LITE_RUNTIME", number: 3 }] }], extensionRange: [{ start: 1000, end: 536870912 }] }, { name: "MessageOptions", field: [{ name: "message_set_wire_format", number: 1, type: 8, label: 1, defaultValue: "false" }, { name: "no_standard_descriptor_accessor", number: 2, type: 8, label: 1, defaultValue: "false" }, { name: "deprecated", number: 3, type: 8, label: 1, defaultValue: "false" }, { name: "map_entry", number: 7, type: 8, label: 1 }, { name: "deprecated_legacy_json_field_conflicts", number: 11, type: 8, label: 1, options: { deprecated: true } }, { name: "features", number: 12, type: 11, label: 1, typeName: ".google.protobuf.FeatureSet" }, { name: "uninterpreted_option", number: 999, type: 11, label: 3, typeName: ".google.protobuf.UninterpretedOption" }], extensionRange: [{ start: 1000, end: 536870912 }] }, { name: "FieldOptions", field: [{ name: "ctype", number: 1, type: 14, label: 1, typeName: ".google.protobuf.FieldOptions.CType", defaultValue: "STRING" }, { name: "packed", number: 2, type: 8, label: 1 }, { name: "jstype", number: 6, type: 14, label: 1, typeName: ".google.protobuf.FieldOptions.JSType", defaultValue: "JS_NORMAL" }, { name: "lazy", number: 5, type: 8, label: 1, defaultValue: "false" }, { name: "unverified_lazy", number: 15, type: 8, label: 1, defaultValue: "false" }, { name: "deprecated", number: 3, type: 8, label: 1, defaultValue: "false" }, { name: "weak", number: 10, type: 8, label: 1, defaultValue: "false" }, { name: "debug_redact", number: 16, type: 8, label: 1, defaultValue: "false" }, { name: "retention", number: 17, type: 14, label: 1, typeName: ".google.protobuf.FieldOptions.OptionRetention" }, { name: "targets", number: 19, type: 14, label: 3, typeName: ".google.protobuf.FieldOptions.OptionTargetType" }, { name: "edition_defaults", number: 20, type: 11, label: 3, typeName: ".google.protobuf.FieldOptions.EditionDefault" }, { name: "features", number: 21, type: 11, label: 1, typeName: ".google.protobuf.FeatureSet" }, { name: "feature_support", number: 22, type: 11, label: 1, typeName: ".google.protobuf.FieldOptions.FeatureSupport" }, { name: "uninterpreted_option", number: 999, type: 11, label: 3, typeName: ".google.protobuf.UninterpretedOption" }], nestedType: [{ name: "EditionDefault", field: [{ name: "edition", number: 3, type: 14, label: 1, typeName: ".google.protobuf.Edition" }, { name: "value", number: 2, type: 9, label: 1 }] }, { name: "FeatureSupport", field: [{ name: "edition_introduced", number: 1, type: 14, label: 1, typeName: ".google.protobuf.Edition" }, { name: "edition_deprecated", number: 2, type: 14, label: 1, typeName: ".google.protobuf.Edition" }, { name: "deprecation_warning", number: 3, type: 9, label: 1 }, { name: "edition_removed", number: 4, type: 14, label: 1, typeName: ".google.protobuf.Edition" }] }], enumType: [{ name: "CType", value: [{ name: "STRING", number: 0 }, { name: "CORD", number: 1 }, { name: "STRING_PIECE", number: 2 }] }, { name: "JSType", value: [{ name: "JS_NORMAL", number: 0 }, { name: "JS_STRING", number: 1 }, { name: "JS_NUMBER", number: 2 }] }, { name: "OptionRetention", value: [{ name: "RETENTION_UNKNOWN", number: 0 }, { name: "RETENTION_RUNTIME", number: 1 }, { name: "RETENTION_SOURCE", number: 2 }] }, { name: "OptionTargetType", value: [{ name: "TARGET_TYPE_UNKNOWN", number: 0 }, { name: "TARGET_TYPE_FILE", number: 1 }, { name: "TARGET_TYPE_EXTENSION_RANGE", number: 2 }, { name: "TARGET_TYPE_MESSAGE", number: 3 }, { name: "TARGET_TYPE_FIELD", number: 4 }, { name: "TARGET_TYPE_ONEOF", number: 5 }, { name: "TARGET_TYPE_ENUM", number: 6 }, { name: "TARGET_TYPE_ENUM_ENTRY", number: 7 }, { name: "TARGET_TYPE_SERVICE", number: 8 }, { name: "TARGET_TYPE_METHOD", number: 9 }] }], extensionRange: [{ start: 1000, end: 536870912 }] }, { name: "OneofOptions", field: [{ name: "features", number: 1, type: 11, label: 1, typeName: ".google.protobuf.FeatureSet" }, { name: "uninterpreted_option", number: 999, type: 11, label: 3, typeName: ".google.protobuf.UninterpretedOption" }], extensionRange: [{ start: 1000, end: 536870912 }] }, { name: "EnumOptions", field: [{ name: "allow_alias", number: 2, type: 8, label: 1 }, { name: "deprecated", number: 3, type: 8, label: 1, defaultValue: "false" }, { name: "deprecated_legacy_json_field_conflicts", number: 6, type: 8, label: 1, options: { deprecated: true } }, { name: "features", number: 7, type: 11, label: 1, typeName: ".google.protobuf.FeatureSet" }, { name: "uninterpreted_option", number: 999, type: 11, label: 3, typeName: ".google.protobuf.UninterpretedOption" }], extensionRange: [{ start: 1000, end: 536870912 }] }, { name: "EnumValueOptions", field: [{ name: "deprecated", number: 1, type: 8, label: 1, defaultValue: "false" }, { name: "features", number: 2, type: 11, label: 1, typeName: ".google.protobuf.FeatureSet" }, { name: "debug_redact", number: 3, type: 8, label: 1, defaultValue: "false" }, { name: "feature_support", number: 4, type: 11, label: 1, typeName: ".google.protobuf.FieldOptions.FeatureSupport" }, { name: "uninterpreted_option", number: 999, type: 11, label: 3, typeName: ".google.protobuf.UninterpretedOption" }], extensionRange: [{ start: 1000, end: 536870912 }] }, { name: "ServiceOptions", field: [{ name: "features", number: 34, type: 11, label: 1, typeName: ".google.protobuf.FeatureSet" }, { name: "deprecated", number: 33, type: 8, label: 1, defaultValue: "false" }, { name: "uninterpreted_option", number: 999, type: 11, label: 3, typeName: ".google.protobuf.UninterpretedOption" }], extensionRange: [{ start: 1000, end: 536870912 }] }, { name: "MethodOptions", field: [{ name: "deprecated", number: 33, type: 8, label: 1, defaultValue: "false" }, { name: "idempotency_level", number: 34, type: 14, label: 1, typeName: ".google.protobuf.MethodOptions.IdempotencyLevel", defaultValue: "IDEMPOTENCY_UNKNOWN" }, { name: "features", number: 35, type: 11, label: 1, typeName: ".google.protobuf.FeatureSet" }, { name: "uninterpreted_option", number: 999, type: 11, label: 3, typeName: ".google.protobuf.UninterpretedOption" }], enumType: [{ name: "IdempotencyLevel", value: [{ name: "IDEMPOTENCY_UNKNOWN", number: 0 }, { name: "NO_SIDE_EFFECTS", number: 1 }, { name: "IDEMPOTENT", number: 2 }] }], extensionRange: [{ start: 1000, end: 536870912 }] }, { name: "UninterpretedOption", field: [{ name: "name", number: 2, type: 11, label: 3, typeName: ".google.protobuf.UninterpretedOption.NamePart" }, { name: "identifier_value", number: 3, type: 9, label: 1 }, { name: "positive_int_value", number: 4, type: 4, label: 1 }, { name: "negative_int_value", number: 5, type: 3, label: 1 }, { name: "double_value", number: 6, type: 1, label: 1 }, { name: "string_value", number: 7, type: 12, label: 1 }, { name: "aggregate_value", number: 8, type: 9, label: 1 }], nestedType: [{ name: "NamePart", field: [{ name: "name_part", number: 1, type: 9, label: 2 }, { name: "is_extension", number: 2, type: 8, label: 2 }] }] }, { name: "FeatureSet", field: [{ name: "field_presence", number: 1, type: 14, label: 1, typeName: ".google.protobuf.FeatureSet.FieldPresence", options: { retention: 1, targets: [4, 1], editionDefaults: [{ value: "EXPLICIT", edition: 900 }, { value: "IMPLICIT", edition: 999 }, { value: "EXPLICIT", edition: 1000 }] } }, { name: "enum_type", number: 2, type: 14, label: 1, typeName: ".google.protobuf.FeatureSet.EnumType", options: { retention: 1, targets: [6, 1], editionDefaults: [{ value: "CLOSED", edition: 900 }, { value: "OPEN", edition: 999 }] } }, { name: "repeated_field_encoding", number: 3, type: 14, label: 1, typeName: ".google.protobuf.FeatureSet.RepeatedFieldEncoding", options: { retention: 1, targets: [4, 1], editionDefaults: [{ value: "EXPANDED", edition: 900 }, { value: "PACKED", edition: 999 }] } }, { name: "utf8_validation", number: 4, type: 14, label: 1, typeName: ".google.protobuf.FeatureSet.Utf8Validation", options: { retention: 1, targets: [4, 1], editionDefaults: [{ value: "NONE", edition: 900 }, { value: "VERIFY", edition: 999 }] } }, { name: "message_encoding", number: 5, type: 14, label: 1, typeName: ".google.protobuf.FeatureSet.MessageEncoding", options: { retention: 1, targets: [4, 1], editionDefaults: [{ value: "LENGTH_PREFIXED", edition: 900 }] } }, { name: "json_format", number: 6, type: 14, label: 1, typeName: ".google.protobuf.FeatureSet.JsonFormat", options: { retention: 1, targets: [3, 6, 1], editionDefaults: [{ value: "LEGACY_BEST_EFFORT", edition: 900 }, { value: "ALLOW", edition: 999 }] } }, { name: "enforce_naming_style", number: 7, type: 14, label: 1, typeName: ".google.protobuf.FeatureSet.EnforceNamingStyle", options: { retention: 2, targets: [1, 2, 3, 4, 5, 6, 7, 8, 9], editionDefaults: [{ value: "STYLE_LEGACY", edition: 900 }, { value: "STYLE2024", edition: 1001 }] } }, { name: "default_symbol_visibility", number: 8, type: 14, label: 1, typeName: ".google.protobuf.FeatureSet.VisibilityFeature.DefaultSymbolVisibility", options: { retention: 2, targets: [1], editionDefaults: [{ value: "EXPORT_ALL", edition: 900 }, { value: "EXPORT_TOP_LEVEL", edition: 1001 }] } }], nestedType: [{ name: "VisibilityFeature", enumType: [{ name: "DefaultSymbolVisibility", value: [{ name: "DEFAULT_SYMBOL_VISIBILITY_UNKNOWN", number: 0 }, { name: "EXPORT_ALL", number: 1 }, { name: "EXPORT_TOP_LEVEL", number: 2 }, { name: "LOCAL_ALL", number: 3 }, { name: "STRICT", number: 4 }] }] }], enumType: [{ name: "FieldPresence", value: [{ name: "FIELD_PRESENCE_UNKNOWN", number: 0 }, { name: "EXPLICIT", number: 1 }, { name: "IMPLICIT", number: 2 }, { name: "LEGACY_REQUIRED", number: 3 }] }, { name: "EnumType", value: [{ name: "ENUM_TYPE_UNKNOWN", number: 0 }, { name: "OPEN", number: 1 }, { name: "CLOSED", number: 2 }] }, { name: "RepeatedFieldEncoding", value: [{ name: "REPEATED_FIELD_ENCODING_UNKNOWN", number: 0 }, { name: "PACKED", number: 1 }, { name: "EXPANDED", number: 2 }] }, { name: "Utf8Validation", value: [{ name: "UTF8_VALIDATION_UNKNOWN", number: 0 }, { name: "VERIFY", number: 2 }, { name: "NONE", number: 3 }] }, { name: "MessageEncoding", value: [{ name: "MESSAGE_ENCODING_UNKNOWN", number: 0 }, { name: "LENGTH_PREFIXED", number: 1 }, { name: "DELIMITED", number: 2 }] }, { name: "JsonFormat", value: [{ name: "JSON_FORMAT_UNKNOWN", number: 0 }, { name: "ALLOW", number: 1 }, { name: "LEGACY_BEST_EFFORT", number: 2 }] }, { name: "EnforceNamingStyle", value: [{ name: "ENFORCE_NAMING_STYLE_UNKNOWN", number: 0 }, { name: "STYLE2024", number: 1 }, { name: "STYLE_LEGACY", number: 2 }] }], extensionRange: [{ start: 1000, end: 9995 }, { start: 9995, end: 1e4 }, { start: 1e4, end: 10001 }] }, { name: "FeatureSetDefaults", field: [{ name: "defaults", number: 1, type: 11, label: 3, typeName: ".google.protobuf.FeatureSetDefaults.FeatureSetEditionDefault" }, { name: "minimum_edition", number: 4, type: 14, label: 1, typeName: ".google.protobuf.Edition" }, { name: "maximum_edition", number: 5, type: 14, label: 1, typeName: ".google.protobuf.Edition" }], nestedType: [{ name: "FeatureSetEditionDefault", field: [{ name: "edition", number: 3, type: 14, label: 1, typeName: ".google.protobuf.Edition" }, { name: "overridable_features", number: 4, type: 11, label: 1, typeName: ".google.protobuf.FeatureSet" }, { name: "fixed_features", number: 5, type: 11, label: 1, typeName: ".google.protobuf.FeatureSet" }] }] }, { name: "SourceCodeInfo", field: [{ name: "location", number: 1, type: 11, label: 3, typeName: ".google.protobuf.SourceCodeInfo.Location" }], nestedType: [{ name: "Location", field: [{ name: "path", number: 1, type: 5, label: 3, options: { packed: true } }, { name: "span", number: 2, type: 5, label: 3, options: { packed: true } }, { name: "leading_comments", number: 3, type: 9, label: 1 }, { name: "trailing_comments", number: 4, type: 9, label: 1 }, { name: "leading_detached_comments", number: 6, type: 9, label: 3 }] }], extensionRange: [{ start: 536000000, end: 536000001 }] }, { name: "GeneratedCodeInfo", field: [{ name: "annotation", number: 1, type: 11, label: 3, typeName: ".google.protobuf.GeneratedCodeInfo.Annotation" }], nestedType: [{ name: "Annotation", field: [{ name: "path", number: 1, type: 5, label: 3, options: { packed: true } }, { name: "source_file", number: 2, type: 9, label: 1 }, { name: "begin", number: 3, type: 5, label: 1 }, { name: "end", number: 4, type: 5, label: 1 }, { name: "semantic", number: 5, type: 14, label: 1, typeName: ".google.protobuf.GeneratedCodeInfo.Annotation.Semantic" }], enumType: [{ name: "Semantic", value: [{ name: "NONE", number: 0 }, { name: "SET", number: 1 }, { name: "ALIAS", number: 2 }] }] }] }], enumType: [{ name: "Edition", value: [{ name: "EDITION_UNKNOWN", number: 0 }, { name: "EDITION_LEGACY", number: 900 }, { name: "EDITION_PROTO2", number: 998 }, { name: "EDITION_PROTO3", number: 999 }, { name: "EDITION_2023", number: 1000 }, { name: "EDITION_2024", number: 1001 }, { name: "EDITION_1_TEST_ONLY", number: 1 }, { name: "EDITION_2_TEST_ONLY", number: 2 }, { name: "EDITION_99997_TEST_ONLY", number: 99997 }, { name: "EDITION_99998_TEST_ONLY", number: 99998 }, { name: "EDITION_99999_TEST_ONLY", number: 99999 }, { name: "EDITION_MAX", number: 2147483647 }] }, { name: "SymbolVisibility", value: [{ name: "VISIBILITY_UNSET", number: 0 }, { name: "VISIBILITY_LOCAL", number: 1 }, { name: "VISIBILITY_EXPORT", number: 2 }] }] });
-var FileDescriptorProtoSchema2 = /* @__PURE__ */ messageDesc2(file_google_protobuf_descriptor2, 1);
-var ExtensionRangeOptions_VerificationState2;
-(function(ExtensionRangeOptions_VerificationState) {
-  ExtensionRangeOptions_VerificationState[ExtensionRangeOptions_VerificationState["DECLARATION"] = 0] = "DECLARATION";
-  ExtensionRangeOptions_VerificationState[ExtensionRangeOptions_VerificationState["UNVERIFIED"] = 1] = "UNVERIFIED";
-})(ExtensionRangeOptions_VerificationState2 || (ExtensionRangeOptions_VerificationState2 = {}));
-var FieldDescriptorProto_Type2;
-(function(FieldDescriptorProto_Type) {
-  FieldDescriptorProto_Type[FieldDescriptorProto_Type["DOUBLE"] = 1] = "DOUBLE";
-  FieldDescriptorProto_Type[FieldDescriptorProto_Type["FLOAT"] = 2] = "FLOAT";
-  FieldDescriptorProto_Type[FieldDescriptorProto_Type["INT64"] = 3] = "INT64";
-  FieldDescriptorProto_Type[FieldDescriptorProto_Type["UINT64"] = 4] = "UINT64";
-  FieldDescriptorProto_Type[FieldDescriptorProto_Type["INT32"] = 5] = "INT32";
-  FieldDescriptorProto_Type[FieldDescriptorProto_Type["FIXED64"] = 6] = "FIXED64";
-  FieldDescriptorProto_Type[FieldDescriptorProto_Type["FIXED32"] = 7] = "FIXED32";
-  FieldDescriptorProto_Type[FieldDescriptorProto_Type["BOOL"] = 8] = "BOOL";
-  FieldDescriptorProto_Type[FieldDescriptorProto_Type["STRING"] = 9] = "STRING";
-  FieldDescriptorProto_Type[FieldDescriptorProto_Type["GROUP"] = 10] = "GROUP";
-  FieldDescriptorProto_Type[FieldDescriptorProto_Type["MESSAGE"] = 11] = "MESSAGE";
-  FieldDescriptorProto_Type[FieldDescriptorProto_Type["BYTES"] = 12] = "BYTES";
-  FieldDescriptorProto_Type[FieldDescriptorProto_Type["UINT32"] = 13] = "UINT32";
-  FieldDescriptorProto_Type[FieldDescriptorProto_Type["ENUM"] = 14] = "ENUM";
-  FieldDescriptorProto_Type[FieldDescriptorProto_Type["SFIXED32"] = 15] = "SFIXED32";
-  FieldDescriptorProto_Type[FieldDescriptorProto_Type["SFIXED64"] = 16] = "SFIXED64";
-  FieldDescriptorProto_Type[FieldDescriptorProto_Type["SINT32"] = 17] = "SINT32";
-  FieldDescriptorProto_Type[FieldDescriptorProto_Type["SINT64"] = 18] = "SINT64";
-})(FieldDescriptorProto_Type2 || (FieldDescriptorProto_Type2 = {}));
-var FieldDescriptorProto_Label2;
-(function(FieldDescriptorProto_Label) {
-  FieldDescriptorProto_Label[FieldDescriptorProto_Label["OPTIONAL"] = 1] = "OPTIONAL";
-  FieldDescriptorProto_Label[FieldDescriptorProto_Label["REPEATED"] = 3] = "REPEATED";
-  FieldDescriptorProto_Label[FieldDescriptorProto_Label["REQUIRED"] = 2] = "REQUIRED";
-})(FieldDescriptorProto_Label2 || (FieldDescriptorProto_Label2 = {}));
-var FileOptions_OptimizeMode2;
-(function(FileOptions_OptimizeMode) {
-  FileOptions_OptimizeMode[FileOptions_OptimizeMode["SPEED"] = 1] = "SPEED";
-  FileOptions_OptimizeMode[FileOptions_OptimizeMode["CODE_SIZE"] = 2] = "CODE_SIZE";
-  FileOptions_OptimizeMode[FileOptions_OptimizeMode["LITE_RUNTIME"] = 3] = "LITE_RUNTIME";
-})(FileOptions_OptimizeMode2 || (FileOptions_OptimizeMode2 = {}));
-var FieldOptions_CType2;
-(function(FieldOptions_CType) {
-  FieldOptions_CType[FieldOptions_CType["STRING"] = 0] = "STRING";
-  FieldOptions_CType[FieldOptions_CType["CORD"] = 1] = "CORD";
-  FieldOptions_CType[FieldOptions_CType["STRING_PIECE"] = 2] = "STRING_PIECE";
-})(FieldOptions_CType2 || (FieldOptions_CType2 = {}));
-var FieldOptions_JSType2;
-(function(FieldOptions_JSType) {
-  FieldOptions_JSType[FieldOptions_JSType["JS_NORMAL"] = 0] = "JS_NORMAL";
-  FieldOptions_JSType[FieldOptions_JSType["JS_STRING"] = 1] = "JS_STRING";
-  FieldOptions_JSType[FieldOptions_JSType["JS_NUMBER"] = 2] = "JS_NUMBER";
-})(FieldOptions_JSType2 || (FieldOptions_JSType2 = {}));
-var FieldOptions_OptionRetention2;
-(function(FieldOptions_OptionRetention) {
-  FieldOptions_OptionRetention[FieldOptions_OptionRetention["RETENTION_UNKNOWN"] = 0] = "RETENTION_UNKNOWN";
-  FieldOptions_OptionRetention[FieldOptions_OptionRetention["RETENTION_RUNTIME"] = 1] = "RETENTION_RUNTIME";
-  FieldOptions_OptionRetention[FieldOptions_OptionRetention["RETENTION_SOURCE"] = 2] = "RETENTION_SOURCE";
-})(FieldOptions_OptionRetention2 || (FieldOptions_OptionRetention2 = {}));
-var FieldOptions_OptionTargetType2;
-(function(FieldOptions_OptionTargetType) {
-  FieldOptions_OptionTargetType[FieldOptions_OptionTargetType["TARGET_TYPE_UNKNOWN"] = 0] = "TARGET_TYPE_UNKNOWN";
-  FieldOptions_OptionTargetType[FieldOptions_OptionTargetType["TARGET_TYPE_FILE"] = 1] = "TARGET_TYPE_FILE";
-  FieldOptions_OptionTargetType[FieldOptions_OptionTargetType["TARGET_TYPE_EXTENSION_RANGE"] = 2] = "TARGET_TYPE_EXTENSION_RANGE";
-  FieldOptions_OptionTargetType[FieldOptions_OptionTargetType["TARGET_TYPE_MESSAGE"] = 3] = "TARGET_TYPE_MESSAGE";
-  FieldOptions_OptionTargetType[FieldOptions_OptionTargetType["TARGET_TYPE_FIELD"] = 4] = "TARGET_TYPE_FIELD";
-  FieldOptions_OptionTargetType[FieldOptions_OptionTargetType["TARGET_TYPE_ONEOF"] = 5] = "TARGET_TYPE_ONEOF";
-  FieldOptions_OptionTargetType[FieldOptions_OptionTargetType["TARGET_TYPE_ENUM"] = 6] = "TARGET_TYPE_ENUM";
-  FieldOptions_OptionTargetType[FieldOptions_OptionTargetType["TARGET_TYPE_ENUM_ENTRY"] = 7] = "TARGET_TYPE_ENUM_ENTRY";
-  FieldOptions_OptionTargetType[FieldOptions_OptionTargetType["TARGET_TYPE_SERVICE"] = 8] = "TARGET_TYPE_SERVICE";
-  FieldOptions_OptionTargetType[FieldOptions_OptionTargetType["TARGET_TYPE_METHOD"] = 9] = "TARGET_TYPE_METHOD";
-})(FieldOptions_OptionTargetType2 || (FieldOptions_OptionTargetType2 = {}));
-var MethodOptions_IdempotencyLevel2;
-(function(MethodOptions_IdempotencyLevel) {
-  MethodOptions_IdempotencyLevel[MethodOptions_IdempotencyLevel["IDEMPOTENCY_UNKNOWN"] = 0] = "IDEMPOTENCY_UNKNOWN";
-  MethodOptions_IdempotencyLevel[MethodOptions_IdempotencyLevel["NO_SIDE_EFFECTS"] = 1] = "NO_SIDE_EFFECTS";
-  MethodOptions_IdempotencyLevel[MethodOptions_IdempotencyLevel["IDEMPOTENT"] = 2] = "IDEMPOTENT";
-})(MethodOptions_IdempotencyLevel2 || (MethodOptions_IdempotencyLevel2 = {}));
-var FeatureSet_VisibilityFeature_DefaultSymbolVisibility2;
-(function(FeatureSet_VisibilityFeature_DefaultSymbolVisibility) {
-  FeatureSet_VisibilityFeature_DefaultSymbolVisibility[FeatureSet_VisibilityFeature_DefaultSymbolVisibility["DEFAULT_SYMBOL_VISIBILITY_UNKNOWN"] = 0] = "DEFAULT_SYMBOL_VISIBILITY_UNKNOWN";
-  FeatureSet_VisibilityFeature_DefaultSymbolVisibility[FeatureSet_VisibilityFeature_DefaultSymbolVisibility["EXPORT_ALL"] = 1] = "EXPORT_ALL";
-  FeatureSet_VisibilityFeature_DefaultSymbolVisibility[FeatureSet_VisibilityFeature_DefaultSymbolVisibility["EXPORT_TOP_LEVEL"] = 2] = "EXPORT_TOP_LEVEL";
-  FeatureSet_VisibilityFeature_DefaultSymbolVisibility[FeatureSet_VisibilityFeature_DefaultSymbolVisibility["LOCAL_ALL"] = 3] = "LOCAL_ALL";
-  FeatureSet_VisibilityFeature_DefaultSymbolVisibility[FeatureSet_VisibilityFeature_DefaultSymbolVisibility["STRICT"] = 4] = "STRICT";
-})(FeatureSet_VisibilityFeature_DefaultSymbolVisibility2 || (FeatureSet_VisibilityFeature_DefaultSymbolVisibility2 = {}));
-var FeatureSet_FieldPresence2;
-(function(FeatureSet_FieldPresence) {
-  FeatureSet_FieldPresence[FeatureSet_FieldPresence["FIELD_PRESENCE_UNKNOWN"] = 0] = "FIELD_PRESENCE_UNKNOWN";
-  FeatureSet_FieldPresence[FeatureSet_FieldPresence["EXPLICIT"] = 1] = "EXPLICIT";
-  FeatureSet_FieldPresence[FeatureSet_FieldPresence["IMPLICIT"] = 2] = "IMPLICIT";
-  FeatureSet_FieldPresence[FeatureSet_FieldPresence["LEGACY_REQUIRED"] = 3] = "LEGACY_REQUIRED";
-})(FeatureSet_FieldPresence2 || (FeatureSet_FieldPresence2 = {}));
-var FeatureSet_EnumType2;
-(function(FeatureSet_EnumType) {
-  FeatureSet_EnumType[FeatureSet_EnumType["ENUM_TYPE_UNKNOWN"] = 0] = "ENUM_TYPE_UNKNOWN";
-  FeatureSet_EnumType[FeatureSet_EnumType["OPEN"] = 1] = "OPEN";
-  FeatureSet_EnumType[FeatureSet_EnumType["CLOSED"] = 2] = "CLOSED";
-})(FeatureSet_EnumType2 || (FeatureSet_EnumType2 = {}));
-var FeatureSet_RepeatedFieldEncoding2;
-(function(FeatureSet_RepeatedFieldEncoding) {
-  FeatureSet_RepeatedFieldEncoding[FeatureSet_RepeatedFieldEncoding["REPEATED_FIELD_ENCODING_UNKNOWN"] = 0] = "REPEATED_FIELD_ENCODING_UNKNOWN";
-  FeatureSet_RepeatedFieldEncoding[FeatureSet_RepeatedFieldEncoding["PACKED"] = 1] = "PACKED";
-  FeatureSet_RepeatedFieldEncoding[FeatureSet_RepeatedFieldEncoding["EXPANDED"] = 2] = "EXPANDED";
-})(FeatureSet_RepeatedFieldEncoding2 || (FeatureSet_RepeatedFieldEncoding2 = {}));
-var FeatureSet_Utf8Validation2;
-(function(FeatureSet_Utf8Validation) {
-  FeatureSet_Utf8Validation[FeatureSet_Utf8Validation["UTF8_VALIDATION_UNKNOWN"] = 0] = "UTF8_VALIDATION_UNKNOWN";
-  FeatureSet_Utf8Validation[FeatureSet_Utf8Validation["VERIFY"] = 2] = "VERIFY";
-  FeatureSet_Utf8Validation[FeatureSet_Utf8Validation["NONE"] = 3] = "NONE";
-})(FeatureSet_Utf8Validation2 || (FeatureSet_Utf8Validation2 = {}));
-var FeatureSet_MessageEncoding2;
-(function(FeatureSet_MessageEncoding) {
-  FeatureSet_MessageEncoding[FeatureSet_MessageEncoding["MESSAGE_ENCODING_UNKNOWN"] = 0] = "MESSAGE_ENCODING_UNKNOWN";
-  FeatureSet_MessageEncoding[FeatureSet_MessageEncoding["LENGTH_PREFIXED"] = 1] = "LENGTH_PREFIXED";
-  FeatureSet_MessageEncoding[FeatureSet_MessageEncoding["DELIMITED"] = 2] = "DELIMITED";
-})(FeatureSet_MessageEncoding2 || (FeatureSet_MessageEncoding2 = {}));
-var FeatureSet_JsonFormat2;
-(function(FeatureSet_JsonFormat) {
-  FeatureSet_JsonFormat[FeatureSet_JsonFormat["JSON_FORMAT_UNKNOWN"] = 0] = "JSON_FORMAT_UNKNOWN";
-  FeatureSet_JsonFormat[FeatureSet_JsonFormat["ALLOW"] = 1] = "ALLOW";
-  FeatureSet_JsonFormat[FeatureSet_JsonFormat["LEGACY_BEST_EFFORT"] = 2] = "LEGACY_BEST_EFFORT";
-})(FeatureSet_JsonFormat2 || (FeatureSet_JsonFormat2 = {}));
-var FeatureSet_EnforceNamingStyle2;
-(function(FeatureSet_EnforceNamingStyle) {
-  FeatureSet_EnforceNamingStyle[FeatureSet_EnforceNamingStyle["ENFORCE_NAMING_STYLE_UNKNOWN"] = 0] = "ENFORCE_NAMING_STYLE_UNKNOWN";
-  FeatureSet_EnforceNamingStyle[FeatureSet_EnforceNamingStyle["STYLE2024"] = 1] = "STYLE2024";
-  FeatureSet_EnforceNamingStyle[FeatureSet_EnforceNamingStyle["STYLE_LEGACY"] = 2] = "STYLE_LEGACY";
-})(FeatureSet_EnforceNamingStyle2 || (FeatureSet_EnforceNamingStyle2 = {}));
-var GeneratedCodeInfo_Annotation_Semantic2;
-(function(GeneratedCodeInfo_Annotation_Semantic) {
-  GeneratedCodeInfo_Annotation_Semantic[GeneratedCodeInfo_Annotation_Semantic["NONE"] = 0] = "NONE";
-  GeneratedCodeInfo_Annotation_Semantic[GeneratedCodeInfo_Annotation_Semantic["SET"] = 1] = "SET";
-  GeneratedCodeInfo_Annotation_Semantic[GeneratedCodeInfo_Annotation_Semantic["ALIAS"] = 2] = "ALIAS";
-})(GeneratedCodeInfo_Annotation_Semantic2 || (GeneratedCodeInfo_Annotation_Semantic2 = {}));
-var Edition2;
-(function(Edition) {
-  Edition[Edition["EDITION_UNKNOWN"] = 0] = "EDITION_UNKNOWN";
-  Edition[Edition["EDITION_LEGACY"] = 900] = "EDITION_LEGACY";
-  Edition[Edition["EDITION_PROTO2"] = 998] = "EDITION_PROTO2";
-  Edition[Edition["EDITION_PROTO3"] = 999] = "EDITION_PROTO3";
-  Edition[Edition["EDITION_2023"] = 1000] = "EDITION_2023";
-  Edition[Edition["EDITION_2024"] = 1001] = "EDITION_2024";
-  Edition[Edition["EDITION_1_TEST_ONLY"] = 1] = "EDITION_1_TEST_ONLY";
-  Edition[Edition["EDITION_2_TEST_ONLY"] = 2] = "EDITION_2_TEST_ONLY";
-  Edition[Edition["EDITION_99997_TEST_ONLY"] = 99997] = "EDITION_99997_TEST_ONLY";
-  Edition[Edition["EDITION_99998_TEST_ONLY"] = 99998] = "EDITION_99998_TEST_ONLY";
-  Edition[Edition["EDITION_99999_TEST_ONLY"] = 99999] = "EDITION_99999_TEST_ONLY";
-  Edition[Edition["EDITION_MAX"] = 2147483647] = "EDITION_MAX";
-})(Edition2 || (Edition2 = {}));
-var SymbolVisibility2;
-(function(SymbolVisibility) {
-  SymbolVisibility[SymbolVisibility["VISIBILITY_UNSET"] = 0] = "VISIBILITY_UNSET";
-  SymbolVisibility[SymbolVisibility["VISIBILITY_LOCAL"] = 1] = "VISIBILITY_LOCAL";
-  SymbolVisibility[SymbolVisibility["VISIBILITY_EXPORT"] = 2] = "VISIBILITY_EXPORT";
-})(SymbolVisibility2 || (SymbolVisibility2 = {}));
-var readDefaults2 = {
-  readUnknownFields: true
-};
-function makeReadOptions3(options) {
-  return options ? Object.assign(Object.assign({}, readDefaults2), options) : readDefaults2;
-}
-function fromBinary2(schema, bytes, options) {
-  const msg = reflect2(schema, undefined, false);
-  readMessage3(msg, new BinaryReader2(bytes), makeReadOptions3(options), false, bytes.byteLength);
-  return msg.message;
-}
-function readMessage3(message, reader, options, delimited, lengthOrDelimitedFieldNo) {
-  var _a;
-  const end = delimited ? reader.len : reader.pos + lengthOrDelimitedFieldNo;
-  let fieldNo;
-  let wireType;
-  const unknownFields = (_a = message.getUnknown()) !== null && _a !== undefined ? _a : [];
-  while (reader.pos < end) {
-    [fieldNo, wireType] = reader.tag();
-    if (delimited && wireType == WireType2.EndGroup) {
-      break;
-    }
-    const field = message.findNumber(fieldNo);
-    if (!field) {
-      const data = reader.skip(wireType, fieldNo);
-      if (options.readUnknownFields) {
-        unknownFields.push({ no: fieldNo, wireType, data });
-      }
-      continue;
-    }
-    readField3(message, reader, field, wireType, options);
-  }
-  if (delimited) {
-    if (wireType != WireType2.EndGroup || fieldNo !== lengthOrDelimitedFieldNo) {
-      throw new Error("invalid end group tag");
-    }
-  }
-  if (unknownFields.length > 0) {
-    message.setUnknown(unknownFields);
-  }
-}
-function readField3(message, reader, field, wireType, options) {
-  var _a;
-  switch (field.fieldKind) {
-    case "scalar":
-      message.set(field, readScalar2(reader, field.scalar));
-      break;
-    case "enum":
-      const val = readScalar2(reader, ScalarType2.INT32);
-      if (field.enum.open) {
-        message.set(field, val);
-      } else {
-        const ok = field.enum.values.some((v) => v.number === val);
-        if (ok) {
-          message.set(field, val);
-        } else if (options.readUnknownFields) {
-          const data = new BinaryWriter2().int32(val).finish();
-          const unknownFields = (_a = message.getUnknown()) !== null && _a !== undefined ? _a : [];
-          unknownFields.push({ no: field.number, wireType, data });
-          message.setUnknown(unknownFields);
-        }
-      }
-      break;
-    case "message":
-      message.set(field, readMessageField3(reader, options, field, message.get(field)));
-      break;
-    case "list":
-      readListField3(reader, wireType, message.get(field), options);
-      break;
-    case "map":
-      readMapEntry2(reader, message.get(field), options);
-      break;
-  }
-}
-function readMapEntry2(reader, map, options) {
-  const field = map.field();
-  let key;
-  let val;
-  const len = reader.uint32();
-  const end = reader.pos + len;
-  while (reader.pos < end) {
-    const [fieldNo] = reader.tag();
-    switch (fieldNo) {
-      case 1:
-        key = readScalar2(reader, field.mapKey);
-        break;
-      case 2:
-        switch (field.mapKind) {
-          case "scalar":
-            val = readScalar2(reader, field.scalar);
-            break;
-          case "enum":
-            val = reader.int32();
-            break;
-          case "message":
-            val = readMessageField3(reader, options, field);
-            break;
-        }
-        break;
-    }
-  }
-  if (key === undefined) {
-    key = scalarZeroValue2(field.mapKey, false);
-  }
-  if (val === undefined) {
-    switch (field.mapKind) {
-      case "scalar":
-        val = scalarZeroValue2(field.scalar, false);
-        break;
-      case "enum":
-        val = field.enum.values[0].number;
-        break;
-      case "message":
-        val = reflect2(field.message, undefined, false);
-        break;
-    }
-  }
-  map.set(key, val);
-}
-function readListField3(reader, wireType, list, options) {
-  var _a;
-  const field = list.field();
-  if (field.listKind === "message") {
-    list.add(readMessageField3(reader, options, field));
-    return;
-  }
-  const scalarType = (_a = field.scalar) !== null && _a !== undefined ? _a : ScalarType2.INT32;
-  const packed = wireType == WireType2.LengthDelimited && scalarType != ScalarType2.STRING && scalarType != ScalarType2.BYTES;
-  if (!packed) {
-    list.add(readScalar2(reader, scalarType));
-    return;
-  }
-  const e = reader.uint32() + reader.pos;
-  while (reader.pos < e) {
-    list.add(readScalar2(reader, scalarType));
-  }
-}
-function readMessageField3(reader, options, field, mergeMessage) {
-  const delimited = field.delimitedEncoding;
-  const message = mergeMessage !== null && mergeMessage !== undefined ? mergeMessage : reflect2(field.message, undefined, false);
-  readMessage3(message, reader, options, delimited, delimited ? field.number : reader.uint32());
-  return message;
-}
-function readScalar2(reader, type) {
-  switch (type) {
-    case ScalarType2.STRING:
-      return reader.string();
-    case ScalarType2.BOOL:
-      return reader.bool();
-    case ScalarType2.DOUBLE:
-      return reader.double();
-    case ScalarType2.FLOAT:
-      return reader.float();
-    case ScalarType2.INT32:
-      return reader.int32();
-    case ScalarType2.INT64:
-      return reader.int64();
-    case ScalarType2.UINT64:
-      return reader.uint64();
-    case ScalarType2.FIXED64:
-      return reader.fixed64();
-    case ScalarType2.BYTES:
-      return reader.bytes();
-    case ScalarType2.FIXED32:
-      return reader.fixed32();
-    case ScalarType2.SFIXED32:
-      return reader.sfixed32();
-    case ScalarType2.SFIXED64:
-      return reader.sfixed64();
-    case ScalarType2.SINT64:
-      return reader.sint64();
-    case ScalarType2.UINT32:
-      return reader.uint32();
-    case ScalarType2.SINT32:
-      return reader.sint32();
-  }
-}
-function fileDesc2(b64, imports) {
-  var _a;
-  const root = fromBinary2(FileDescriptorProtoSchema2, base64Decode2(b64));
-  root.messageType.forEach(restoreJsonNames2);
-  root.dependency = (_a = imports === null || imports === undefined ? undefined : imports.map((f) => f.proto.name)) !== null && _a !== undefined ? _a : [];
-  const reg = createFileRegistry2(root, (protoFileName) => imports === null || imports === undefined ? undefined : imports.find((f) => f.proto.name === protoFileName));
-  return reg.getFile(root.name);
-}
-var file_google_protobuf_timestamp2 = /* @__PURE__ */ fileDesc2("Ch9nb29nbGUvcHJvdG9idWYvdGltZXN0YW1wLnByb3RvEg9nb29nbGUucHJvdG9idWYiKwoJVGltZXN0YW1wEg8KB3NlY29uZHMYASABKAMSDQoFbmFub3MYAiABKAVChQEKE2NvbS5nb29nbGUucHJvdG9idWZCDlRpbWVzdGFtcFByb3RvUAFaMmdvb2dsZS5nb2xhbmcub3JnL3Byb3RvYnVmL3R5cGVzL2tub3duL3RpbWVzdGFtcHBi+AEBogIDR1BCqgIeR29vZ2xlLlByb3RvYnVmLldlbGxLbm93blR5cGVzYgZwcm90bzM");
-var file_google_protobuf_any2 = /* @__PURE__ */ fileDesc2("Chlnb29nbGUvcHJvdG9idWYvYW55LnByb3RvEg9nb29nbGUucHJvdG9idWYiJgoDQW55EhAKCHR5cGVfdXJsGAEgASgJEg0KBXZhbHVlGAIgASgMQnYKE2NvbS5nb29nbGUucHJvdG9idWZCCEFueVByb3RvUAFaLGdvb2dsZS5nb2xhbmcub3JnL3Byb3RvYnVmL3R5cGVzL2tub3duL2FueXBiogIDR1BCqgIeR29vZ2xlLlByb3RvYnVmLldlbGxLbm93blR5cGVzYgZwcm90bzM");
-var AnySchema2 = /* @__PURE__ */ messageDesc2(file_google_protobuf_any2, 0);
-var LEGACY_REQUIRED4 = 3;
-var writeDefaults2 = {
-  writeUnknownFields: true
-};
-function makeWriteOptions2(options) {
-  return options ? Object.assign(Object.assign({}, writeDefaults2), options) : writeDefaults2;
-}
-function toBinary2(schema, message, options) {
-  return writeFields2(new BinaryWriter2, makeWriteOptions2(options), reflect2(schema, message)).finish();
-}
-function writeFields2(writer, opts, msg) {
-  var _a;
-  for (const f of msg.sortedFields) {
-    if (!msg.isSet(f)) {
-      if (f.presence == LEGACY_REQUIRED4) {
-        throw new Error(`cannot encode ${f} to binary: required field not set`);
-      }
-      continue;
-    }
-    writeField2(writer, opts, msg, f);
-  }
-  if (opts.writeUnknownFields) {
-    for (const { no, wireType, data } of (_a = msg.getUnknown()) !== null && _a !== undefined ? _a : []) {
-      writer.tag(no, wireType).raw(data);
-    }
-  }
-  return writer;
-}
-function writeField2(writer, opts, msg, field) {
-  var _a;
-  switch (field.fieldKind) {
-    case "scalar":
-    case "enum":
-      writeScalar2(writer, msg.desc.typeName, field.name, (_a = field.scalar) !== null && _a !== undefined ? _a : ScalarType2.INT32, field.number, msg.get(field));
-      break;
-    case "list":
-      writeListField2(writer, opts, field, msg.get(field));
-      break;
-    case "message":
-      writeMessageField2(writer, opts, field, msg.get(field));
-      break;
-    case "map":
-      for (const [key, val] of msg.get(field)) {
-        writeMapEntry2(writer, opts, field, key, val);
-      }
-      break;
-  }
-}
-function writeScalar2(writer, msgName, fieldName, scalarType, fieldNo, value) {
-  writeScalarValue2(writer.tag(fieldNo, writeTypeOfScalar2(scalarType)), msgName, fieldName, scalarType, value);
-}
-function writeMessageField2(writer, opts, field, message) {
-  if (field.delimitedEncoding) {
-    writeFields2(writer.tag(field.number, WireType2.StartGroup), opts, message).tag(field.number, WireType2.EndGroup);
-  } else {
-    writeFields2(writer.tag(field.number, WireType2.LengthDelimited).fork(), opts, message).join();
-  }
-}
-function writeListField2(writer, opts, field, list) {
-  var _a;
-  if (field.listKind == "message") {
-    for (const item of list) {
-      writeMessageField2(writer, opts, field, item);
-    }
-    return;
-  }
-  const scalarType = (_a = field.scalar) !== null && _a !== undefined ? _a : ScalarType2.INT32;
-  if (field.packed) {
-    if (!list.size) {
-      return;
-    }
-    writer.tag(field.number, WireType2.LengthDelimited).fork();
-    for (const item of list) {
-      writeScalarValue2(writer, field.parent.typeName, field.name, scalarType, item);
-    }
-    writer.join();
-    return;
-  }
-  for (const item of list) {
-    writeScalar2(writer, field.parent.typeName, field.name, scalarType, field.number, item);
-  }
-}
-function writeMapEntry2(writer, opts, field, key, value) {
-  var _a;
-  writer.tag(field.number, WireType2.LengthDelimited).fork();
-  writeScalar2(writer, field.parent.typeName, field.name, field.mapKey, 1, key);
-  switch (field.mapKind) {
-    case "scalar":
-    case "enum":
-      writeScalar2(writer, field.parent.typeName, field.name, (_a = field.scalar) !== null && _a !== undefined ? _a : ScalarType2.INT32, 2, value);
-      break;
-    case "message":
-      writeFields2(writer.tag(2, WireType2.LengthDelimited).fork(), opts, value).join();
-      break;
-  }
-  writer.join();
-}
-function writeScalarValue2(writer, msgName, fieldName, type, value) {
-  try {
-    switch (type) {
-      case ScalarType2.STRING:
-        writer.string(value);
-        break;
-      case ScalarType2.BOOL:
-        writer.bool(value);
-        break;
-      case ScalarType2.DOUBLE:
-        writer.double(value);
-        break;
-      case ScalarType2.FLOAT:
-        writer.float(value);
-        break;
-      case ScalarType2.INT32:
-        writer.int32(value);
-        break;
-      case ScalarType2.INT64:
-        writer.int64(value);
-        break;
-      case ScalarType2.UINT64:
-        writer.uint64(value);
-        break;
-      case ScalarType2.FIXED64:
-        writer.fixed64(value);
-        break;
-      case ScalarType2.BYTES:
-        writer.bytes(value);
-        break;
-      case ScalarType2.FIXED32:
-        writer.fixed32(value);
-        break;
-      case ScalarType2.SFIXED32:
-        writer.sfixed32(value);
-        break;
-      case ScalarType2.SFIXED64:
-        writer.sfixed64(value);
-        break;
-      case ScalarType2.SINT64:
-        writer.sint64(value);
-        break;
-      case ScalarType2.UINT32:
-        writer.uint32(value);
-        break;
-      case ScalarType2.SINT32:
-        writer.sint32(value);
-        break;
-    }
-  } catch (e) {
-    if (e instanceof Error) {
-      throw new Error(`cannot encode field ${msgName}.${fieldName} to binary: ${e.message}`);
-    }
-    throw e;
-  }
-}
-function writeTypeOfScalar2(type) {
-  switch (type) {
-    case ScalarType2.BYTES:
-    case ScalarType2.STRING:
-      return WireType2.LengthDelimited;
-    case ScalarType2.DOUBLE:
-    case ScalarType2.FIXED64:
-    case ScalarType2.SFIXED64:
-      return WireType2.Bit64;
-    case ScalarType2.FIXED32:
-    case ScalarType2.SFIXED32:
-    case ScalarType2.FLOAT:
-      return WireType2.Bit32;
-    default:
-      return WireType2.Varint;
-  }
-}
-function anyPack2(schema, message, into) {
-  let ret = false;
-  if (!into) {
-    into = create3(AnySchema2);
-    ret = true;
-  }
-  into.value = toBinary2(schema, message);
-  into.typeUrl = typeNameToUrl2(message.$typeName);
-  return ret ? into : undefined;
-}
-function typeNameToUrl2(name) {
-  return `type.googleapis.com/${name}`;
-}
-var file_google_protobuf_duration2 = /* @__PURE__ */ fileDesc2("Ch5nb29nbGUvcHJvdG9idWYvZHVyYXRpb24ucHJvdG8SD2dvb2dsZS5wcm90b2J1ZiIqCghEdXJhdGlvbhIPCgdzZWNvbmRzGAEgASgDEg0KBW5hbm9zGAIgASgFQoMBChNjb20uZ29vZ2xlLnByb3RvYnVmQg1EdXJhdGlvblByb3RvUAFaMWdvb2dsZS5nb2xhbmcub3JnL3Byb3RvYnVmL3R5cGVzL2tub3duL2R1cmF0aW9ucGL4AQGiAgNHUEKqAh5Hb29nbGUuUHJvdG9idWYuV2VsbEtub3duVHlwZXNiBnByb3RvMw");
-var file_google_protobuf_empty2 = /* @__PURE__ */ fileDesc2("Chtnb29nbGUvcHJvdG9idWYvZW1wdHkucHJvdG8SD2dvb2dsZS5wcm90b2J1ZiIHCgVFbXB0eUJ9ChNjb20uZ29vZ2xlLnByb3RvYnVmQgpFbXB0eVByb3RvUAFaLmdvb2dsZS5nb2xhbmcub3JnL3Byb3RvYnVmL3R5cGVzL2tub3duL2VtcHR5cGL4AQGiAgNHUEKqAh5Hb29nbGUuUHJvdG9idWYuV2VsbEtub3duVHlwZXNiBnByb3RvMw");
-var file_google_protobuf_struct2 = /* @__PURE__ */ fileDesc2("Chxnb29nbGUvcHJvdG9idWYvc3RydWN0LnByb3RvEg9nb29nbGUucHJvdG9idWYihAEKBlN0cnVjdBIzCgZmaWVsZHMYASADKAsyIy5nb29nbGUucHJvdG9idWYuU3RydWN0LkZpZWxkc0VudHJ5GkUKC0ZpZWxkc0VudHJ5EgsKA2tleRgBIAEoCRIlCgV2YWx1ZRgCIAEoCzIWLmdvb2dsZS5wcm90b2J1Zi5WYWx1ZToCOAEi6gEKBVZhbHVlEjAKCm51bGxfdmFsdWUYASABKA4yGi5nb29nbGUucHJvdG9idWYuTnVsbFZhbHVlSAASFgoMbnVtYmVyX3ZhbHVlGAIgASgBSAASFgoMc3RyaW5nX3ZhbHVlGAMgASgJSAASFAoKYm9vbF92YWx1ZRgEIAEoCEgAEi8KDHN0cnVjdF92YWx1ZRgFIAEoCzIXLmdvb2dsZS5wcm90b2J1Zi5TdHJ1Y3RIABIwCgpsaXN0X3ZhbHVlGAYgASgLMhouZ29vZ2xlLnByb3RvYnVmLkxpc3RWYWx1ZUgAQgYKBGtpbmQiMwoJTGlzdFZhbHVlEiYKBnZhbHVlcxgBIAMoCzIWLmdvb2dsZS5wcm90b2J1Zi5WYWx1ZSobCglOdWxsVmFsdWUSDgoKTlVMTF9WQUxVRRAAQn8KE2NvbS5nb29nbGUucHJvdG9idWZCC1N0cnVjdFByb3RvUAFaL2dvb2dsZS5nb2xhbmcub3JnL3Byb3RvYnVmL3R5cGVzL2tub3duL3N0cnVjdHBi+AEBogIDR1BCqgIeR29vZ2xlLlByb3RvYnVmLldlbGxLbm93blR5cGVzYgZwcm90bzM");
-var StructSchema2 = /* @__PURE__ */ messageDesc2(file_google_protobuf_struct2, 0);
-var ValueSchema3 = /* @__PURE__ */ messageDesc2(file_google_protobuf_struct2, 1);
-var ListValueSchema2 = /* @__PURE__ */ messageDesc2(file_google_protobuf_struct2, 2);
-var NullValue2;
-(function(NullValue) {
-  NullValue[NullValue["NULL_VALUE"] = 0] = "NULL_VALUE";
-})(NullValue2 || (NullValue2 = {}));
-function setExtension3(message, extension, value) {
-  var _a;
-  assertExtendee2(extension, message);
-  const ufs = ((_a = message.$unknown) !== null && _a !== undefined ? _a : []).filter((uf) => uf.no !== extension.number);
-  const [container, field] = createExtensionContainer2(extension, value);
-  const writer = new BinaryWriter2;
-  writeField2(writer, { writeUnknownFields: true }, container, field);
-  const reader = new BinaryReader2(writer.finish());
-  while (reader.pos < reader.len) {
-    const [no, wireType] = reader.tag();
-    const data = reader.skip(wireType, no);
-    ufs.push({ no, wireType, data });
-  }
-  message.$unknown = ufs;
-}
-function createExtensionContainer2(extension, value) {
-  const localName = extension.typeName;
-  const field = Object.assign(Object.assign({}, extension), { kind: "field", parent: extension.extendee, localName });
-  const desc = Object.assign(Object.assign({}, extension.extendee), { fields: [field], members: [field], oneofs: [] });
-  const container = create3(desc, value !== undefined ? { [localName]: value } : undefined);
-  return [
-    reflect2(desc, container),
-    field,
-    () => {
-      const value = container[localName];
-      if (value === undefined) {
-        const desc = extension.message;
-        if (isWrapperDesc2(desc)) {
-          return scalarZeroValue2(desc.fields[0].scalar, desc.fields[0].longAsString);
-        }
-        return create3(desc);
-      }
-      return value;
-    }
-  ];
-}
-function assertExtendee2(extension, message) {
-  if (extension.extendee.typeName != message.$typeName) {
-    throw new Error(`extension ${extension.typeName} can only be applied to message ${extension.extendee.typeName}`);
-  }
-}
-var jsonReadDefaults2 = {
-  ignoreUnknownFields: false
-};
-function makeReadOptions4(options) {
-  return options ? Object.assign(Object.assign({}, jsonReadDefaults2), options) : jsonReadDefaults2;
-}
-function fromJson2(schema, json, options) {
-  const msg = reflect2(schema);
-  try {
-    readMessage4(msg, json, makeReadOptions4(options));
-  } catch (e) {
-    if (isFieldError2(e)) {
-      throw new Error(`cannot decode ${e.field()} from JSON: ${e.message}`, {
-        cause: e
-      });
-    }
-    throw e;
-  }
-  return msg.message;
-}
-function readMessage4(msg, json, opts) {
-  var _a;
-  if (tryWktFromJson2(msg, json, opts)) {
-    return;
-  }
-  if (json == null || Array.isArray(json) || typeof json != "object") {
-    throw new Error(`cannot decode ${msg.desc} from JSON: ${formatVal2(json)}`);
-  }
-  const oneofSeen = new Map;
-  const jsonNames = new Map;
-  for (const field of msg.desc.fields) {
-    jsonNames.set(field.name, field).set(field.jsonName, field);
-  }
-  for (const [jsonKey, jsonValue] of Object.entries(json)) {
-    const field = jsonNames.get(jsonKey);
-    if (field) {
-      if (field.oneof) {
-        if (jsonValue === null && field.fieldKind == "scalar") {
-          continue;
-        }
-        const seen = oneofSeen.get(field.oneof);
-        if (seen !== undefined) {
-          throw new FieldError2(field.oneof, `oneof set multiple times by ${seen.name} and ${field.name}`);
-        }
-        oneofSeen.set(field.oneof, field);
-      }
-      readField4(msg, field, jsonValue, opts);
-    } else {
-      let extension = undefined;
-      if (jsonKey.startsWith("[") && jsonKey.endsWith("]") && (extension = (_a = opts.registry) === null || _a === undefined ? undefined : _a.getExtension(jsonKey.substring(1, jsonKey.length - 1))) && extension.extendee.typeName === msg.desc.typeName) {
-        const [container, field, get] = createExtensionContainer2(extension);
-        readField4(container, field, jsonValue, opts);
-        setExtension3(msg.message, extension, get());
-      }
-      if (!extension && !opts.ignoreUnknownFields) {
-        throw new Error(`cannot decode ${msg.desc} from JSON: key "${jsonKey}" is unknown`);
-      }
-    }
-  }
-}
-function readField4(msg, field, json, opts) {
-  switch (field.fieldKind) {
-    case "scalar":
-      readScalarField2(msg, field, json);
-      break;
-    case "enum":
-      readEnumField2(msg, field, json, opts);
-      break;
-    case "message":
-      readMessageField4(msg, field, json, opts);
-      break;
-    case "list":
-      readListField4(msg.get(field), json, opts);
-      break;
-    case "map":
-      readMapField2(msg.get(field), json, opts);
-      break;
-  }
-}
-function readMapField2(map, json, opts) {
-  if (json === null) {
-    return;
-  }
-  const field = map.field();
-  if (typeof json != "object" || Array.isArray(json)) {
-    throw new FieldError2(field, "expected object, got " + formatVal2(json));
-  }
-  for (const [jsonMapKey, jsonMapValue] of Object.entries(json)) {
-    if (jsonMapValue === null) {
-      throw new FieldError2(field, "map value must not be null");
-    }
-    let value;
-    switch (field.mapKind) {
-      case "message":
-        const msgValue = reflect2(field.message);
-        readMessage4(msgValue, jsonMapValue, opts);
-        value = msgValue;
-        break;
-      case "enum":
-        value = readEnum2(field.enum, jsonMapValue, opts.ignoreUnknownFields, true);
-        if (value === tokenIgnoredUnknownEnum2) {
-          return;
-        }
-        break;
-      case "scalar":
-        value = scalarFromJson2(field, jsonMapValue, true);
-        break;
-    }
-    const key = mapKeyFromJson2(field.mapKey, jsonMapKey);
-    map.set(key, value);
-  }
-}
-function readListField4(list, json, opts) {
-  if (json === null) {
-    return;
-  }
-  const field = list.field();
-  if (!Array.isArray(json)) {
-    throw new FieldError2(field, "expected Array, got " + formatVal2(json));
-  }
-  for (const jsonItem of json) {
-    if (jsonItem === null) {
-      throw new FieldError2(field, "list item must not be null");
-    }
-    switch (field.listKind) {
-      case "message":
-        const msgValue = reflect2(field.message);
-        readMessage4(msgValue, jsonItem, opts);
-        list.add(msgValue);
-        break;
-      case "enum":
-        const enumValue = readEnum2(field.enum, jsonItem, opts.ignoreUnknownFields, true);
-        if (enumValue !== tokenIgnoredUnknownEnum2) {
-          list.add(enumValue);
-        }
-        break;
-      case "scalar":
-        list.add(scalarFromJson2(field, jsonItem, true));
-        break;
-    }
-  }
-}
-function readMessageField4(msg, field, json, opts) {
-  if (json === null && field.message.typeName != "google.protobuf.Value") {
-    msg.clear(field);
-    return;
-  }
-  const msgValue = msg.isSet(field) ? msg.get(field) : reflect2(field.message);
-  readMessage4(msgValue, json, opts);
-  msg.set(field, msgValue);
-}
-function readEnumField2(msg, field, json, opts) {
-  const enumValue = readEnum2(field.enum, json, opts.ignoreUnknownFields, false);
-  if (enumValue === tokenNull2) {
-    msg.clear(field);
-  } else if (enumValue !== tokenIgnoredUnknownEnum2) {
-    msg.set(field, enumValue);
-  }
-}
-function readScalarField2(msg, field, json) {
-  const scalarValue = scalarFromJson2(field, json, false);
-  if (scalarValue === tokenNull2) {
-    msg.clear(field);
-  } else {
-    msg.set(field, scalarValue);
-  }
-}
-var tokenIgnoredUnknownEnum2 = Symbol();
-function readEnum2(desc, json, ignoreUnknownFields, nullAsZeroValue) {
-  if (json === null) {
-    if (desc.typeName == "google.protobuf.NullValue") {
-      return 0;
-    }
-    return nullAsZeroValue ? desc.values[0].number : tokenNull2;
-  }
-  switch (typeof json) {
-    case "number":
-      if (Number.isInteger(json)) {
-        return json;
-      }
-      break;
-    case "string":
-      const value = desc.values.find((ev) => ev.name === json);
-      if (value !== undefined) {
-        return value.number;
-      }
-      if (ignoreUnknownFields) {
-        return tokenIgnoredUnknownEnum2;
-      }
-      break;
-  }
-  throw new Error(`cannot decode ${desc} from JSON: ${formatVal2(json)}`);
-}
-var tokenNull2 = Symbol();
-function scalarFromJson2(field, json, nullAsZeroValue) {
-  if (json === null) {
-    if (nullAsZeroValue) {
-      return scalarZeroValue2(field.scalar, false);
-    }
-    return tokenNull2;
-  }
-  switch (field.scalar) {
-    case ScalarType2.DOUBLE:
-    case ScalarType2.FLOAT:
-      if (json === "NaN")
-        return NaN;
-      if (json === "Infinity")
-        return Number.POSITIVE_INFINITY;
-      if (json === "-Infinity")
-        return Number.NEGATIVE_INFINITY;
-      if (typeof json == "number") {
-        if (Number.isNaN(json)) {
-          throw new FieldError2(field, "unexpected NaN number");
-        }
-        if (!Number.isFinite(json)) {
-          throw new FieldError2(field, "unexpected infinite number");
-        }
-        break;
-      }
-      if (typeof json == "string") {
-        if (json === "") {
-          break;
-        }
-        if (json.trim().length !== json.length) {
-          break;
-        }
-        const float = Number(json);
-        if (!Number.isFinite(float)) {
-          break;
-        }
-        return float;
-      }
-      break;
-    case ScalarType2.INT32:
-    case ScalarType2.FIXED32:
-    case ScalarType2.SFIXED32:
-    case ScalarType2.SINT32:
-    case ScalarType2.UINT32:
-      return int32FromJson2(json);
-    case ScalarType2.BYTES:
-      if (typeof json == "string") {
-        if (json === "") {
-          return new Uint8Array(0);
-        }
-        try {
-          return base64Decode2(json);
-        } catch (e) {
-          const message = e instanceof Error ? e.message : String(e);
-          throw new FieldError2(field, message);
-        }
-      }
-      break;
-  }
-  return json;
-}
-function mapKeyFromJson2(type, json) {
-  switch (type) {
-    case ScalarType2.BOOL:
-      switch (json) {
-        case "true":
-          return true;
-        case "false":
-          return false;
-      }
-      return json;
-    case ScalarType2.INT32:
-    case ScalarType2.FIXED32:
-    case ScalarType2.UINT32:
-    case ScalarType2.SFIXED32:
-    case ScalarType2.SINT32:
-      return int32FromJson2(json);
-    default:
-      return json;
-  }
-}
-function int32FromJson2(json) {
-  if (typeof json == "string") {
-    if (json === "") {
-      return json;
-    }
-    if (json.trim().length !== json.length) {
-      return json;
-    }
-    const num = Number(json);
-    if (Number.isNaN(num)) {
-      return json;
-    }
-    return num;
-  }
-  return json;
-}
-function tryWktFromJson2(msg, jsonValue, opts) {
-  if (!msg.desc.typeName.startsWith("google.protobuf.")) {
-    return false;
-  }
-  switch (msg.desc.typeName) {
-    case "google.protobuf.Any":
-      anyFromJson2(msg.message, jsonValue, opts);
-      return true;
-    case "google.protobuf.Timestamp":
-      timestampFromJson2(msg.message, jsonValue);
-      return true;
-    case "google.protobuf.Duration":
-      durationFromJson2(msg.message, jsonValue);
-      return true;
-    case "google.protobuf.FieldMask":
-      fieldMaskFromJson2(msg.message, jsonValue);
-      return true;
-    case "google.protobuf.Struct":
-      structFromJson2(msg.message, jsonValue);
-      return true;
-    case "google.protobuf.Value":
-      valueFromJson2(msg.message, jsonValue);
-      return true;
-    case "google.protobuf.ListValue":
-      listValueFromJson2(msg.message, jsonValue);
-      return true;
-    default:
-      if (isWrapperDesc2(msg.desc)) {
-        const valueField = msg.desc.fields[0];
-        if (jsonValue === null) {
-          msg.clear(valueField);
-        } else {
-          msg.set(valueField, scalarFromJson2(valueField, jsonValue, true));
-        }
-        return true;
-      }
-      return false;
-  }
-}
-function anyFromJson2(any, json, opts) {
-  var _a;
-  if (json === null || Array.isArray(json) || typeof json != "object") {
-    throw new Error(`cannot decode message ${any.$typeName} from JSON: expected object but got ${formatVal2(json)}`);
-  }
-  if (Object.keys(json).length == 0) {
-    return;
-  }
-  const typeUrl = json["@type"];
-  if (typeof typeUrl != "string" || typeUrl == "") {
-    throw new Error(`cannot decode message ${any.$typeName} from JSON: "@type" is empty`);
-  }
-  const typeName = typeUrl.includes("/") ? typeUrl.substring(typeUrl.lastIndexOf("/") + 1) : typeUrl;
-  if (!typeName.length) {
-    throw new Error(`cannot decode message ${any.$typeName} from JSON: "@type" is invalid`);
-  }
-  const desc = (_a = opts.registry) === null || _a === undefined ? undefined : _a.getMessage(typeName);
-  if (!desc) {
-    throw new Error(`cannot decode message ${any.$typeName} from JSON: ${typeUrl} is not in the type registry`);
-  }
-  const msg = reflect2(desc);
-  if (typeName.startsWith("google.protobuf.") && Object.prototype.hasOwnProperty.call(json, "value")) {
-    const value = json.value;
-    readMessage4(msg, value, opts);
-  } else {
-    const copy = Object.assign({}, json);
-    delete copy["@type"];
-    readMessage4(msg, copy, opts);
-  }
-  anyPack2(msg.desc, msg.message, any);
-}
-function timestampFromJson2(timestamp, json) {
-  if (typeof json !== "string") {
-    throw new Error(`cannot decode message ${timestamp.$typeName} from JSON: ${formatVal2(json)}`);
-  }
-  const matches = json.match(/^([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})(?:\.([0-9]{1,9}))?(?:Z|([+-][0-9][0-9]:[0-9][0-9]))$/);
-  if (!matches) {
-    throw new Error(`cannot decode message ${timestamp.$typeName} from JSON: invalid RFC 3339 string`);
-  }
-  const ms = Date.parse(matches[1] + "-" + matches[2] + "-" + matches[3] + "T" + matches[4] + ":" + matches[5] + ":" + matches[6] + (matches[8] ? matches[8] : "Z"));
-  if (Number.isNaN(ms)) {
-    throw new Error(`cannot decode message ${timestamp.$typeName} from JSON: invalid RFC 3339 string`);
-  }
-  if (ms < Date.parse("0001-01-01T00:00:00Z") || ms > Date.parse("9999-12-31T23:59:59Z")) {
-    throw new Error(`cannot decode message ${timestamp.$typeName} from JSON: must be from 0001-01-01T00:00:00Z to 9999-12-31T23:59:59Z inclusive`);
-  }
-  timestamp.seconds = protoInt642.parse(ms / 1000);
-  timestamp.nanos = 0;
-  if (matches[7]) {
-    timestamp.nanos = parseInt("1" + matches[7] + "0".repeat(9 - matches[7].length)) - 1e9;
-  }
-}
-function durationFromJson2(duration, json) {
-  if (typeof json !== "string") {
-    throw new Error(`cannot decode message ${duration.$typeName} from JSON: ${formatVal2(json)}`);
-  }
-  const match = json.match(/^(-?[0-9]+)(?:\.([0-9]+))?s/);
-  if (match === null) {
-    throw new Error(`cannot decode message ${duration.$typeName} from JSON: ${formatVal2(json)}`);
-  }
-  const longSeconds = Number(match[1]);
-  if (longSeconds > 315576000000 || longSeconds < -315576000000) {
-    throw new Error(`cannot decode message ${duration.$typeName} from JSON: ${formatVal2(json)}`);
-  }
-  duration.seconds = protoInt642.parse(longSeconds);
-  if (typeof match[2] !== "string") {
-    return;
-  }
-  const nanosStr = match[2] + "0".repeat(9 - match[2].length);
-  duration.nanos = parseInt(nanosStr);
-  if (longSeconds < 0 || Object.is(longSeconds, -0)) {
-    duration.nanos = -duration.nanos;
-  }
-}
-function fieldMaskFromJson2(fieldMask, json) {
-  if (typeof json !== "string") {
-    throw new Error(`cannot decode message ${fieldMask.$typeName} from JSON: ${formatVal2(json)}`);
-  }
-  if (json === "") {
-    return;
-  }
-  function camelToSnake(str) {
-    if (str.includes("_")) {
-      throw new Error(`cannot decode message ${fieldMask.$typeName} from JSON: path names must be lowerCamelCase`);
-    }
-    const sc = str.replace(/[A-Z]/g, (letter) => "_" + letter.toLowerCase());
-    return sc[0] === "_" ? sc.substring(1) : sc;
-  }
-  fieldMask.paths = json.split(",").map(camelToSnake);
-}
-function structFromJson2(struct, json) {
-  if (typeof json != "object" || json == null || Array.isArray(json)) {
-    throw new Error(`cannot decode message ${struct.$typeName} from JSON ${formatVal2(json)}`);
-  }
-  for (const [k, v] of Object.entries(json)) {
-    const parsedV = create3(ValueSchema3);
-    valueFromJson2(parsedV, v);
-    struct.fields[k] = parsedV;
-  }
-}
-function valueFromJson2(value, json) {
-  switch (typeof json) {
-    case "number":
-      value.kind = { case: "numberValue", value: json };
-      break;
-    case "string":
-      value.kind = { case: "stringValue", value: json };
-      break;
-    case "boolean":
-      value.kind = { case: "boolValue", value: json };
-      break;
-    case "object":
-      if (json === null) {
-        value.kind = { case: "nullValue", value: NullValue2.NULL_VALUE };
-      } else if (Array.isArray(json)) {
-        const listValue = create3(ListValueSchema2);
-        listValueFromJson2(listValue, json);
-        value.kind = { case: "listValue", value: listValue };
-      } else {
-        const struct = create3(StructSchema2);
-        structFromJson2(struct, json);
-        value.kind = { case: "structValue", value: struct };
-      }
-      break;
-    default:
-      throw new Error(`cannot decode message ${value.$typeName} from JSON ${formatVal2(json)}`);
-  }
-  return value;
-}
-function listValueFromJson2(listValue, json) {
-  if (!Array.isArray(json)) {
-    throw new Error(`cannot decode message ${listValue.$typeName} from JSON ${formatVal2(json)}`);
-  }
-  for (const e of json) {
-    const value = create3(ValueSchema3);
-    valueFromJson2(value, e);
-    listValue.values.push(value);
-  }
-}
-var file_values_v1_values2 = /* @__PURE__ */ fileDesc2("ChZ2YWx1ZXMvdjEvdmFsdWVzLnByb3RvEgl2YWx1ZXMudjEigQMKBVZhbHVlEhYKDHN0cmluZ192YWx1ZRgBIAEoCUgAEhQKCmJvb2xfdmFsdWUYAiABKAhIABIVCgtieXRlc192YWx1ZRgDIAEoDEgAEiMKCW1hcF92YWx1ZRgEIAEoCzIOLnZhbHVlcy52MS5NYXBIABIlCgpsaXN0X3ZhbHVlGAUgASgLMg8udmFsdWVzLnYxLkxpc3RIABIrCg1kZWNpbWFsX3ZhbHVlGAYgASgLMhIudmFsdWVzLnYxLkRlY2ltYWxIABIZCgtpbnQ2NF92YWx1ZRgHIAEoA0ICMABIABIpCgxiaWdpbnRfdmFsdWUYCSABKAsyES52YWx1ZXMudjEuQmlnSW50SAASMAoKdGltZV92YWx1ZRgKIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXBIABIXCg1mbG9hdDY0X3ZhbHVlGAsgASgBSAASGgoMdWludDY0X3ZhbHVlGAwgASgEQgIwAEgAQgcKBXZhbHVlSgQICBAJIisKBkJpZ0ludBIPCgdhYnNfdmFsGAEgASgMEhAKBHNpZ24YAiABKANCAjAAInIKA01hcBIqCgZmaWVsZHMYASADKAsyGi52YWx1ZXMudjEuTWFwLkZpZWxkc0VudHJ5Gj8KC0ZpZWxkc0VudHJ5EgsKA2tleRgBIAEoCRIfCgV2YWx1ZRgCIAEoCzIQLnZhbHVlcy52MS5WYWx1ZToCOAEiKAoETGlzdBIgCgZmaWVsZHMYAiADKAsyEC52YWx1ZXMudjEuVmFsdWUiQwoHRGVjaW1hbBImCgtjb2VmZmljaWVudBgBIAEoCzIRLnZhbHVlcy52MS5CaWdJbnQSEAoIZXhwb25lbnQYAiABKAVCYQoNY29tLnZhbHVlcy52MUILVmFsdWVzUHJvdG9QAaICA1ZYWKoCCVZhbHVlcy5WMcoCCVZhbHVlc1xWMeICFVZhbHVlc1xWMVxHUEJNZXRhZGF0YeoCClZhbHVlczo6VjFiBnByb3RvMw", [file_google_protobuf_timestamp2]);
-var file_sdk_v1alpha_sdk2 = /* @__PURE__ */ fileDesc2("ChVzZGsvdjFhbHBoYS9zZGsucHJvdG8SC3Nkay52MWFscGhhIrQBChVTaW1wbGVDb25zZW5zdXNJbnB1dHMSIQoFdmFsdWUYASABKAsyEC52YWx1ZXMudjEuVmFsdWVIABIPCgVlcnJvchgCIAEoCUgAEjUKC2Rlc2NyaXB0b3JzGAMgASgLMiAuc2RrLnYxYWxwaGEuQ29uc2Vuc3VzRGVzY3JpcHRvchIhCgdkZWZhdWx0GAQgASgLMhAudmFsdWVzLnYxLlZhbHVlQg0KC29ic2VydmF0aW9uIpABCglGaWVsZHNNYXASMgoGZmllbGRzGAEgAygLMiIuc2RrLnYxYWxwaGEuRmllbGRzTWFwLkZpZWxkc0VudHJ5Gk8KC0ZpZWxkc0VudHJ5EgsKA2tleRgBIAEoCRIvCgV2YWx1ZRgCIAEoCzIgLnNkay52MWFscGhhLkNvbnNlbnN1c0Rlc2NyaXB0b3I6AjgBIoYBChNDb25zZW5zdXNEZXNjcmlwdG9yEjMKC2FnZ3JlZ2F0aW9uGAEgASgOMhwuc2RrLnYxYWxwaGEuQWdncmVnYXRpb25UeXBlSAASLAoKZmllbGRzX21hcBgCIAEoCzIWLnNkay52MWFscGhhLkZpZWxkc01hcEgAQgwKCmRlc2NyaXB0b3IiagoNUmVwb3J0UmVxdWVzdBIXCg9lbmNvZGVkX3BheWxvYWQYASABKAwSFAoMZW5jb2Rlcl9uYW1lGAIgASgJEhQKDHNpZ25pbmdfYWxnbxgDIAEoCRIUCgxoYXNoaW5nX2FsZ28YBCABKAkilwEKDlJlcG9ydFJlc3BvbnNlEhUKDWNvbmZpZ19kaWdlc3QYASABKAwSEgoGc2VxX25yGAIgASgEQgIwABIWCg5yZXBvcnRfY29udGV4dBgDIAEoDBISCgpyYXdfcmVwb3J0GAQgASgMEi4KBHNpZ3MYBSADKAsyIC5zZGsudjFhbHBoYS5BdHRyaWJ1dGVkU2lnbmF0dXJlIjsKE0F0dHJpYnV0ZWRTaWduYXR1cmUSEQoJc2lnbmF0dXJlGAEgASgMEhEKCXNpZ25lcl9pZBgCIAEoDSJrChFDYXBhYmlsaXR5UmVxdWVzdBIKCgJpZBgBIAEoCRIlCgdwYXlsb2FkGAIgASgLMhQuZ29vZ2xlLnByb3RvYnVmLkFueRIOCgZtZXRob2QYAyABKAkSEwoLY2FsbGJhY2tfaWQYBCABKAUiWgoSQ2FwYWJpbGl0eVJlc3BvbnNlEicKB3BheWxvYWQYASABKAsyFC5nb29nbGUucHJvdG9idWYuQW55SAASDwoFZXJyb3IYAiABKAlIAEIKCghyZXNwb25zZSKbAQoTVHJpZ2dlclN1YnNjcmlwdGlvbhIKCgJpZBgBIAEoCRIlCgdwYXlsb2FkGAIgASgLMhQuZ29vZ2xlLnByb3RvYnVmLkFueRIOCgZtZXRob2QYAyABKAkSLwoMcmVxdWlyZW1lbnRzGAQgASgLMhkuc2RrLnYxYWxwaGEuUmVxdWlyZW1lbnRzEhAKCHByZV9ob29rGAUgASgIIkgKEVRlZVR5cGVBbmRSZWdpb25zEiIKBHR5cGUYASABKA4yFC5zZGsudjFhbHBoYS5UZWVUeXBlEg8KB3JlZ2lvbnMYAyADKAkiVQoaVHJpZ2dlclN1YnNjcmlwdGlvblJlcXVlc3QSNwoNc3Vic2NyaXB0aW9ucxgBIAMoCzIgLnNkay52MWFscGhhLlRyaWdnZXJTdWJzY3JpcHRpb24iQAoHVHJpZ2dlchIOCgJpZBgBIAEoBEICMAASJQoHcGF5bG9hZBgCIAEoCzIULmdvb2dsZS5wcm90b2J1Zi5BbnkiGgoHUmVnaW9ucxIPCgdyZWdpb25zGAEgAygJIlIKElRlZVR5cGVzQW5kUmVnaW9ucxI8ChR0ZWVfdHlwZV9hbmRfcmVnaW9ucxgBIAMoCzIeLnNkay52MWFscGhhLlRlZVR5cGVBbmRSZWdpb25zInwKA1RlZRIrCgthbnlfcmVnaW9ucxgBIAEoCzIULnNkay52MWFscGhhLlJlZ2lvbnNIABJAChV0ZWVfdHlwZXNfYW5kX3JlZ2lvbnMYAiABKAsyHy5zZGsudjFhbHBoYS5UZWVUeXBlc0FuZFJlZ2lvbnNIAEIGCgRpdGVtIi0KDFJlcXVpcmVtZW50cxIdCgN0ZWUYASABKAsyEC5zZGsudjFhbHBoYS5UZWUiJwoYQXdhaXRDYXBhYmlsaXRpZXNSZXF1ZXN0EgsKA2lkcxgBIAMoBSK4AQoZQXdhaXRDYXBhYmlsaXRpZXNSZXNwb25zZRJICglyZXNwb25zZXMYASADKAsyNS5zZGsudjFhbHBoYS5Bd2FpdENhcGFiaWxpdGllc1Jlc3BvbnNlLlJlc3BvbnNlc0VudHJ5GlEKDlJlc3BvbnNlc0VudHJ5EgsKA2tleRgBIAEoBRIuCgV2YWx1ZRgCIAEoCzIfLnNkay52MWFscGhhLkNhcGFiaWxpdHlSZXNwb25zZToCOAEiygEKDkV4ZWN1dGVSZXF1ZXN0Eg4KBmNvbmZpZxgBIAEoDBIrCglzdWJzY3JpYmUYAiABKAsyFi5nb29nbGUucHJvdG9idWYuRW1wdHlIABInCgd0cmlnZ2VyGAMgASgLMhQuc2RrLnYxYWxwaGEuVHJpZ2dlckgAEigKCHByZV9ob29rGAUgASgLMhQuc2RrLnYxYWxwaGEuVHJpZ2dlckgAEh0KEW1heF9yZXNwb25zZV9zaXplGAQgASgEQgIwAEIJCgdyZXF1ZXN0IswBCg9FeGVjdXRpb25SZXN1bHQSIQoFdmFsdWUYASABKAsyEC52YWx1ZXMudjEuVmFsdWVIABIPCgVlcnJvchgCIAEoCUgAEkgKFXRyaWdnZXJfc3Vic2NyaXB0aW9ucxgDIAEoCzInLnNkay52MWFscGhhLlRyaWdnZXJTdWJzY3JpcHRpb25SZXF1ZXN0SAASMQoMcmVzdHJpY3Rpb25zGAQgASgLMhkuc2RrLnYxYWxwaGEuUmVzdHJpY3Rpb25zSABCCAoGcmVzdWx0IlYKEUdldFNlY3JldHNSZXF1ZXN0EiwKCHJlcXVlc3RzGAEgAygLMhouc2RrLnYxYWxwaGEuU2VjcmV0UmVxdWVzdBITCgtjYWxsYmFja19pZBgCIAEoBSIiChNBd2FpdFNlY3JldHNSZXF1ZXN0EgsKA2lkcxgBIAMoBSKrAQoUQXdhaXRTZWNyZXRzUmVzcG9uc2USQwoJcmVzcG9uc2VzGAEgAygLMjAuc2RrLnYxYWxwaGEuQXdhaXRTZWNyZXRzUmVzcG9uc2UuUmVzcG9uc2VzRW50cnkaTgoOUmVzcG9uc2VzRW50cnkSCwoDa2V5GAEgASgFEisKBXZhbHVlGAIgASgLMhwuc2RrLnYxYWxwaGEuU2VjcmV0UmVzcG9uc2VzOgI4ASIuCg1TZWNyZXRSZXF1ZXN0EgoKAmlkGAEgASgJEhEKCW5hbWVzcGFjZRgCIAEoCSJFCgZTZWNyZXQSCgoCaWQYASABKAkSEQoJbmFtZXNwYWNlGAIgASgJEg0KBW93bmVyGAMgASgJEg0KBXZhbHVlGAQgASgJIkoKC1NlY3JldEVycm9yEgoKAmlkGAEgASgJEhEKCW5hbWVzcGFjZRgCIAEoCRINCgVvd25lchgDIAEoCRINCgVlcnJvchgEIAEoCSJuCg5TZWNyZXRSZXNwb25zZRIlCgZzZWNyZXQYASABKAsyEy5zZGsudjFhbHBoYS5TZWNyZXRIABIpCgVlcnJvchgCIAEoCzIYLnNkay52MWFscGhhLlNlY3JldEVycm9ySABCCgoIcmVzcG9uc2UiQQoPU2VjcmV0UmVzcG9uc2VzEi4KCXJlc3BvbnNlcxgBIAMoCzIbLnNkay52MWFscGhhLlNlY3JldFJlc3BvbnNlIkIKEU1ldGhvZFJlc3RyaWN0aW9uEgoKAmlkGAEgASgJEg4KBm1ldGhvZBgCIAEoCRIRCgltYXhfY2FsbHMYAyABKA0iWAoVQ2FwYWJpbGl0eVJlc3RyaWN0aW9uEjAKBm1ldGhvZBgBIAEoCzIeLnNkay52MWFscGhhLk1ldGhvZFJlc3RyaWN0aW9uSABCDQoLcmVzdHJpY3Rpb24ioQEKFkNhcGFiaWxpdHlSZXN0cmljdGlvbnMSOAoMcmVzdHJpY3Rpb25zGAEgAygLMiIuc2RrLnYxYWxwaGEuQ2FwYWJpbGl0eVJlc3RyaWN0aW9uEhcKD21heF90b3RhbF9jYWxscxgCIAEoDRI0CgR0eXBlGAMgASgOMiYuc2RrLnYxYWxwaGEuQ2FwYWJpbGl0eVJlc3RyaWN0aW9uVHlwZSJRChdTZWNyZXRQcmVmaXhSZXN0cmljdGlvbhIOCgZwcmVmaXgYASABKAkSEQoJbmFtZXNwYWNlGAIgASgJEhMKC21heF9zZWNyZXRzGAMgASgNIpABChFTZWNyZXRSZXN0cmljdGlvbhIrCgxleGFjdF9zZWNyZXQYASABKAsyEy5zZGsudjFhbHBoYS5TZWNyZXRIABI/Cg9wcmVmaXhlZF9zZWNyZXQYAiABKAsyJC5zZGsudjFhbHBoYS5TZWNyZXRQcmVmaXhSZXN0cmljdGlvbkgAQg0KC3Jlc3RyaWN0aW9uIl8KElNlY3JldHNSZXN0cml0aW9ucxI0CgxyZXN0cmljdGlvbnMYASADKAsyHi5zZGsudjFhbHBoYS5TZWNyZXRSZXN0cmljdGlvbhITCgttYXhfc2VjcmV0cxgCIAEoDSJ7CgxSZXN0cmljdGlvbnMSMAoHc2VjcmV0cxgBIAEoCzIfLnNkay52MWFscGhhLlNlY3JldHNSZXN0cml0aW9ucxI5CgxjYXBhYmlsaXRpZXMYAiABKAsyIy5zZGsudjFhbHBoYS5DYXBhYmlsaXR5UmVzdHJpY3Rpb25zKt0BCg9BZ2dyZWdhdGlvblR5cGUSIAocQUdHUkVHQVRJT05fVFlQRV9VTlNQRUNJRklFRBAAEhsKF0FHR1JFR0FUSU9OX1RZUEVfTUVESUFOEAESHgoaQUdHUkVHQVRJT05fVFlQRV9JREVOVElDQUwQAhIiCh5BR0dSRUdBVElPTl9UWVBFX0NPTU1PTl9QUkVGSVgQAxIiCh5BR0dSRUdBVElPTl9UWVBFX0NPTU1PTl9TVUZGSVgQBBIjCh9BR0dSRUdBVElPTl9UWVBFX0ZSRVFVRU5DWV9MSVNUEAUqOQoETW9kZRIUChBNT0RFX1VOU1BFQ0lGSUVEEAASDAoITU9ERV9ET04QARINCglNT0RFX05PREUQAio7CgdUZWVUeXBlEhgKFFRFRV9UWVBFX1VOU1BFQ0lGSUVEEAASFgoSVEVFX1RZUEVfQVdTX05JVFJPEAEqaQoZQ2FwYWJpbGl0eVJlc3RyaWN0aW9uVHlwZRImCiJDQVBBQklMSVRZX1JFU1RSSUNUSU9OX1RZUEVfQ0xPU0VEEAASJAogQ0FQQUJJTElUWV9SRVNUUklDVElPTl9UWVBFX09QRU4QAUJoCg9jb20uc2RrLnYxYWxwaGFCCFNka1Byb3RvUAGiAgNTWFiqAgtTZGsuVjFhbHBoYcoCC1Nka1xWMWFscGhh4gIXU2RrXFYxYWxwaGFcR1BCTWV0YWRhdGHqAgxTZGs6OlYxYWxwaGFiBnByb3RvMw", [file_google_protobuf_any2, file_google_protobuf_empty2, file_values_v1_values2]);
-var AggregationType2;
-(function(AggregationType) {
-  AggregationType[AggregationType["UNSPECIFIED"] = 0] = "UNSPECIFIED";
-  AggregationType[AggregationType["MEDIAN"] = 1] = "MEDIAN";
-  AggregationType[AggregationType["IDENTICAL"] = 2] = "IDENTICAL";
-  AggregationType[AggregationType["COMMON_PREFIX"] = 3] = "COMMON_PREFIX";
-  AggregationType[AggregationType["COMMON_SUFFIX"] = 4] = "COMMON_SUFFIX";
-  AggregationType[AggregationType["FREQUENCY_LIST"] = 5] = "FREQUENCY_LIST";
-})(AggregationType2 || (AggregationType2 = {}));
-var Mode2;
-(function(Mode) {
-  Mode[Mode["UNSPECIFIED"] = 0] = "UNSPECIFIED";
-  Mode[Mode["DON"] = 1] = "DON";
-  Mode[Mode["NODE"] = 2] = "NODE";
-})(Mode2 || (Mode2 = {}));
-var TeeType2;
-(function(TeeType) {
-  TeeType[TeeType["UNSPECIFIED"] = 0] = "UNSPECIFIED";
-  TeeType[TeeType["AWS_NITRO"] = 1] = "AWS_NITRO";
-})(TeeType2 || (TeeType2 = {}));
-var CapabilityRestrictionType2;
-(function(CapabilityRestrictionType) {
-  CapabilityRestrictionType[CapabilityRestrictionType["CLOSED"] = 0] = "CLOSED";
-  CapabilityRestrictionType[CapabilityRestrictionType["OPEN"] = 1] = "OPEN";
-})(CapabilityRestrictionType2 || (CapabilityRestrictionType2 = {}));
-var file_tools_generator_v1alpha_cre_metadata2 = /* @__PURE__ */ fileDesc2("Cip0b29scy9nZW5lcmF0b3IvdjFhbHBoYS9jcmVfbWV0YWRhdGEucHJvdG8SF3Rvb2xzLmdlbmVyYXRvci52MWFscGhhIoQBCgtTdHJpbmdMYWJlbBJECghkZWZhdWx0cxgBIAMoCzIyLnRvb2xzLmdlbmVyYXRvci52MWFscGhhLlN0cmluZ0xhYmVsLkRlZmF1bHRzRW50cnkaLwoNRGVmYXVsdHNFbnRyeRILCgNrZXkYASABKAkSDQoFdmFsdWUYAiABKAk6AjgBIogBCgtVaW50NjRMYWJlbBJECghkZWZhdWx0cxgBIAMoCzIyLnRvb2xzLmdlbmVyYXRvci52MWFscGhhLlVpbnQ2NExhYmVsLkRlZmF1bHRzRW50cnkaMwoNRGVmYXVsdHNFbnRyeRILCgNrZXkYASABKAkSEQoFdmFsdWUYAiABKARCAjAAOgI4ASKEAQoLVWludDMyTGFiZWwSRAoIZGVmYXVsdHMYASADKAsyMi50b29scy5nZW5lcmF0b3IudjFhbHBoYS5VaW50MzJMYWJlbC5EZWZhdWx0c0VudHJ5Gi8KDURlZmF1bHRzRW50cnkSCwoDa2V5GAEgASgJEg0KBXZhbHVlGAIgASgNOgI4ASKGAQoKSW50NjRMYWJlbBJDCghkZWZhdWx0cxgBIAMoCzIxLnRvb2xzLmdlbmVyYXRvci52MWFscGhhLkludDY0TGFiZWwuRGVmYXVsdHNFbnRyeRozCg1EZWZhdWx0c0VudHJ5EgsKA2tleRgBIAEoCRIRCgV2YWx1ZRgCIAEoA0ICMAA6AjgBIoIBCgpJbnQzMkxhYmVsEkMKCGRlZmF1bHRzGAEgAygLMjEudG9vbHMuZ2VuZXJhdG9yLnYxYWxwaGEuSW50MzJMYWJlbC5EZWZhdWx0c0VudHJ5Gi8KDURlZmF1bHRzRW50cnkSCwoDa2V5GAEgASgJEg0KBXZhbHVlGAIgASgFOgI4ASLBAgoFTGFiZWwSPAoMc3RyaW5nX2xhYmVsGAEgASgLMiQudG9vbHMuZ2VuZXJhdG9yLnYxYWxwaGEuU3RyaW5nTGFiZWxIABI8Cgx1aW50NjRfbGFiZWwYAiABKAsyJC50b29scy5nZW5lcmF0b3IudjFhbHBoYS5VaW50NjRMYWJlbEgAEjoKC2ludDY0X2xhYmVsGAMgASgLMiMudG9vbHMuZ2VuZXJhdG9yLnYxYWxwaGEuSW50NjRMYWJlbEgAEjwKDHVpbnQzMl9sYWJlbBgEIAEoCzIkLnRvb2xzLmdlbmVyYXRvci52MWFscGhhLlVpbnQzMkxhYmVsSAASOgoLaW50MzJfbGFiZWwYBSABKAsyIy50b29scy5nZW5lcmF0b3IudjFhbHBoYS5JbnQzMkxhYmVsSABCBgoEa2luZCK2AgoSQ2FwYWJpbGl0eU1ldGFkYXRhEh8KBG1vZGUYASABKA4yES5zZGsudjFhbHBoYS5Nb2RlEhUKDWNhcGFiaWxpdHlfaWQYAiABKAkSRwoGbGFiZWxzGAMgAygLMjcudG9vbHMuZ2VuZXJhdG9yLnYxYWxwaGEuQ2FwYWJpbGl0eU1ldGFkYXRhLkxhYmVsc0VudHJ5ElAKF2FkZGl0aW9uYWxfZW52aXJvbm1lbnRzGAQgAygOMi8udG9vbHMuZ2VuZXJhdG9yLnYxYWxwaGEuQWRkaXRpb25hbEVudmlyb25tZW50cxpNCgtMYWJlbHNFbnRyeRILCgNrZXkYASABKAkSLQoFdmFsdWUYAiABKAsyHi50b29scy5nZW5lcmF0b3IudjFhbHBoYS5MYWJlbDoCOAEiNgoYQ2FwYWJpbGl0eU1ldGhvZE1ldGFkYXRhEhoKEm1hcF90b191bnR5cGVkX2FwaRgBIAEoCCpiChZBZGRpdGlvbmFsRW52aXJvbm1lbnRzEicKI0FERElUSU9OQUxfRU5WSVJPTk1FTlRTX1VOU1BFQ0lGSUVEEAASHwobQURESVRJT05BTF9FTlZJUk9OTUVOVFNfVEVFEAE6bgoKY2FwYWJpbGl0eRIfLmdvb2dsZS5wcm90b2J1Zi5TZXJ2aWNlT3B0aW9ucxjQhgMgASgLMisudG9vbHMuZ2VuZXJhdG9yLnYxYWxwaGEuQ2FwYWJpbGl0eU1ldGFkYXRhUgpjYXBhYmlsaXR5OmsKBm1ldGhvZBIeLmdvb2dsZS5wcm90b2J1Zi5NZXRob2RPcHRpb25zGNGGAyABKAsyMS50b29scy5nZW5lcmF0b3IudjFhbHBoYS5DYXBhYmlsaXR5TWV0aG9kTWV0YWRhdGFSBm1ldGhvZEKvAQobY29tLnRvb2xzLmdlbmVyYXRvci52MWFscGhhQhBDcmVNZXRhZGF0YVByb3RvUAGiAgNUR1iqAhdUb29scy5HZW5lcmF0b3IuVjFhbHBoYcoCGFRvb2xzXEdlbmVyYXRvcl9cVjFhbHBoYeICJFRvb2xzXEdlbmVyYXRvcl9cVjFhbHBoYVxHUEJNZXRhZGF0YeoCGVRvb2xzOjpHZW5lcmF0b3I6OlYxYWxwaGFiBnByb3RvMw", [file_google_protobuf_descriptor2, file_sdk_v1alpha_sdk2]);
-var AdditionalEnvironments2;
-(function(AdditionalEnvironments) {
-  AdditionalEnvironments[AdditionalEnvironments["UNSPECIFIED"] = 0] = "UNSPECIFIED";
-  AdditionalEnvironments[AdditionalEnvironments["TEE"] = 1] = "TEE";
-})(AdditionalEnvironments2 || (AdditionalEnvironments2 = {}));
-var ConfidenceLevel2;
-(function(ConfidenceLevel) {
-  ConfidenceLevel[ConfidenceLevel["SAFE"] = 0] = "SAFE";
-  ConfidenceLevel[ConfidenceLevel["LATEST"] = 1] = "LATEST";
-  ConfidenceLevel[ConfidenceLevel["FINALIZED"] = 2] = "FINALIZED";
-})(ConfidenceLevel2 || (ConfidenceLevel2 = {}));
-var ReceiverContractExecutionStatus3;
-(function(ReceiverContractExecutionStatus) {
-  ReceiverContractExecutionStatus[ReceiverContractExecutionStatus["SUCCESS"] = 0] = "SUCCESS";
-  ReceiverContractExecutionStatus[ReceiverContractExecutionStatus["REVERTED"] = 1] = "REVERTED";
-})(ReceiverContractExecutionStatus3 || (ReceiverContractExecutionStatus3 = {}));
-var TxStatus3;
-(function(TxStatus) {
-  TxStatus[TxStatus["FATAL"] = 0] = "FATAL";
-  TxStatus[TxStatus["REVERTED"] = 1] = "REVERTED";
-  TxStatus[TxStatus["SUCCESS"] = 2] = "SUCCESS";
-})(TxStatus3 || (TxStatus3 = {}));
-var donInfoCache2 = new Map;
-var GET_DON_SELECTOR2 = new Uint8Array([35, 83, 116, 5]);
-var GET_NODES_BY_P2P_IDS_SELECTOR2 = new Uint8Array([5, 165, 25, 102]);
-var hexToBytes7 = (hexStr) => {
-  if (!hexStr.startsWith("0x")) {
-    throw new Error(`Invalid hex string: ${hexStr}`);
-  }
-  if (!/^0x[0-9a-fA-F]*$/.test(hexStr)) {
-    throw new Error(`Invalid hex string: ${hexStr}`);
-  }
-  if ((hexStr.length - 2) % 2 !== 0) {
-    throw new Error(`Hex string must have an even number of characters: ${hexStr}`);
-  }
-  const hex = hexStr.slice(2);
-  const bytes = new Uint8Array(hex.length / 2);
-  for (let i = 0;i < hex.length; i += 2) {
-    bytes[i / 2] = Number.parseInt(hex.slice(i, i + 2), 16);
-  }
-  return bytes;
-};
-var bytesToHex7 = (bytes) => {
-  return `0x${Array.from(bytes).map((b) => b.toString(16).padStart(2, "0")).join("")}`;
-};
-var bytesToBase642 = (bytes) => {
-  return Buffer.from(bytes).toString("base64");
-};
-var hexToBase642 = (hex) => {
-  const cleanHex = hex.startsWith("0x") ? hex.slice(2) : hex;
-  if (cleanHex.length === 0) {
-    return "";
-  }
-  if (cleanHex.length % 2 !== 0) {
-    throw new Error(`Hex string must have an even number of characters: ${hex}`);
-  }
-  if (!/^[0-9a-fA-F]*$/.test(cleanHex)) {
-    throw new Error(`Invalid hex string: ${hex}`);
-  }
-  return Buffer.from(cleanHex, "hex").toString("base64");
-};
-var EncodingType2;
-(function(EncodingType) {
-  EncodingType[EncodingType["NONE"] = 0] = "NONE";
-  EncodingType[EncodingType["BASE58"] = 1] = "BASE58";
-  EncodingType[EncodingType["BASE64"] = 2] = "BASE64";
-  EncodingType[EncodingType["BASE64_ZSTD"] = 3] = "BASE64_ZSTD";
-  EncodingType[EncodingType["JSON_PARSED"] = 4] = "JSON_PARSED";
-  EncodingType[EncodingType["JSON"] = 5] = "JSON";
-})(EncodingType2 || (EncodingType2 = {}));
-var CommitmentType2;
-(function(CommitmentType) {
-  CommitmentType[CommitmentType["NONE"] = 0] = "NONE";
-  CommitmentType[CommitmentType["FINALIZED"] = 1] = "FINALIZED";
-  CommitmentType[CommitmentType["CONFIRMED"] = 2] = "CONFIRMED";
-  CommitmentType[CommitmentType["PROCESSED"] = 3] = "PROCESSED";
-})(CommitmentType2 || (CommitmentType2 = {}));
-var ConfirmationStatusType2;
-(function(ConfirmationStatusType) {
-  ConfirmationStatusType[ConfirmationStatusType["NONE"] = 0] = "NONE";
-  ConfirmationStatusType[ConfirmationStatusType["PROCESSED"] = 1] = "PROCESSED";
-  ConfirmationStatusType[ConfirmationStatusType["CONFIRMED"] = 2] = "CONFIRMED";
-  ConfirmationStatusType[ConfirmationStatusType["FINALIZED"] = 3] = "FINALIZED";
-})(ConfirmationStatusType2 || (ConfirmationStatusType2 = {}));
-var TxStatus4;
-(function(TxStatus) {
-  TxStatus[TxStatus["FATAL"] = 0] = "FATAL";
-  TxStatus[TxStatus["ABORTED"] = 1] = "ABORTED";
-  TxStatus[TxStatus["SUCCESS"] = 2] = "SUCCESS";
-})(TxStatus4 || (TxStatus4 = {}));
-var ComparisonOperator2;
-(function(ComparisonOperator) {
-  ComparisonOperator[ComparisonOperator["EQ"] = 0] = "EQ";
-  ComparisonOperator[ComparisonOperator["NEQ"] = 1] = "NEQ";
-  ComparisonOperator[ComparisonOperator["GT"] = 2] = "GT";
-  ComparisonOperator[ComparisonOperator["LT"] = 3] = "LT";
-  ComparisonOperator[ComparisonOperator["GTE"] = 4] = "GTE";
-  ComparisonOperator[ComparisonOperator["LTE"] = 5] = "LTE";
-})(ComparisonOperator2 || (ComparisonOperator2 = {}));
-var ReceiverContractExecutionStatus4;
-(function(ReceiverContractExecutionStatus) {
-  ReceiverContractExecutionStatus[ReceiverContractExecutionStatus["SUCCESS"] = 0] = "SUCCESS";
-  ReceiverContractExecutionStatus[ReceiverContractExecutionStatus["REVERTED"] = 1] = "REVERTED";
-})(ReceiverContractExecutionStatus4 || (ReceiverContractExecutionStatus4 = {}));
-var file_capabilities_networking_http_v1alpha_client2 = /* @__PURE__ */ fileDesc2("CjFjYXBhYmlsaXRpZXMvbmV0d29ya2luZy9odHRwL3YxYWxwaGEvY2xpZW50LnByb3RvEiRjYXBhYmlsaXRpZXMubmV0d29ya2luZy5odHRwLnYxYWxwaGEiSgoNQ2FjaGVTZXR0aW5ncxINCgVzdG9yZRgBIAEoCBIqCgdtYXhfYWdlGAIgASgLMhkuZ29vZ2xlLnByb3RvYnVmLkR1cmF0aW9uIh4KDEhlYWRlclZhbHVlcxIOCgZ2YWx1ZXMYASADKAkiNAoITXRsc0F1dGgSEwoLcHJpdmF0ZV9rZXkYASABKAwSEwoLY2VydGlmaWNhdGUYAiABKAwiuwQKB1JlcXVlc3QSCwoDdXJsGAEgASgJEg4KBm1ldGhvZBgCIAEoCRJPCgdoZWFkZXJzGAMgAygLMjouY2FwYWJpbGl0aWVzLm5ldHdvcmtpbmcuaHR0cC52MWFscGhhLlJlcXVlc3QuSGVhZGVyc0VudHJ5QgIYARIMCgRib2R5GAQgASgMEioKB3RpbWVvdXQYBSABKAsyGS5nb29nbGUucHJvdG9idWYuRHVyYXRpb24SSwoOY2FjaGVfc2V0dGluZ3MYBiABKAsyMy5jYXBhYmlsaXRpZXMubmV0d29ya2luZy5odHRwLnYxYWxwaGEuQ2FjaGVTZXR0aW5ncxJWCg1tdWx0aV9oZWFkZXJzGAcgAygLMj8uY2FwYWJpbGl0aWVzLm5ldHdvcmtpbmcuaHR0cC52MWFscGhhLlJlcXVlc3QuTXVsdGlIZWFkZXJzRW50cnkSQQoEbXRscxgIIAEoCzIuLmNhcGFiaWxpdGllcy5uZXR3b3JraW5nLmh0dHAudjFhbHBoYS5NdGxzQXV0aEgAiAEBGi4KDEhlYWRlcnNFbnRyeRILCgNrZXkYASABKAkSDQoFdmFsdWUYAiABKAk6AjgBGmcKEU11bHRpSGVhZGVyc0VudHJ5EgsKA2tleRgBIAEoCRJBCgV2YWx1ZRgCIAEoCzIyLmNhcGFiaWxpdGllcy5uZXR3b3JraW5nLmh0dHAudjFhbHBoYS5IZWFkZXJWYWx1ZXM6AjgBQgcKBV9tdGxzIvECCghSZXNwb25zZRITCgtzdGF0dXNfY29kZRgBIAEoDRJQCgdoZWFkZXJzGAIgAygLMjsuY2FwYWJpbGl0aWVzLm5ldHdvcmtpbmcuaHR0cC52MWFscGhhLlJlc3BvbnNlLkhlYWRlcnNFbnRyeUICGAESDAoEYm9keRgDIAEoDBJXCg1tdWx0aV9oZWFkZXJzGAQgAygLMkAuY2FwYWJpbGl0aWVzLm5ldHdvcmtpbmcuaHR0cC52MWFscGhhLlJlc3BvbnNlLk11bHRpSGVhZGVyc0VudHJ5Gi4KDEhlYWRlcnNFbnRyeRILCgNrZXkYASABKAkSDQoFdmFsdWUYAiABKAk6AjgBGmcKEU11bHRpSGVhZGVyc0VudHJ5EgsKA2tleRgBIAEoCRJBCgV2YWx1ZRgCIAEoCzIyLmNhcGFiaWxpdGllcy5uZXR3b3JraW5nLmh0dHAudjFhbHBoYS5IZWFkZXJWYWx1ZXM6AjgBMpsBCgZDbGllbnQSbAoLU2VuZFJlcXVlc3QSLS5jYXBhYmlsaXRpZXMubmV0d29ya2luZy5odHRwLnYxYWxwaGEuUmVxdWVzdBouLmNhcGFiaWxpdGllcy5uZXR3b3JraW5nLmh0dHAudjFhbHBoYS5SZXNwb25zZRojgrUYHwgCEhhodHRwLWFjdGlvbnNAMS4wLjAtYWxwaGEiAQFC6gEKKGNvbS5jYXBhYmlsaXRpZXMubmV0d29ya2luZy5odHRwLnYxYWxwaGFCC0NsaWVudFByb3RvUAGiAgNDTkiqAiRDYXBhYmlsaXRpZXMuTmV0d29ya2luZy5IdHRwLlYxYWxwaGHKAiRDYXBhYmlsaXRpZXNcTmV0d29ya2luZ1xIdHRwXFYxYWxwaGHiAjBDYXBhYmlsaXRpZXNcTmV0d29ya2luZ1xIdHRwXFYxYWxwaGFcR1BCTWV0YWRhdGHqAidDYXBhYmlsaXRpZXM6Ok5ldHdvcmtpbmc6Okh0dHA6OlYxYWxwaGFiBnByb3RvMw", [file_google_protobuf_duration2, file_tools_generator_v1alpha_cre_metadata2]);
-var RequestSchema2 = /* @__PURE__ */ messageDesc2(file_capabilities_networking_http_v1alpha_client2, 3);
-var ResponseSchema2 = /* @__PURE__ */ messageDesc2(file_capabilities_networking_http_v1alpha_client2, 4);
-
-class SendRequester2 {
-  runtime;
-  client;
-  constructor(runtime, client) {
-    this.runtime = runtime;
-    this.client = client;
-  }
-  sendRequest(input) {
-    return this.client.sendRequest(this.runtime, input);
-  }
-}
-
-class ClientCapability5 {
-  static CAPABILITY_ID = "http-actions@1.0.0-alpha";
-  static CAPABILITY_NAME = "http-actions";
-  static CAPABILITY_VERSION = "1.0.0-alpha";
-  sendRequest(...args) {
-    if (typeof args[1] === "function") {
-      const [runtime, fn, consensusAggregation, unwrapOptions] = args;
-      return this.sendRequestSugarHelper(runtime, fn, consensusAggregation, unwrapOptions);
-    }
-    const [runtime, input] = args;
-    return this.sendRequestCallHelper(runtime, input);
-  }
-  sendRequestCallHelper(runtime, input) {
-    let payload;
-    if (input.$typeName) {
-      payload = input;
-    } else {
-      payload = fromJson2(RequestSchema2, input);
-    }
-    const capabilityId = ClientCapability5.CAPABILITY_ID;
-    const capabilityResponse = runtime.callCapability({
-      capabilityId,
-      method: "SendRequest",
-      payload,
-      inputSchema: RequestSchema2,
-      outputSchema: ResponseSchema2
-    });
-    return {
-      result: () => {
-        const result = capabilityResponse.result();
-        return result;
-      }
-    };
-  }
-  sendRequestSugarHelper(runtime, fn, consensusAggregation, unwrapOptions) {
-    const wrappedFn = (runtime, ...args) => {
-      const sendRequester = new SendRequester2(runtime, this);
-      return fn(sendRequester, ...args);
-    };
-    return runtime.runInNodeMode(wrappedFn, consensusAggregation, unwrapOptions);
-  }
-}
-var KeyType2;
-(function(KeyType) {
-  KeyType[KeyType["UNSPECIFIED"] = 0] = "UNSPECIFIED";
-  KeyType[KeyType["ECDSA_EVM"] = 1] = "ECDSA_EVM";
-})(KeyType2 || (KeyType2 = {}));
-var prepareRuntime2 = () => {
-  globalThis.Buffer = Buffer2;
-  globalThis.atob = atob2;
-  globalThis.btoa = btoa2;
-  globalThis.URL = URL2;
-  globalThis.URLSearchParams = URLSearchParams;
-};
-var util2;
-(function(util) {
-  util.assertEqual = (_) => {};
-  function assertIs(_arg) {}
-  util.assertIs = assertIs;
-  function assertNever(_x) {
-    throw new Error;
-  }
-  util.assertNever = assertNever;
-  util.arrayToEnum = (items) => {
-    const obj = {};
-    for (const item of items) {
-      obj[item] = item;
-    }
-    return obj;
-  };
-  util.getValidEnumValues = (obj) => {
-    const validKeys = util.objectKeys(obj).filter((k) => typeof obj[obj[k]] !== "number");
-    const filtered = {};
-    for (const k of validKeys) {
-      filtered[k] = obj[k];
-    }
-    return util.objectValues(filtered);
-  };
-  util.objectValues = (obj) => {
-    return util.objectKeys(obj).map(function(e) {
-      return obj[e];
-    });
-  };
-  util.objectKeys = typeof Object.keys === "function" ? (obj) => Object.keys(obj) : (object) => {
-    const keys = [];
-    for (const key in object) {
-      if (Object.prototype.hasOwnProperty.call(object, key)) {
-        keys.push(key);
-      }
-    }
-    return keys;
-  };
-  util.find = (arr, checker) => {
-    for (const item of arr) {
-      if (checker(item))
-        return item;
-    }
-    return;
-  };
-  util.isInteger = typeof Number.isInteger === "function" ? (val) => Number.isInteger(val) : (val) => typeof val === "number" && Number.isFinite(val) && Math.floor(val) === val;
-  function joinValues(array, separator = " | ") {
-    return array.map((val) => typeof val === "string" ? `'${val}'` : val).join(separator);
-  }
-  util.joinValues = joinValues;
-  util.jsonStringifyReplacer = (_, value) => {
-    if (typeof value === "bigint") {
-      return value.toString();
-    }
-    return value;
-  };
-})(util2 || (util2 = {}));
-var objectUtil2;
-(function(objectUtil) {
-  objectUtil.mergeShapes = (first, second) => {
-    return {
-      ...first,
-      ...second
-    };
-  };
-})(objectUtil2 || (objectUtil2 = {}));
-var ZodParsedType2 = util2.arrayToEnum([
-  "string",
-  "nan",
-  "number",
-  "integer",
-  "float",
-  "boolean",
-  "date",
-  "bigint",
-  "symbol",
-  "function",
-  "undefined",
-  "null",
-  "array",
-  "object",
-  "unknown",
-  "promise",
-  "void",
-  "never",
-  "map",
-  "set"
-]);
-var getParsedType2 = (data) => {
-  const t = typeof data;
-  switch (t) {
-    case "undefined":
-      return ZodParsedType2.undefined;
-    case "string":
-      return ZodParsedType2.string;
-    case "number":
-      return Number.isNaN(data) ? ZodParsedType2.nan : ZodParsedType2.number;
-    case "boolean":
-      return ZodParsedType2.boolean;
-    case "function":
-      return ZodParsedType2.function;
-    case "bigint":
-      return ZodParsedType2.bigint;
-    case "symbol":
-      return ZodParsedType2.symbol;
-    case "object":
-      if (Array.isArray(data)) {
-        return ZodParsedType2.array;
-      }
-      if (data === null) {
-        return ZodParsedType2.null;
-      }
-      if (data.then && typeof data.then === "function" && data.catch && typeof data.catch === "function") {
-        return ZodParsedType2.promise;
-      }
-      if (typeof Map !== "undefined" && data instanceof Map) {
-        return ZodParsedType2.map;
-      }
-      if (typeof Set !== "undefined" && data instanceof Set) {
-        return ZodParsedType2.set;
-      }
-      if (typeof Date !== "undefined" && data instanceof Date) {
-        return ZodParsedType2.date;
-      }
-      return ZodParsedType2.object;
-    default:
-      return ZodParsedType2.unknown;
-  }
-};
-var ZodIssueCode2 = util2.arrayToEnum([
-  "invalid_type",
-  "invalid_literal",
-  "custom",
-  "invalid_union",
-  "invalid_union_discriminator",
-  "invalid_enum_value",
-  "unrecognized_keys",
-  "invalid_arguments",
-  "invalid_return_type",
-  "invalid_date",
-  "invalid_string",
-  "too_small",
-  "too_big",
-  "invalid_intersection_types",
-  "not_multiple_of",
-  "not_finite"
-]);
-
-class ZodError2 extends Error {
-  get errors() {
-    return this.issues;
-  }
-  constructor(issues) {
-    super();
-    this.issues = [];
-    this.addIssue = (sub) => {
-      this.issues = [...this.issues, sub];
-    };
-    this.addIssues = (subs = []) => {
-      this.issues = [...this.issues, ...subs];
-    };
-    const actualProto = new.target.prototype;
-    if (Object.setPrototypeOf) {
-      Object.setPrototypeOf(this, actualProto);
-    } else {
-      this.__proto__ = actualProto;
-    }
-    this.name = "ZodError";
-    this.issues = issues;
-  }
-  format(_mapper) {
-    const mapper = _mapper || function(issue) {
-      return issue.message;
-    };
-    const fieldErrors = { _errors: [] };
-    const processError = (error) => {
-      for (const issue of error.issues) {
-        if (issue.code === "invalid_union") {
-          issue.unionErrors.map(processError);
-        } else if (issue.code === "invalid_return_type") {
-          processError(issue.returnTypeError);
-        } else if (issue.code === "invalid_arguments") {
-          processError(issue.argumentsError);
-        } else if (issue.path.length === 0) {
-          fieldErrors._errors.push(mapper(issue));
-        } else {
-          let curr = fieldErrors;
-          let i = 0;
-          while (i < issue.path.length) {
-            const el = issue.path[i];
-            const terminal = i === issue.path.length - 1;
-            if (!terminal) {
-              curr[el] = curr[el] || { _errors: [] };
-            } else {
-              curr[el] = curr[el] || { _errors: [] };
-              curr[el]._errors.push(mapper(issue));
-            }
-            curr = curr[el];
-            i++;
-          }
-        }
-      }
-    };
-    processError(this);
-    return fieldErrors;
-  }
-  static assert(value) {
-    if (!(value instanceof ZodError2)) {
-      throw new Error(`Not a ZodError: ${value}`);
-    }
-  }
-  toString() {
-    return this.message;
-  }
-  get message() {
-    return JSON.stringify(this.issues, util2.jsonStringifyReplacer, 2);
-  }
-  get isEmpty() {
-    return this.issues.length === 0;
-  }
-  flatten(mapper = (issue) => issue.message) {
-    const fieldErrors = {};
-    const formErrors = [];
-    for (const sub of this.issues) {
-      if (sub.path.length > 0) {
-        const firstEl = sub.path[0];
-        fieldErrors[firstEl] = fieldErrors[firstEl] || [];
-        fieldErrors[firstEl].push(mapper(sub));
-      } else {
-        formErrors.push(mapper(sub));
-      }
-    }
-    return { formErrors, fieldErrors };
-  }
-  get formErrors() {
-    return this.flatten();
-  }
-}
-ZodError2.create = (issues) => {
-  const error = new ZodError2(issues);
-  return error;
-};
-var errorMap2 = (issue, _ctx) => {
-  let message;
-  switch (issue.code) {
-    case ZodIssueCode2.invalid_type:
-      if (issue.received === ZodParsedType2.undefined) {
-        message = "Required";
-      } else {
-        message = `Expected ${issue.expected}, received ${issue.received}`;
-      }
-      break;
-    case ZodIssueCode2.invalid_literal:
-      message = `Invalid literal value, expected ${JSON.stringify(issue.expected, util2.jsonStringifyReplacer)}`;
-      break;
-    case ZodIssueCode2.unrecognized_keys:
-      message = `Unrecognized key(s) in object: ${util2.joinValues(issue.keys, ", ")}`;
-      break;
-    case ZodIssueCode2.invalid_union:
-      message = `Invalid input`;
-      break;
-    case ZodIssueCode2.invalid_union_discriminator:
-      message = `Invalid discriminator value. Expected ${util2.joinValues(issue.options)}`;
-      break;
-    case ZodIssueCode2.invalid_enum_value:
-      message = `Invalid enum value. Expected ${util2.joinValues(issue.options)}, received '${issue.received}'`;
-      break;
-    case ZodIssueCode2.invalid_arguments:
-      message = `Invalid function arguments`;
-      break;
-    case ZodIssueCode2.invalid_return_type:
-      message = `Invalid function return type`;
-      break;
-    case ZodIssueCode2.invalid_date:
-      message = `Invalid date`;
-      break;
-    case ZodIssueCode2.invalid_string:
-      if (typeof issue.validation === "object") {
-        if ("includes" in issue.validation) {
-          message = `Invalid input: must include "${issue.validation.includes}"`;
-          if (typeof issue.validation.position === "number") {
-            message = `${message} at one or more positions greater than or equal to ${issue.validation.position}`;
-          }
-        } else if ("startsWith" in issue.validation) {
-          message = `Invalid input: must start with "${issue.validation.startsWith}"`;
-        } else if ("endsWith" in issue.validation) {
-          message = `Invalid input: must end with "${issue.validation.endsWith}"`;
-        } else {
-          util2.assertNever(issue.validation);
-        }
-      } else if (issue.validation !== "regex") {
-        message = `Invalid ${issue.validation}`;
-      } else {
-        message = "Invalid";
-      }
-      break;
-    case ZodIssueCode2.too_small:
-      if (issue.type === "array")
-        message = `Array must contain ${issue.exact ? "exactly" : issue.inclusive ? `at least` : `more than`} ${issue.minimum} element(s)`;
-      else if (issue.type === "string")
-        message = `String must contain ${issue.exact ? "exactly" : issue.inclusive ? `at least` : `over`} ${issue.minimum} character(s)`;
-      else if (issue.type === "number")
-        message = `Number must be ${issue.exact ? `exactly equal to ` : issue.inclusive ? `greater than or equal to ` : `greater than `}${issue.minimum}`;
-      else if (issue.type === "bigint")
-        message = `Number must be ${issue.exact ? `exactly equal to ` : issue.inclusive ? `greater than or equal to ` : `greater than `}${issue.minimum}`;
-      else if (issue.type === "date")
-        message = `Date must be ${issue.exact ? `exactly equal to ` : issue.inclusive ? `greater than or equal to ` : `greater than `}${new Date(Number(issue.minimum))}`;
-      else
-        message = "Invalid input";
-      break;
-    case ZodIssueCode2.too_big:
-      if (issue.type === "array")
-        message = `Array must contain ${issue.exact ? `exactly` : issue.inclusive ? `at most` : `less than`} ${issue.maximum} element(s)`;
-      else if (issue.type === "string")
-        message = `String must contain ${issue.exact ? `exactly` : issue.inclusive ? `at most` : `under`} ${issue.maximum} character(s)`;
-      else if (issue.type === "number")
-        message = `Number must be ${issue.exact ? `exactly` : issue.inclusive ? `less than or equal to` : `less than`} ${issue.maximum}`;
-      else if (issue.type === "bigint")
-        message = `BigInt must be ${issue.exact ? `exactly` : issue.inclusive ? `less than or equal to` : `less than`} ${issue.maximum}`;
-      else if (issue.type === "date")
-        message = `Date must be ${issue.exact ? `exactly` : issue.inclusive ? `smaller than or equal to` : `smaller than`} ${new Date(Number(issue.maximum))}`;
-      else
-        message = "Invalid input";
-      break;
-    case ZodIssueCode2.custom:
-      message = `Invalid input`;
-      break;
-    case ZodIssueCode2.invalid_intersection_types:
-      message = `Intersection results could not be merged`;
-      break;
-    case ZodIssueCode2.not_multiple_of:
-      message = `Number must be a multiple of ${issue.multipleOf}`;
-      break;
-    case ZodIssueCode2.not_finite:
-      message = "Number must be finite";
-      break;
-    default:
-      message = _ctx.defaultError;
-      util2.assertNever(issue);
-  }
-  return { message };
-};
-var en_default2 = errorMap2;
-var overrideErrorMap2 = en_default2;
-function getErrorMap2() {
-  return overrideErrorMap2;
-}
-var makeIssue2 = (params) => {
-  const { data, path, errorMaps, issueData } = params;
-  const fullPath = [...path, ...issueData.path || []];
-  const fullIssue = {
-    ...issueData,
-    path: fullPath
-  };
-  if (issueData.message !== undefined) {
-    return {
-      ...issueData,
-      path: fullPath,
-      message: issueData.message
-    };
-  }
-  let errorMessage = "";
-  const maps = errorMaps.filter((m) => !!m).slice().reverse();
-  for (const map of maps) {
-    errorMessage = map(fullIssue, { data, defaultError: errorMessage }).message;
-  }
-  return {
-    ...issueData,
-    path: fullPath,
-    message: errorMessage
-  };
-};
-function addIssueToContext2(ctx, issueData) {
-  const overrideMap = getErrorMap2();
-  const issue = makeIssue2({
-    issueData,
-    data: ctx.data,
-    path: ctx.path,
-    errorMaps: [
-      ctx.common.contextualErrorMap,
-      ctx.schemaErrorMap,
-      overrideMap,
-      overrideMap === en_default2 ? undefined : en_default2
-    ].filter((x) => !!x)
-  });
-  ctx.common.issues.push(issue);
-}
-
-class ParseStatus2 {
-  constructor() {
-    this.value = "valid";
-  }
-  dirty() {
-    if (this.value === "valid")
-      this.value = "dirty";
-  }
-  abort() {
-    if (this.value !== "aborted")
-      this.value = "aborted";
-  }
-  static mergeArray(status, results) {
-    const arrayValue = [];
-    for (const s of results) {
-      if (s.status === "aborted")
-        return INVALID2;
-      if (s.status === "dirty")
-        status.dirty();
-      arrayValue.push(s.value);
-    }
-    return { status: status.value, value: arrayValue };
-  }
-  static async mergeObjectAsync(status, pairs) {
-    const syncPairs = [];
-    for (const pair of pairs) {
-      const key = await pair.key;
-      const value = await pair.value;
-      syncPairs.push({
-        key,
-        value
-      });
-    }
-    return ParseStatus2.mergeObjectSync(status, syncPairs);
-  }
-  static mergeObjectSync(status, pairs) {
-    const finalObject = {};
-    for (const pair of pairs) {
-      const { key, value } = pair;
-      if (key.status === "aborted")
-        return INVALID2;
-      if (value.status === "aborted")
-        return INVALID2;
-      if (key.status === "dirty")
-        status.dirty();
-      if (value.status === "dirty")
-        status.dirty();
-      if (key.value !== "__proto__" && (typeof value.value !== "undefined" || pair.alwaysSet)) {
-        finalObject[key.value] = value.value;
-      }
-    }
-    return { status: status.value, value: finalObject };
-  }
-}
-var INVALID2 = Object.freeze({
-  status: "aborted"
-});
-var DIRTY2 = (value) => ({ status: "dirty", value });
-var OK2 = (value) => ({ status: "valid", value });
-var isAborted2 = (x) => x.status === "aborted";
-var isDirty2 = (x) => x.status === "dirty";
-var isValid2 = (x) => x.status === "valid";
-var isAsync2 = (x) => typeof Promise !== "undefined" && x instanceof Promise;
-var errorUtil2;
-(function(errorUtil) {
-  errorUtil.errToObj = (message) => typeof message === "string" ? { message } : message || {};
-  errorUtil.toString = (message) => typeof message === "string" ? message : message?.message;
-})(errorUtil2 || (errorUtil2 = {}));
-
-class ParseInputLazyPath2 {
-  constructor(parent, value, path, key) {
-    this._cachedPath = [];
-    this.parent = parent;
-    this.data = value;
-    this._path = path;
-    this._key = key;
-  }
-  get path() {
-    if (!this._cachedPath.length) {
-      if (Array.isArray(this._key)) {
-        this._cachedPath.push(...this._path, ...this._key);
-      } else {
-        this._cachedPath.push(...this._path, this._key);
-      }
-    }
-    return this._cachedPath;
-  }
-}
-var handleResult2 = (ctx, result) => {
-  if (isValid2(result)) {
-    return { success: true, data: result.value };
-  } else {
-    if (!ctx.common.issues.length) {
-      throw new Error("Validation failed but no issues detected.");
-    }
-    return {
-      success: false,
-      get error() {
-        if (this._error)
-          return this._error;
-        const error = new ZodError2(ctx.common.issues);
-        this._error = error;
-        return this._error;
-      }
-    };
-  }
-};
-function processCreateParams2(params) {
-  if (!params)
-    return {};
-  const { errorMap, invalid_type_error, required_error, description } = params;
-  if (errorMap && (invalid_type_error || required_error)) {
-    throw new Error(`Can't use "invalid_type_error" or "required_error" in conjunction with custom error map.`);
-  }
-  if (errorMap)
-    return { errorMap, description };
-  const customMap = (iss, ctx) => {
-    const { message } = params;
-    if (iss.code === "invalid_enum_value") {
-      return { message: message ?? ctx.defaultError };
-    }
-    if (typeof ctx.data === "undefined") {
-      return { message: message ?? required_error ?? ctx.defaultError };
-    }
-    if (iss.code !== "invalid_type")
-      return { message: ctx.defaultError };
-    return { message: message ?? invalid_type_error ?? ctx.defaultError };
-  };
-  return { errorMap: customMap, description };
-}
-
-class ZodType2 {
-  get description() {
-    return this._def.description;
-  }
-  _getType(input) {
-    return getParsedType2(input.data);
-  }
-  _getOrReturnCtx(input, ctx) {
-    return ctx || {
-      common: input.parent.common,
-      data: input.data,
-      parsedType: getParsedType2(input.data),
-      schemaErrorMap: this._def.errorMap,
-      path: input.path,
-      parent: input.parent
-    };
-  }
-  _processInputParams(input) {
-    return {
-      status: new ParseStatus2,
-      ctx: {
-        common: input.parent.common,
-        data: input.data,
-        parsedType: getParsedType2(input.data),
-        schemaErrorMap: this._def.errorMap,
-        path: input.path,
-        parent: input.parent
-      }
-    };
-  }
-  _parseSync(input) {
-    const result = this._parse(input);
-    if (isAsync2(result)) {
-      throw new Error("Synchronous parse encountered promise.");
-    }
-    return result;
-  }
-  _parseAsync(input) {
-    const result = this._parse(input);
-    return Promise.resolve(result);
-  }
-  parse(data, params) {
-    const result = this.safeParse(data, params);
-    if (result.success)
-      return result.data;
-    throw result.error;
-  }
-  safeParse(data, params) {
-    const ctx = {
-      common: {
-        issues: [],
-        async: params?.async ?? false,
-        contextualErrorMap: params?.errorMap
-      },
-      path: params?.path || [],
-      schemaErrorMap: this._def.errorMap,
-      parent: null,
-      data,
-      parsedType: getParsedType2(data)
-    };
-    const result = this._parseSync({ data, path: ctx.path, parent: ctx });
-    return handleResult2(ctx, result);
-  }
-  "~validate"(data) {
-    const ctx = {
-      common: {
-        issues: [],
-        async: !!this["~standard"].async
-      },
-      path: [],
-      schemaErrorMap: this._def.errorMap,
-      parent: null,
-      data,
-      parsedType: getParsedType2(data)
-    };
-    if (!this["~standard"].async) {
-      try {
-        const result = this._parseSync({ data, path: [], parent: ctx });
-        return isValid2(result) ? {
-          value: result.value
-        } : {
-          issues: ctx.common.issues
-        };
-      } catch (err) {
-        if (err?.message?.toLowerCase()?.includes("encountered")) {
-          this["~standard"].async = true;
-        }
-        ctx.common = {
-          issues: [],
-          async: true
-        };
-      }
-    }
-    return this._parseAsync({ data, path: [], parent: ctx }).then((result) => isValid2(result) ? {
-      value: result.value
-    } : {
-      issues: ctx.common.issues
-    });
-  }
-  async parseAsync(data, params) {
-    const result = await this.safeParseAsync(data, params);
-    if (result.success)
-      return result.data;
-    throw result.error;
-  }
-  async safeParseAsync(data, params) {
-    const ctx = {
-      common: {
-        issues: [],
-        contextualErrorMap: params?.errorMap,
-        async: true
-      },
-      path: params?.path || [],
-      schemaErrorMap: this._def.errorMap,
-      parent: null,
-      data,
-      parsedType: getParsedType2(data)
-    };
-    const maybeAsyncResult = this._parse({ data, path: ctx.path, parent: ctx });
-    const result = await (isAsync2(maybeAsyncResult) ? maybeAsyncResult : Promise.resolve(maybeAsyncResult));
-    return handleResult2(ctx, result);
-  }
-  refine(check, message) {
-    const getIssueProperties = (val) => {
-      if (typeof message === "string" || typeof message === "undefined") {
-        return { message };
-      } else if (typeof message === "function") {
-        return message(val);
-      } else {
-        return message;
-      }
-    };
-    return this._refinement((val, ctx) => {
-      const result = check(val);
-      const setError = () => ctx.addIssue({
-        code: ZodIssueCode2.custom,
-        ...getIssueProperties(val)
-      });
-      if (typeof Promise !== "undefined" && result instanceof Promise) {
-        return result.then((data) => {
-          if (!data) {
-            setError();
-            return false;
-          } else {
-            return true;
-          }
-        });
-      }
-      if (!result) {
-        setError();
-        return false;
-      } else {
-        return true;
-      }
-    });
-  }
-  refinement(check, refinementData) {
-    return this._refinement((val, ctx) => {
-      if (!check(val)) {
-        ctx.addIssue(typeof refinementData === "function" ? refinementData(val, ctx) : refinementData);
-        return false;
-      } else {
-        return true;
-      }
-    });
-  }
-  _refinement(refinement) {
-    return new ZodEffects2({
-      schema: this,
-      typeName: ZodFirstPartyTypeKind2.ZodEffects,
-      effect: { type: "refinement", refinement }
-    });
-  }
-  superRefine(refinement) {
-    return this._refinement(refinement);
-  }
-  constructor(def) {
-    this.spa = this.safeParseAsync;
-    this._def = def;
-    this.parse = this.parse.bind(this);
-    this.safeParse = this.safeParse.bind(this);
-    this.parseAsync = this.parseAsync.bind(this);
-    this.safeParseAsync = this.safeParseAsync.bind(this);
-    this.spa = this.spa.bind(this);
-    this.refine = this.refine.bind(this);
-    this.refinement = this.refinement.bind(this);
-    this.superRefine = this.superRefine.bind(this);
-    this.optional = this.optional.bind(this);
-    this.nullable = this.nullable.bind(this);
-    this.nullish = this.nullish.bind(this);
-    this.array = this.array.bind(this);
-    this.promise = this.promise.bind(this);
-    this.or = this.or.bind(this);
-    this.and = this.and.bind(this);
-    this.transform = this.transform.bind(this);
-    this.brand = this.brand.bind(this);
-    this.default = this.default.bind(this);
-    this.catch = this.catch.bind(this);
-    this.describe = this.describe.bind(this);
-    this.pipe = this.pipe.bind(this);
-    this.readonly = this.readonly.bind(this);
-    this.isNullable = this.isNullable.bind(this);
-    this.isOptional = this.isOptional.bind(this);
-    this["~standard"] = {
-      version: 1,
-      vendor: "zod",
-      validate: (data) => this["~validate"](data)
-    };
-  }
-  optional() {
-    return ZodOptional2.create(this, this._def);
-  }
-  nullable() {
-    return ZodNullable2.create(this, this._def);
-  }
-  nullish() {
-    return this.nullable().optional();
-  }
-  array() {
-    return ZodArray2.create(this);
-  }
-  promise() {
-    return ZodPromise2.create(this, this._def);
-  }
-  or(option) {
-    return ZodUnion2.create([this, option], this._def);
-  }
-  and(incoming) {
-    return ZodIntersection2.create(this, incoming, this._def);
-  }
-  transform(transform) {
-    return new ZodEffects2({
-      ...processCreateParams2(this._def),
-      schema: this,
-      typeName: ZodFirstPartyTypeKind2.ZodEffects,
-      effect: { type: "transform", transform }
-    });
-  }
-  default(def) {
-    const defaultValueFunc = typeof def === "function" ? def : () => def;
-    return new ZodDefault2({
-      ...processCreateParams2(this._def),
-      innerType: this,
-      defaultValue: defaultValueFunc,
-      typeName: ZodFirstPartyTypeKind2.ZodDefault
-    });
-  }
-  brand() {
-    return new ZodBranded2({
-      typeName: ZodFirstPartyTypeKind2.ZodBranded,
-      type: this,
-      ...processCreateParams2(this._def)
-    });
-  }
-  catch(def) {
-    const catchValueFunc = typeof def === "function" ? def : () => def;
-    return new ZodCatch2({
-      ...processCreateParams2(this._def),
-      innerType: this,
-      catchValue: catchValueFunc,
-      typeName: ZodFirstPartyTypeKind2.ZodCatch
-    });
-  }
-  describe(description) {
-    const This = this.constructor;
-    return new This({
-      ...this._def,
-      description
-    });
-  }
-  pipe(target) {
-    return ZodPipeline2.create(this, target);
-  }
-  readonly() {
-    return ZodReadonly2.create(this);
-  }
-  isOptional() {
-    return this.safeParse(undefined).success;
-  }
-  isNullable() {
-    return this.safeParse(null).success;
-  }
-}
-var cuidRegex2 = /^c[^\s-]{8,}$/i;
-var cuid2Regex2 = /^[0-9a-z]+$/;
-var ulidRegex2 = /^[0-9A-HJKMNP-TV-Z]{26}$/i;
-var uuidRegex2 = /^[0-9a-fA-F]{8}\b-[0-9a-fA-F]{4}\b-[0-9a-fA-F]{4}\b-[0-9a-fA-F]{4}\b-[0-9a-fA-F]{12}$/i;
-var nanoidRegex2 = /^[a-z0-9_-]{21}$/i;
-var jwtRegex2 = /^[A-Za-z0-9-_]+\.[A-Za-z0-9-_]+\.[A-Za-z0-9-_]*$/;
-var durationRegex2 = /^[-+]?P(?!$)(?:(?:[-+]?\d+Y)|(?:[-+]?\d+[.,]\d+Y$))?(?:(?:[-+]?\d+M)|(?:[-+]?\d+[.,]\d+M$))?(?:(?:[-+]?\d+W)|(?:[-+]?\d+[.,]\d+W$))?(?:(?:[-+]?\d+D)|(?:[-+]?\d+[.,]\d+D$))?(?:T(?=[\d+-])(?:(?:[-+]?\d+H)|(?:[-+]?\d+[.,]\d+H$))?(?:(?:[-+]?\d+M)|(?:[-+]?\d+[.,]\d+M$))?(?:[-+]?\d+(?:[.,]\d+)?S)?)??$/;
-var emailRegex2 = /^(?!\.)(?!.*\.\.)([A-Z0-9_'+\-\.]*)[A-Z0-9_+-]@([A-Z0-9][A-Z0-9\-]*\.)+[A-Z]{2,}$/i;
-var _emojiRegex2 = `^(\\p{Extended_Pictographic}|\\p{Emoji_Component})+$`;
-var emojiRegex2;
-var ipv4Regex2 = /^(?:(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])$/;
-var ipv4CidrRegex2 = /^(?:(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\/(3[0-2]|[12]?[0-9])$/;
-var ipv6Regex2 = /^(([0-9a-fA-F]{1,4}:){7,7}[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,7}:|([0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,5}(:[0-9a-fA-F]{1,4}){1,2}|([0-9a-fA-F]{1,4}:){1,4}(:[0-9a-fA-F]{1,4}){1,3}|([0-9a-fA-F]{1,4}:){1,3}(:[0-9a-fA-F]{1,4}){1,4}|([0-9a-fA-F]{1,4}:){1,2}(:[0-9a-fA-F]{1,4}){1,5}|[0-9a-fA-F]{1,4}:((:[0-9a-fA-F]{1,4}){1,6})|:((:[0-9a-fA-F]{1,4}){1,7}|:)|fe80:(:[0-9a-fA-F]{0,4}){0,4}%[0-9a-zA-Z]{1,}|::(ffff(:0{1,4}){0,1}:){0,1}((25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9])\.){3,3}(25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9])|([0-9a-fA-F]{1,4}:){1,4}:((25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9])\.){3,3}(25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9]))$/;
-var ipv6CidrRegex2 = /^(([0-9a-fA-F]{1,4}:){7,7}[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,7}:|([0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,5}(:[0-9a-fA-F]{1,4}){1,2}|([0-9a-fA-F]{1,4}:){1,4}(:[0-9a-fA-F]{1,4}){1,3}|([0-9a-fA-F]{1,4}:){1,3}(:[0-9a-fA-F]{1,4}){1,4}|([0-9a-fA-F]{1,4}:){1,2}(:[0-9a-fA-F]{1,4}){1,5}|[0-9a-fA-F]{1,4}:((:[0-9a-fA-F]{1,4}){1,6})|:((:[0-9a-fA-F]{1,4}){1,7}|:)|fe80:(:[0-9a-fA-F]{0,4}){0,4}%[0-9a-zA-Z]{1,}|::(ffff(:0{1,4}){0,1}:){0,1}((25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9])\.){3,3}(25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9])|([0-9a-fA-F]{1,4}:){1,4}:((25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9])\.){3,3}(25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9]))\/(12[0-8]|1[01][0-9]|[1-9]?[0-9])$/;
-var base64Regex2 = /^([0-9a-zA-Z+/]{4})*(([0-9a-zA-Z+/]{2}==)|([0-9a-zA-Z+/]{3}=))?$/;
-var base64urlRegex2 = /^([0-9a-zA-Z-_]{4})*(([0-9a-zA-Z-_]{2}(==)?)|([0-9a-zA-Z-_]{3}(=)?))?$/;
-var dateRegexSource2 = `((\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-((0[13578]|1[02])-(0[1-9]|[12]\\d|3[01])|(0[469]|11)-(0[1-9]|[12]\\d|30)|(02)-(0[1-9]|1\\d|2[0-8])))`;
-var dateRegex2 = new RegExp(`^${dateRegexSource2}$`);
-function timeRegexSource2(args) {
-  let secondsRegexSource = `[0-5]\\d`;
-  if (args.precision) {
-    secondsRegexSource = `${secondsRegexSource}\\.\\d{${args.precision}}`;
-  } else if (args.precision == null) {
-    secondsRegexSource = `${secondsRegexSource}(\\.\\d+)?`;
-  }
-  const secondsQuantifier = args.precision ? "+" : "?";
-  return `([01]\\d|2[0-3]):[0-5]\\d(:${secondsRegexSource})${secondsQuantifier}`;
-}
-function timeRegex2(args) {
-  return new RegExp(`^${timeRegexSource2(args)}$`);
-}
-function datetimeRegex2(args) {
-  let regex = `${dateRegexSource2}T${timeRegexSource2(args)}`;
-  const opts = [];
-  opts.push(args.local ? `Z?` : `Z`);
-  if (args.offset)
-    opts.push(`([+-]\\d{2}:?\\d{2})`);
-  regex = `${regex}(${opts.join("|")})`;
-  return new RegExp(`^${regex}$`);
-}
-function isValidIP2(ip, version) {
-  if ((version === "v4" || !version) && ipv4Regex2.test(ip)) {
-    return true;
-  }
-  if ((version === "v6" || !version) && ipv6Regex2.test(ip)) {
-    return true;
-  }
-  return false;
-}
-function isValidJWT2(jwt, alg) {
-  if (!jwtRegex2.test(jwt))
-    return false;
-  try {
-    const [header] = jwt.split(".");
-    if (!header)
-      return false;
-    const base64 = header.replace(/-/g, "+").replace(/_/g, "/").padEnd(header.length + (4 - header.length % 4) % 4, "=");
-    const decoded = JSON.parse(atob(base64));
-    if (typeof decoded !== "object" || decoded === null)
-      return false;
-    if ("typ" in decoded && decoded?.typ !== "JWT")
-      return false;
-    if (!decoded.alg)
-      return false;
-    if (alg && decoded.alg !== alg)
-      return false;
-    return true;
-  } catch {
-    return false;
-  }
-}
-function isValidCidr2(ip, version) {
-  if ((version === "v4" || !version) && ipv4CidrRegex2.test(ip)) {
-    return true;
-  }
-  if ((version === "v6" || !version) && ipv6CidrRegex2.test(ip)) {
-    return true;
-  }
-  return false;
-}
-
-class ZodString2 extends ZodType2 {
-  _parse(input) {
-    if (this._def.coerce) {
-      input.data = String(input.data);
-    }
-    const parsedType = this._getType(input);
-    if (parsedType !== ZodParsedType2.string) {
-      const ctx = this._getOrReturnCtx(input);
-      addIssueToContext2(ctx, {
-        code: ZodIssueCode2.invalid_type,
-        expected: ZodParsedType2.string,
-        received: ctx.parsedType
-      });
-      return INVALID2;
-    }
-    const status = new ParseStatus2;
-    let ctx = undefined;
-    for (const check of this._def.checks) {
-      if (check.kind === "min") {
-        if (input.data.length < check.value) {
-          ctx = this._getOrReturnCtx(input, ctx);
-          addIssueToContext2(ctx, {
-            code: ZodIssueCode2.too_small,
-            minimum: check.value,
-            type: "string",
-            inclusive: true,
-            exact: false,
-            message: check.message
-          });
-          status.dirty();
-        }
-      } else if (check.kind === "max") {
-        if (input.data.length > check.value) {
-          ctx = this._getOrReturnCtx(input, ctx);
-          addIssueToContext2(ctx, {
-            code: ZodIssueCode2.too_big,
-            maximum: check.value,
-            type: "string",
-            inclusive: true,
-            exact: false,
-            message: check.message
-          });
-          status.dirty();
-        }
-      } else if (check.kind === "length") {
-        const tooBig = input.data.length > check.value;
-        const tooSmall = input.data.length < check.value;
-        if (tooBig || tooSmall) {
-          ctx = this._getOrReturnCtx(input, ctx);
-          if (tooBig) {
-            addIssueToContext2(ctx, {
-              code: ZodIssueCode2.too_big,
-              maximum: check.value,
-              type: "string",
-              inclusive: true,
-              exact: true,
-              message: check.message
-            });
-          } else if (tooSmall) {
-            addIssueToContext2(ctx, {
-              code: ZodIssueCode2.too_small,
-              minimum: check.value,
-              type: "string",
-              inclusive: true,
-              exact: true,
-              message: check.message
-            });
-          }
-          status.dirty();
-        }
-      } else if (check.kind === "email") {
-        if (!emailRegex2.test(input.data)) {
-          ctx = this._getOrReturnCtx(input, ctx);
-          addIssueToContext2(ctx, {
-            validation: "email",
-            code: ZodIssueCode2.invalid_string,
-            message: check.message
-          });
-          status.dirty();
-        }
-      } else if (check.kind === "emoji") {
-        if (!emojiRegex2) {
-          emojiRegex2 = new RegExp(_emojiRegex2, "u");
-        }
-        if (!emojiRegex2.test(input.data)) {
-          ctx = this._getOrReturnCtx(input, ctx);
-          addIssueToContext2(ctx, {
-            validation: "emoji",
-            code: ZodIssueCode2.invalid_string,
-            message: check.message
-          });
-          status.dirty();
-        }
-      } else if (check.kind === "uuid") {
-        if (!uuidRegex2.test(input.data)) {
-          ctx = this._getOrReturnCtx(input, ctx);
-          addIssueToContext2(ctx, {
-            validation: "uuid",
-            code: ZodIssueCode2.invalid_string,
-            message: check.message
-          });
-          status.dirty();
-        }
-      } else if (check.kind === "nanoid") {
-        if (!nanoidRegex2.test(input.data)) {
-          ctx = this._getOrReturnCtx(input, ctx);
-          addIssueToContext2(ctx, {
-            validation: "nanoid",
-            code: ZodIssueCode2.invalid_string,
-            message: check.message
-          });
-          status.dirty();
-        }
-      } else if (check.kind === "cuid") {
-        if (!cuidRegex2.test(input.data)) {
-          ctx = this._getOrReturnCtx(input, ctx);
-          addIssueToContext2(ctx, {
-            validation: "cuid",
-            code: ZodIssueCode2.invalid_string,
-            message: check.message
-          });
-          status.dirty();
-        }
-      } else if (check.kind === "cuid2") {
-        if (!cuid2Regex2.test(input.data)) {
-          ctx = this._getOrReturnCtx(input, ctx);
-          addIssueToContext2(ctx, {
-            validation: "cuid2",
-            code: ZodIssueCode2.invalid_string,
-            message: check.message
-          });
-          status.dirty();
-        }
-      } else if (check.kind === "ulid") {
-        if (!ulidRegex2.test(input.data)) {
-          ctx = this._getOrReturnCtx(input, ctx);
-          addIssueToContext2(ctx, {
-            validation: "ulid",
-            code: ZodIssueCode2.invalid_string,
-            message: check.message
-          });
-          status.dirty();
-        }
-      } else if (check.kind === "url") {
-        try {
-          new URL(input.data);
-        } catch {
-          ctx = this._getOrReturnCtx(input, ctx);
-          addIssueToContext2(ctx, {
-            validation: "url",
-            code: ZodIssueCode2.invalid_string,
-            message: check.message
-          });
-          status.dirty();
-        }
-      } else if (check.kind === "regex") {
-        check.regex.lastIndex = 0;
-        const testResult = check.regex.test(input.data);
-        if (!testResult) {
-          ctx = this._getOrReturnCtx(input, ctx);
-          addIssueToContext2(ctx, {
-            validation: "regex",
-            code: ZodIssueCode2.invalid_string,
-            message: check.message
-          });
-          status.dirty();
-        }
-      } else if (check.kind === "trim") {
-        input.data = input.data.trim();
-      } else if (check.kind === "includes") {
-        if (!input.data.includes(check.value, check.position)) {
-          ctx = this._getOrReturnCtx(input, ctx);
-          addIssueToContext2(ctx, {
-            code: ZodIssueCode2.invalid_string,
-            validation: { includes: check.value, position: check.position },
-            message: check.message
-          });
-          status.dirty();
-        }
-      } else if (check.kind === "toLowerCase") {
-        input.data = input.data.toLowerCase();
-      } else if (check.kind === "toUpperCase") {
-        input.data = input.data.toUpperCase();
-      } else if (check.kind === "startsWith") {
-        if (!input.data.startsWith(check.value)) {
-          ctx = this._getOrReturnCtx(input, ctx);
-          addIssueToContext2(ctx, {
-            code: ZodIssueCode2.invalid_string,
-            validation: { startsWith: check.value },
-            message: check.message
-          });
-          status.dirty();
-        }
-      } else if (check.kind === "endsWith") {
-        if (!input.data.endsWith(check.value)) {
-          ctx = this._getOrReturnCtx(input, ctx);
-          addIssueToContext2(ctx, {
-            code: ZodIssueCode2.invalid_string,
-            validation: { endsWith: check.value },
-            message: check.message
-          });
-          status.dirty();
-        }
-      } else if (check.kind === "datetime") {
-        const regex = datetimeRegex2(check);
-        if (!regex.test(input.data)) {
-          ctx = this._getOrReturnCtx(input, ctx);
-          addIssueToContext2(ctx, {
-            code: ZodIssueCode2.invalid_string,
-            validation: "datetime",
-            message: check.message
-          });
-          status.dirty();
-        }
-      } else if (check.kind === "date") {
-        const regex = dateRegex2;
-        if (!regex.test(input.data)) {
-          ctx = this._getOrReturnCtx(input, ctx);
-          addIssueToContext2(ctx, {
-            code: ZodIssueCode2.invalid_string,
-            validation: "date",
-            message: check.message
-          });
-          status.dirty();
-        }
-      } else if (check.kind === "time") {
-        const regex = timeRegex2(check);
-        if (!regex.test(input.data)) {
-          ctx = this._getOrReturnCtx(input, ctx);
-          addIssueToContext2(ctx, {
-            code: ZodIssueCode2.invalid_string,
-            validation: "time",
-            message: check.message
-          });
-          status.dirty();
-        }
-      } else if (check.kind === "duration") {
-        if (!durationRegex2.test(input.data)) {
-          ctx = this._getOrReturnCtx(input, ctx);
-          addIssueToContext2(ctx, {
-            validation: "duration",
-            code: ZodIssueCode2.invalid_string,
-            message: check.message
-          });
-          status.dirty();
-        }
-      } else if (check.kind === "ip") {
-        if (!isValidIP2(input.data, check.version)) {
-          ctx = this._getOrReturnCtx(input, ctx);
-          addIssueToContext2(ctx, {
-            validation: "ip",
-            code: ZodIssueCode2.invalid_string,
-            message: check.message
-          });
-          status.dirty();
-        }
-      } else if (check.kind === "jwt") {
-        if (!isValidJWT2(input.data, check.alg)) {
-          ctx = this._getOrReturnCtx(input, ctx);
-          addIssueToContext2(ctx, {
-            validation: "jwt",
-            code: ZodIssueCode2.invalid_string,
-            message: check.message
-          });
-          status.dirty();
-        }
-      } else if (check.kind === "cidr") {
-        if (!isValidCidr2(input.data, check.version)) {
-          ctx = this._getOrReturnCtx(input, ctx);
-          addIssueToContext2(ctx, {
-            validation: "cidr",
-            code: ZodIssueCode2.invalid_string,
-            message: check.message
-          });
-          status.dirty();
-        }
-      } else if (check.kind === "base64") {
-        if (!base64Regex2.test(input.data)) {
-          ctx = this._getOrReturnCtx(input, ctx);
-          addIssueToContext2(ctx, {
-            validation: "base64",
-            code: ZodIssueCode2.invalid_string,
-            message: check.message
-          });
-          status.dirty();
-        }
-      } else if (check.kind === "base64url") {
-        if (!base64urlRegex2.test(input.data)) {
-          ctx = this._getOrReturnCtx(input, ctx);
-          addIssueToContext2(ctx, {
-            validation: "base64url",
-            code: ZodIssueCode2.invalid_string,
-            message: check.message
-          });
-          status.dirty();
-        }
-      } else {
-        util2.assertNever(check);
-      }
-    }
-    return { status: status.value, value: input.data };
-  }
-  _regex(regex, validation, message) {
-    return this.refinement((data) => regex.test(data), {
-      validation,
-      code: ZodIssueCode2.invalid_string,
-      ...errorUtil2.errToObj(message)
-    });
-  }
-  _addCheck(check) {
-    return new ZodString2({
-      ...this._def,
-      checks: [...this._def.checks, check]
-    });
-  }
-  email(message) {
-    return this._addCheck({ kind: "email", ...errorUtil2.errToObj(message) });
-  }
-  url(message) {
-    return this._addCheck({ kind: "url", ...errorUtil2.errToObj(message) });
-  }
-  emoji(message) {
-    return this._addCheck({ kind: "emoji", ...errorUtil2.errToObj(message) });
-  }
-  uuid(message) {
-    return this._addCheck({ kind: "uuid", ...errorUtil2.errToObj(message) });
-  }
-  nanoid(message) {
-    return this._addCheck({ kind: "nanoid", ...errorUtil2.errToObj(message) });
-  }
-  cuid(message) {
-    return this._addCheck({ kind: "cuid", ...errorUtil2.errToObj(message) });
-  }
-  cuid2(message) {
-    return this._addCheck({ kind: "cuid2", ...errorUtil2.errToObj(message) });
-  }
-  ulid(message) {
-    return this._addCheck({ kind: "ulid", ...errorUtil2.errToObj(message) });
-  }
-  base64(message) {
-    return this._addCheck({ kind: "base64", ...errorUtil2.errToObj(message) });
-  }
-  base64url(message) {
-    return this._addCheck({
-      kind: "base64url",
-      ...errorUtil2.errToObj(message)
-    });
-  }
-  jwt(options) {
-    return this._addCheck({ kind: "jwt", ...errorUtil2.errToObj(options) });
-  }
-  ip(options) {
-    return this._addCheck({ kind: "ip", ...errorUtil2.errToObj(options) });
-  }
-  cidr(options) {
-    return this._addCheck({ kind: "cidr", ...errorUtil2.errToObj(options) });
-  }
-  datetime(options) {
-    if (typeof options === "string") {
-      return this._addCheck({
-        kind: "datetime",
-        precision: null,
-        offset: false,
-        local: false,
-        message: options
-      });
-    }
-    return this._addCheck({
-      kind: "datetime",
-      precision: typeof options?.precision === "undefined" ? null : options?.precision,
-      offset: options?.offset ?? false,
-      local: options?.local ?? false,
-      ...errorUtil2.errToObj(options?.message)
-    });
-  }
-  date(message) {
-    return this._addCheck({ kind: "date", message });
-  }
-  time(options) {
-    if (typeof options === "string") {
-      return this._addCheck({
-        kind: "time",
-        precision: null,
-        message: options
-      });
-    }
-    return this._addCheck({
-      kind: "time",
-      precision: typeof options?.precision === "undefined" ? null : options?.precision,
-      ...errorUtil2.errToObj(options?.message)
-    });
-  }
-  duration(message) {
-    return this._addCheck({ kind: "duration", ...errorUtil2.errToObj(message) });
-  }
-  regex(regex, message) {
-    return this._addCheck({
-      kind: "regex",
-      regex,
-      ...errorUtil2.errToObj(message)
-    });
-  }
-  includes(value, options) {
-    return this._addCheck({
-      kind: "includes",
-      value,
-      position: options?.position,
-      ...errorUtil2.errToObj(options?.message)
-    });
-  }
-  startsWith(value, message) {
-    return this._addCheck({
-      kind: "startsWith",
-      value,
-      ...errorUtil2.errToObj(message)
-    });
-  }
-  endsWith(value, message) {
-    return this._addCheck({
-      kind: "endsWith",
-      value,
-      ...errorUtil2.errToObj(message)
-    });
-  }
-  min(minLength, message) {
-    return this._addCheck({
-      kind: "min",
-      value: minLength,
-      ...errorUtil2.errToObj(message)
-    });
-  }
-  max(maxLength, message) {
-    return this._addCheck({
-      kind: "max",
-      value: maxLength,
-      ...errorUtil2.errToObj(message)
-    });
-  }
-  length(len, message) {
-    return this._addCheck({
-      kind: "length",
-      value: len,
-      ...errorUtil2.errToObj(message)
-    });
-  }
-  nonempty(message) {
-    return this.min(1, errorUtil2.errToObj(message));
-  }
-  trim() {
-    return new ZodString2({
-      ...this._def,
-      checks: [...this._def.checks, { kind: "trim" }]
-    });
-  }
-  toLowerCase() {
-    return new ZodString2({
-      ...this._def,
-      checks: [...this._def.checks, { kind: "toLowerCase" }]
-    });
-  }
-  toUpperCase() {
-    return new ZodString2({
-      ...this._def,
-      checks: [...this._def.checks, { kind: "toUpperCase" }]
-    });
-  }
-  get isDatetime() {
-    return !!this._def.checks.find((ch) => ch.kind === "datetime");
-  }
-  get isDate() {
-    return !!this._def.checks.find((ch) => ch.kind === "date");
-  }
-  get isTime() {
-    return !!this._def.checks.find((ch) => ch.kind === "time");
-  }
-  get isDuration() {
-    return !!this._def.checks.find((ch) => ch.kind === "duration");
-  }
-  get isEmail() {
-    return !!this._def.checks.find((ch) => ch.kind === "email");
-  }
-  get isURL() {
-    return !!this._def.checks.find((ch) => ch.kind === "url");
-  }
-  get isEmoji() {
-    return !!this._def.checks.find((ch) => ch.kind === "emoji");
-  }
-  get isUUID() {
-    return !!this._def.checks.find((ch) => ch.kind === "uuid");
-  }
-  get isNANOID() {
-    return !!this._def.checks.find((ch) => ch.kind === "nanoid");
-  }
-  get isCUID() {
-    return !!this._def.checks.find((ch) => ch.kind === "cuid");
-  }
-  get isCUID2() {
-    return !!this._def.checks.find((ch) => ch.kind === "cuid2");
-  }
-  get isULID() {
-    return !!this._def.checks.find((ch) => ch.kind === "ulid");
-  }
-  get isIP() {
-    return !!this._def.checks.find((ch) => ch.kind === "ip");
-  }
-  get isCIDR() {
-    return !!this._def.checks.find((ch) => ch.kind === "cidr");
-  }
-  get isBase64() {
-    return !!this._def.checks.find((ch) => ch.kind === "base64");
-  }
-  get isBase64url() {
-    return !!this._def.checks.find((ch) => ch.kind === "base64url");
-  }
-  get minLength() {
-    let min = null;
-    for (const ch of this._def.checks) {
-      if (ch.kind === "min") {
-        if (min === null || ch.value > min)
-          min = ch.value;
-      }
-    }
-    return min;
-  }
-  get maxLength() {
-    let max = null;
-    for (const ch of this._def.checks) {
-      if (ch.kind === "max") {
-        if (max === null || ch.value < max)
-          max = ch.value;
-      }
-    }
-    return max;
-  }
-}
-ZodString2.create = (params) => {
-  return new ZodString2({
-    checks: [],
-    typeName: ZodFirstPartyTypeKind2.ZodString,
-    coerce: params?.coerce ?? false,
-    ...processCreateParams2(params)
-  });
-};
-function floatSafeRemainder2(val, step) {
-  const valDecCount = (val.toString().split(".")[1] || "").length;
-  const stepDecCount = (step.toString().split(".")[1] || "").length;
-  const decCount = valDecCount > stepDecCount ? valDecCount : stepDecCount;
-  const valInt = Number.parseInt(val.toFixed(decCount).replace(".", ""));
-  const stepInt = Number.parseInt(step.toFixed(decCount).replace(".", ""));
-  return valInt % stepInt / 10 ** decCount;
-}
-
-class ZodNumber2 extends ZodType2 {
-  constructor() {
-    super(...arguments);
-    this.min = this.gte;
-    this.max = this.lte;
-    this.step = this.multipleOf;
-  }
-  _parse(input) {
-    if (this._def.coerce) {
-      input.data = Number(input.data);
-    }
-    const parsedType = this._getType(input);
-    if (parsedType !== ZodParsedType2.number) {
-      const ctx = this._getOrReturnCtx(input);
-      addIssueToContext2(ctx, {
-        code: ZodIssueCode2.invalid_type,
-        expected: ZodParsedType2.number,
-        received: ctx.parsedType
-      });
-      return INVALID2;
-    }
-    let ctx = undefined;
-    const status = new ParseStatus2;
-    for (const check of this._def.checks) {
-      if (check.kind === "int") {
-        if (!util2.isInteger(input.data)) {
-          ctx = this._getOrReturnCtx(input, ctx);
-          addIssueToContext2(ctx, {
-            code: ZodIssueCode2.invalid_type,
-            expected: "integer",
-            received: "float",
-            message: check.message
-          });
-          status.dirty();
-        }
-      } else if (check.kind === "min") {
-        const tooSmall = check.inclusive ? input.data < check.value : input.data <= check.value;
-        if (tooSmall) {
-          ctx = this._getOrReturnCtx(input, ctx);
-          addIssueToContext2(ctx, {
-            code: ZodIssueCode2.too_small,
-            minimum: check.value,
-            type: "number",
-            inclusive: check.inclusive,
-            exact: false,
-            message: check.message
-          });
-          status.dirty();
-        }
-      } else if (check.kind === "max") {
-        const tooBig = check.inclusive ? input.data > check.value : input.data >= check.value;
-        if (tooBig) {
-          ctx = this._getOrReturnCtx(input, ctx);
-          addIssueToContext2(ctx, {
-            code: ZodIssueCode2.too_big,
-            maximum: check.value,
-            type: "number",
-            inclusive: check.inclusive,
-            exact: false,
-            message: check.message
-          });
-          status.dirty();
-        }
-      } else if (check.kind === "multipleOf") {
-        if (floatSafeRemainder2(input.data, check.value) !== 0) {
-          ctx = this._getOrReturnCtx(input, ctx);
-          addIssueToContext2(ctx, {
-            code: ZodIssueCode2.not_multiple_of,
-            multipleOf: check.value,
-            message: check.message
-          });
-          status.dirty();
-        }
-      } else if (check.kind === "finite") {
-        if (!Number.isFinite(input.data)) {
-          ctx = this._getOrReturnCtx(input, ctx);
-          addIssueToContext2(ctx, {
-            code: ZodIssueCode2.not_finite,
-            message: check.message
-          });
-          status.dirty();
-        }
-      } else {
-        util2.assertNever(check);
-      }
-    }
-    return { status: status.value, value: input.data };
-  }
-  gte(value, message) {
-    return this.setLimit("min", value, true, errorUtil2.toString(message));
-  }
-  gt(value, message) {
-    return this.setLimit("min", value, false, errorUtil2.toString(message));
-  }
-  lte(value, message) {
-    return this.setLimit("max", value, true, errorUtil2.toString(message));
-  }
-  lt(value, message) {
-    return this.setLimit("max", value, false, errorUtil2.toString(message));
-  }
-  setLimit(kind, value, inclusive, message) {
-    return new ZodNumber2({
-      ...this._def,
-      checks: [
-        ...this._def.checks,
-        {
-          kind,
-          value,
-          inclusive,
-          message: errorUtil2.toString(message)
-        }
-      ]
-    });
-  }
-  _addCheck(check) {
-    return new ZodNumber2({
-      ...this._def,
-      checks: [...this._def.checks, check]
-    });
-  }
-  int(message) {
-    return this._addCheck({
-      kind: "int",
-      message: errorUtil2.toString(message)
-    });
-  }
-  positive(message) {
-    return this._addCheck({
-      kind: "min",
-      value: 0,
-      inclusive: false,
-      message: errorUtil2.toString(message)
-    });
-  }
-  negative(message) {
-    return this._addCheck({
-      kind: "max",
-      value: 0,
-      inclusive: false,
-      message: errorUtil2.toString(message)
-    });
-  }
-  nonpositive(message) {
-    return this._addCheck({
-      kind: "max",
-      value: 0,
-      inclusive: true,
-      message: errorUtil2.toString(message)
-    });
-  }
-  nonnegative(message) {
-    return this._addCheck({
-      kind: "min",
-      value: 0,
-      inclusive: true,
-      message: errorUtil2.toString(message)
-    });
-  }
-  multipleOf(value, message) {
-    return this._addCheck({
-      kind: "multipleOf",
-      value,
-      message: errorUtil2.toString(message)
-    });
-  }
-  finite(message) {
-    return this._addCheck({
-      kind: "finite",
-      message: errorUtil2.toString(message)
-    });
-  }
-  safe(message) {
-    return this._addCheck({
-      kind: "min",
-      inclusive: true,
-      value: Number.MIN_SAFE_INTEGER,
-      message: errorUtil2.toString(message)
-    })._addCheck({
-      kind: "max",
-      inclusive: true,
-      value: Number.MAX_SAFE_INTEGER,
-      message: errorUtil2.toString(message)
-    });
-  }
-  get minValue() {
-    let min = null;
-    for (const ch of this._def.checks) {
-      if (ch.kind === "min") {
-        if (min === null || ch.value > min)
-          min = ch.value;
-      }
-    }
-    return min;
-  }
-  get maxValue() {
-    let max = null;
-    for (const ch of this._def.checks) {
-      if (ch.kind === "max") {
-        if (max === null || ch.value < max)
-          max = ch.value;
-      }
-    }
-    return max;
-  }
-  get isInt() {
-    return !!this._def.checks.find((ch) => ch.kind === "int" || ch.kind === "multipleOf" && util2.isInteger(ch.value));
-  }
-  get isFinite() {
-    let max = null;
-    let min = null;
-    for (const ch of this._def.checks) {
-      if (ch.kind === "finite" || ch.kind === "int" || ch.kind === "multipleOf") {
-        return true;
-      } else if (ch.kind === "min") {
-        if (min === null || ch.value > min)
-          min = ch.value;
-      } else if (ch.kind === "max") {
-        if (max === null || ch.value < max)
-          max = ch.value;
-      }
-    }
-    return Number.isFinite(min) && Number.isFinite(max);
-  }
-}
-ZodNumber2.create = (params) => {
-  return new ZodNumber2({
-    checks: [],
-    typeName: ZodFirstPartyTypeKind2.ZodNumber,
-    coerce: params?.coerce || false,
-    ...processCreateParams2(params)
-  });
-};
-
-class ZodBigInt2 extends ZodType2 {
-  constructor() {
-    super(...arguments);
-    this.min = this.gte;
-    this.max = this.lte;
-  }
-  _parse(input) {
-    if (this._def.coerce) {
-      try {
-        input.data = BigInt(input.data);
-      } catch {
-        return this._getInvalidInput(input);
-      }
-    }
-    const parsedType = this._getType(input);
-    if (parsedType !== ZodParsedType2.bigint) {
-      return this._getInvalidInput(input);
-    }
-    let ctx = undefined;
-    const status = new ParseStatus2;
-    for (const check of this._def.checks) {
-      if (check.kind === "min") {
-        const tooSmall = check.inclusive ? input.data < check.value : input.data <= check.value;
-        if (tooSmall) {
-          ctx = this._getOrReturnCtx(input, ctx);
-          addIssueToContext2(ctx, {
-            code: ZodIssueCode2.too_small,
-            type: "bigint",
-            minimum: check.value,
-            inclusive: check.inclusive,
-            message: check.message
-          });
-          status.dirty();
-        }
-      } else if (check.kind === "max") {
-        const tooBig = check.inclusive ? input.data > check.value : input.data >= check.value;
-        if (tooBig) {
-          ctx = this._getOrReturnCtx(input, ctx);
-          addIssueToContext2(ctx, {
-            code: ZodIssueCode2.too_big,
-            type: "bigint",
-            maximum: check.value,
-            inclusive: check.inclusive,
-            message: check.message
-          });
-          status.dirty();
-        }
-      } else if (check.kind === "multipleOf") {
-        if (input.data % check.value !== BigInt(0)) {
-          ctx = this._getOrReturnCtx(input, ctx);
-          addIssueToContext2(ctx, {
-            code: ZodIssueCode2.not_multiple_of,
-            multipleOf: check.value,
-            message: check.message
-          });
-          status.dirty();
-        }
-      } else {
-        util2.assertNever(check);
-      }
-    }
-    return { status: status.value, value: input.data };
-  }
-  _getInvalidInput(input) {
-    const ctx = this._getOrReturnCtx(input);
-    addIssueToContext2(ctx, {
-      code: ZodIssueCode2.invalid_type,
-      expected: ZodParsedType2.bigint,
-      received: ctx.parsedType
-    });
-    return INVALID2;
-  }
-  gte(value, message) {
-    return this.setLimit("min", value, true, errorUtil2.toString(message));
-  }
-  gt(value, message) {
-    return this.setLimit("min", value, false, errorUtil2.toString(message));
-  }
-  lte(value, message) {
-    return this.setLimit("max", value, true, errorUtil2.toString(message));
-  }
-  lt(value, message) {
-    return this.setLimit("max", value, false, errorUtil2.toString(message));
-  }
-  setLimit(kind, value, inclusive, message) {
-    return new ZodBigInt2({
-      ...this._def,
-      checks: [
-        ...this._def.checks,
-        {
-          kind,
-          value,
-          inclusive,
-          message: errorUtil2.toString(message)
-        }
-      ]
-    });
-  }
-  _addCheck(check) {
-    return new ZodBigInt2({
-      ...this._def,
-      checks: [...this._def.checks, check]
-    });
-  }
-  positive(message) {
-    return this._addCheck({
-      kind: "min",
-      value: BigInt(0),
-      inclusive: false,
-      message: errorUtil2.toString(message)
-    });
-  }
-  negative(message) {
-    return this._addCheck({
-      kind: "max",
-      value: BigInt(0),
-      inclusive: false,
-      message: errorUtil2.toString(message)
-    });
-  }
-  nonpositive(message) {
-    return this._addCheck({
-      kind: "max",
-      value: BigInt(0),
-      inclusive: true,
-      message: errorUtil2.toString(message)
-    });
-  }
-  nonnegative(message) {
-    return this._addCheck({
-      kind: "min",
-      value: BigInt(0),
-      inclusive: true,
-      message: errorUtil2.toString(message)
-    });
-  }
-  multipleOf(value, message) {
-    return this._addCheck({
-      kind: "multipleOf",
-      value,
-      message: errorUtil2.toString(message)
-    });
-  }
-  get minValue() {
-    let min = null;
-    for (const ch of this._def.checks) {
-      if (ch.kind === "min") {
-        if (min === null || ch.value > min)
-          min = ch.value;
-      }
-    }
-    return min;
-  }
-  get maxValue() {
-    let max = null;
-    for (const ch of this._def.checks) {
-      if (ch.kind === "max") {
-        if (max === null || ch.value < max)
-          max = ch.value;
-      }
-    }
-    return max;
-  }
-}
-ZodBigInt2.create = (params) => {
-  return new ZodBigInt2({
-    checks: [],
-    typeName: ZodFirstPartyTypeKind2.ZodBigInt,
-    coerce: params?.coerce ?? false,
-    ...processCreateParams2(params)
-  });
-};
-
-class ZodBoolean2 extends ZodType2 {
-  _parse(input) {
-    if (this._def.coerce) {
-      input.data = Boolean(input.data);
-    }
-    const parsedType = this._getType(input);
-    if (parsedType !== ZodParsedType2.boolean) {
-      const ctx = this._getOrReturnCtx(input);
-      addIssueToContext2(ctx, {
-        code: ZodIssueCode2.invalid_type,
-        expected: ZodParsedType2.boolean,
-        received: ctx.parsedType
-      });
-      return INVALID2;
-    }
-    return OK2(input.data);
-  }
-}
-ZodBoolean2.create = (params) => {
-  return new ZodBoolean2({
-    typeName: ZodFirstPartyTypeKind2.ZodBoolean,
-    coerce: params?.coerce || false,
-    ...processCreateParams2(params)
-  });
-};
-
-class ZodDate2 extends ZodType2 {
-  _parse(input) {
-    if (this._def.coerce) {
-      input.data = new Date(input.data);
-    }
-    const parsedType = this._getType(input);
-    if (parsedType !== ZodParsedType2.date) {
-      const ctx = this._getOrReturnCtx(input);
-      addIssueToContext2(ctx, {
-        code: ZodIssueCode2.invalid_type,
-        expected: ZodParsedType2.date,
-        received: ctx.parsedType
-      });
-      return INVALID2;
-    }
-    if (Number.isNaN(input.data.getTime())) {
-      const ctx = this._getOrReturnCtx(input);
-      addIssueToContext2(ctx, {
-        code: ZodIssueCode2.invalid_date
-      });
-      return INVALID2;
-    }
-    const status = new ParseStatus2;
-    let ctx = undefined;
-    for (const check of this._def.checks) {
-      if (check.kind === "min") {
-        if (input.data.getTime() < check.value) {
-          ctx = this._getOrReturnCtx(input, ctx);
-          addIssueToContext2(ctx, {
-            code: ZodIssueCode2.too_small,
-            message: check.message,
-            inclusive: true,
-            exact: false,
-            minimum: check.value,
-            type: "date"
-          });
-          status.dirty();
-        }
-      } else if (check.kind === "max") {
-        if (input.data.getTime() > check.value) {
-          ctx = this._getOrReturnCtx(input, ctx);
-          addIssueToContext2(ctx, {
-            code: ZodIssueCode2.too_big,
-            message: check.message,
-            inclusive: true,
-            exact: false,
-            maximum: check.value,
-            type: "date"
-          });
-          status.dirty();
-        }
-      } else {
-        util2.assertNever(check);
-      }
-    }
-    return {
-      status: status.value,
-      value: new Date(input.data.getTime())
-    };
-  }
-  _addCheck(check) {
-    return new ZodDate2({
-      ...this._def,
-      checks: [...this._def.checks, check]
-    });
-  }
-  min(minDate, message) {
-    return this._addCheck({
-      kind: "min",
-      value: minDate.getTime(),
-      message: errorUtil2.toString(message)
-    });
-  }
-  max(maxDate, message) {
-    return this._addCheck({
-      kind: "max",
-      value: maxDate.getTime(),
-      message: errorUtil2.toString(message)
-    });
-  }
-  get minDate() {
-    let min = null;
-    for (const ch of this._def.checks) {
-      if (ch.kind === "min") {
-        if (min === null || ch.value > min)
-          min = ch.value;
-      }
-    }
-    return min != null ? new Date(min) : null;
-  }
-  get maxDate() {
-    let max = null;
-    for (const ch of this._def.checks) {
-      if (ch.kind === "max") {
-        if (max === null || ch.value < max)
-          max = ch.value;
-      }
-    }
-    return max != null ? new Date(max) : null;
-  }
-}
-ZodDate2.create = (params) => {
-  return new ZodDate2({
-    checks: [],
-    coerce: params?.coerce || false,
-    typeName: ZodFirstPartyTypeKind2.ZodDate,
-    ...processCreateParams2(params)
-  });
-};
-
-class ZodSymbol2 extends ZodType2 {
-  _parse(input) {
-    const parsedType = this._getType(input);
-    if (parsedType !== ZodParsedType2.symbol) {
-      const ctx = this._getOrReturnCtx(input);
-      addIssueToContext2(ctx, {
-        code: ZodIssueCode2.invalid_type,
-        expected: ZodParsedType2.symbol,
-        received: ctx.parsedType
-      });
-      return INVALID2;
-    }
-    return OK2(input.data);
-  }
-}
-ZodSymbol2.create = (params) => {
-  return new ZodSymbol2({
-    typeName: ZodFirstPartyTypeKind2.ZodSymbol,
-    ...processCreateParams2(params)
-  });
-};
-
-class ZodUndefined2 extends ZodType2 {
-  _parse(input) {
-    const parsedType = this._getType(input);
-    if (parsedType !== ZodParsedType2.undefined) {
-      const ctx = this._getOrReturnCtx(input);
-      addIssueToContext2(ctx, {
-        code: ZodIssueCode2.invalid_type,
-        expected: ZodParsedType2.undefined,
-        received: ctx.parsedType
-      });
-      return INVALID2;
-    }
-    return OK2(input.data);
-  }
-}
-ZodUndefined2.create = (params) => {
-  return new ZodUndefined2({
-    typeName: ZodFirstPartyTypeKind2.ZodUndefined,
-    ...processCreateParams2(params)
-  });
-};
-
-class ZodNull2 extends ZodType2 {
-  _parse(input) {
-    const parsedType = this._getType(input);
-    if (parsedType !== ZodParsedType2.null) {
-      const ctx = this._getOrReturnCtx(input);
-      addIssueToContext2(ctx, {
-        code: ZodIssueCode2.invalid_type,
-        expected: ZodParsedType2.null,
-        received: ctx.parsedType
-      });
-      return INVALID2;
-    }
-    return OK2(input.data);
-  }
-}
-ZodNull2.create = (params) => {
-  return new ZodNull2({
-    typeName: ZodFirstPartyTypeKind2.ZodNull,
-    ...processCreateParams2(params)
-  });
-};
-
-class ZodAny2 extends ZodType2 {
-  constructor() {
-    super(...arguments);
-    this._any = true;
-  }
-  _parse(input) {
-    return OK2(input.data);
-  }
-}
-ZodAny2.create = (params) => {
-  return new ZodAny2({
-    typeName: ZodFirstPartyTypeKind2.ZodAny,
-    ...processCreateParams2(params)
-  });
-};
-
-class ZodUnknown2 extends ZodType2 {
-  constructor() {
-    super(...arguments);
-    this._unknown = true;
-  }
-  _parse(input) {
-    return OK2(input.data);
-  }
-}
-ZodUnknown2.create = (params) => {
-  return new ZodUnknown2({
-    typeName: ZodFirstPartyTypeKind2.ZodUnknown,
-    ...processCreateParams2(params)
-  });
-};
-
-class ZodNever2 extends ZodType2 {
-  _parse(input) {
-    const ctx = this._getOrReturnCtx(input);
-    addIssueToContext2(ctx, {
-      code: ZodIssueCode2.invalid_type,
-      expected: ZodParsedType2.never,
-      received: ctx.parsedType
-    });
-    return INVALID2;
-  }
-}
-ZodNever2.create = (params) => {
-  return new ZodNever2({
-    typeName: ZodFirstPartyTypeKind2.ZodNever,
-    ...processCreateParams2(params)
-  });
-};
-
-class ZodVoid2 extends ZodType2 {
-  _parse(input) {
-    const parsedType = this._getType(input);
-    if (parsedType !== ZodParsedType2.undefined) {
-      const ctx = this._getOrReturnCtx(input);
-      addIssueToContext2(ctx, {
-        code: ZodIssueCode2.invalid_type,
-        expected: ZodParsedType2.void,
-        received: ctx.parsedType
-      });
-      return INVALID2;
-    }
-    return OK2(input.data);
-  }
-}
-ZodVoid2.create = (params) => {
-  return new ZodVoid2({
-    typeName: ZodFirstPartyTypeKind2.ZodVoid,
-    ...processCreateParams2(params)
-  });
-};
-
-class ZodArray2 extends ZodType2 {
-  _parse(input) {
-    const { ctx, status } = this._processInputParams(input);
-    const def = this._def;
-    if (ctx.parsedType !== ZodParsedType2.array) {
-      addIssueToContext2(ctx, {
-        code: ZodIssueCode2.invalid_type,
-        expected: ZodParsedType2.array,
-        received: ctx.parsedType
-      });
-      return INVALID2;
-    }
-    if (def.exactLength !== null) {
-      const tooBig = ctx.data.length > def.exactLength.value;
-      const tooSmall = ctx.data.length < def.exactLength.value;
-      if (tooBig || tooSmall) {
-        addIssueToContext2(ctx, {
-          code: tooBig ? ZodIssueCode2.too_big : ZodIssueCode2.too_small,
-          minimum: tooSmall ? def.exactLength.value : undefined,
-          maximum: tooBig ? def.exactLength.value : undefined,
-          type: "array",
-          inclusive: true,
-          exact: true,
-          message: def.exactLength.message
-        });
-        status.dirty();
-      }
-    }
-    if (def.minLength !== null) {
-      if (ctx.data.length < def.minLength.value) {
-        addIssueToContext2(ctx, {
-          code: ZodIssueCode2.too_small,
-          minimum: def.minLength.value,
-          type: "array",
-          inclusive: true,
-          exact: false,
-          message: def.minLength.message
-        });
-        status.dirty();
-      }
-    }
-    if (def.maxLength !== null) {
-      if (ctx.data.length > def.maxLength.value) {
-        addIssueToContext2(ctx, {
-          code: ZodIssueCode2.too_big,
-          maximum: def.maxLength.value,
-          type: "array",
-          inclusive: true,
-          exact: false,
-          message: def.maxLength.message
-        });
-        status.dirty();
-      }
-    }
-    if (ctx.common.async) {
-      return Promise.all([...ctx.data].map((item, i) => {
-        return def.type._parseAsync(new ParseInputLazyPath2(ctx, item, ctx.path, i));
-      })).then((result) => {
-        return ParseStatus2.mergeArray(status, result);
-      });
-    }
-    const result = [...ctx.data].map((item, i) => {
-      return def.type._parseSync(new ParseInputLazyPath2(ctx, item, ctx.path, i));
-    });
-    return ParseStatus2.mergeArray(status, result);
-  }
-  get element() {
-    return this._def.type;
-  }
-  min(minLength, message) {
-    return new ZodArray2({
-      ...this._def,
-      minLength: { value: minLength, message: errorUtil2.toString(message) }
-    });
-  }
-  max(maxLength, message) {
-    return new ZodArray2({
-      ...this._def,
-      maxLength: { value: maxLength, message: errorUtil2.toString(message) }
-    });
-  }
-  length(len, message) {
-    return new ZodArray2({
-      ...this._def,
-      exactLength: { value: len, message: errorUtil2.toString(message) }
-    });
-  }
-  nonempty(message) {
-    return this.min(1, message);
-  }
-}
-ZodArray2.create = (schema, params) => {
-  return new ZodArray2({
-    type: schema,
-    minLength: null,
-    maxLength: null,
-    exactLength: null,
-    typeName: ZodFirstPartyTypeKind2.ZodArray,
-    ...processCreateParams2(params)
-  });
-};
-function deepPartialify2(schema) {
-  if (schema instanceof ZodObject2) {
-    const newShape = {};
-    for (const key in schema.shape) {
-      const fieldSchema = schema.shape[key];
-      newShape[key] = ZodOptional2.create(deepPartialify2(fieldSchema));
-    }
-    return new ZodObject2({
-      ...schema._def,
-      shape: () => newShape
-    });
-  } else if (schema instanceof ZodArray2) {
-    return new ZodArray2({
-      ...schema._def,
-      type: deepPartialify2(schema.element)
-    });
-  } else if (schema instanceof ZodOptional2) {
-    return ZodOptional2.create(deepPartialify2(schema.unwrap()));
-  } else if (schema instanceof ZodNullable2) {
-    return ZodNullable2.create(deepPartialify2(schema.unwrap()));
-  } else if (schema instanceof ZodTuple2) {
-    return ZodTuple2.create(schema.items.map((item) => deepPartialify2(item)));
-  } else {
-    return schema;
-  }
-}
-
-class ZodObject2 extends ZodType2 {
-  constructor() {
-    super(...arguments);
-    this._cached = null;
-    this.nonstrict = this.passthrough;
-    this.augment = this.extend;
-  }
-  _getCached() {
-    if (this._cached !== null)
-      return this._cached;
-    const shape = this._def.shape();
-    const keys = util2.objectKeys(shape);
-    this._cached = { shape, keys };
-    return this._cached;
-  }
-  _parse(input) {
-    const parsedType = this._getType(input);
-    if (parsedType !== ZodParsedType2.object) {
-      const ctx = this._getOrReturnCtx(input);
-      addIssueToContext2(ctx, {
-        code: ZodIssueCode2.invalid_type,
-        expected: ZodParsedType2.object,
-        received: ctx.parsedType
-      });
-      return INVALID2;
-    }
-    const { status, ctx } = this._processInputParams(input);
-    const { shape, keys: shapeKeys } = this._getCached();
-    const extraKeys = [];
-    if (!(this._def.catchall instanceof ZodNever2 && this._def.unknownKeys === "strip")) {
-      for (const key in ctx.data) {
-        if (!shapeKeys.includes(key)) {
-          extraKeys.push(key);
-        }
-      }
-    }
-    const pairs = [];
-    for (const key of shapeKeys) {
-      const keyValidator = shape[key];
-      const value = ctx.data[key];
-      pairs.push({
-        key: { status: "valid", value: key },
-        value: keyValidator._parse(new ParseInputLazyPath2(ctx, value, ctx.path, key)),
-        alwaysSet: key in ctx.data
-      });
-    }
-    if (this._def.catchall instanceof ZodNever2) {
-      const unknownKeys = this._def.unknownKeys;
-      if (unknownKeys === "passthrough") {
-        for (const key of extraKeys) {
-          pairs.push({
-            key: { status: "valid", value: key },
-            value: { status: "valid", value: ctx.data[key] }
-          });
-        }
-      } else if (unknownKeys === "strict") {
-        if (extraKeys.length > 0) {
-          addIssueToContext2(ctx, {
-            code: ZodIssueCode2.unrecognized_keys,
-            keys: extraKeys
-          });
-          status.dirty();
-        }
-      } else if (unknownKeys === "strip") {} else {
-        throw new Error(`Internal ZodObject error: invalid unknownKeys value.`);
-      }
-    } else {
-      const catchall = this._def.catchall;
-      for (const key of extraKeys) {
-        const value = ctx.data[key];
-        pairs.push({
-          key: { status: "valid", value: key },
-          value: catchall._parse(new ParseInputLazyPath2(ctx, value, ctx.path, key)),
-          alwaysSet: key in ctx.data
-        });
-      }
-    }
-    if (ctx.common.async) {
-      return Promise.resolve().then(async () => {
-        const syncPairs = [];
-        for (const pair of pairs) {
-          const key = await pair.key;
-          const value = await pair.value;
-          syncPairs.push({
-            key,
-            value,
-            alwaysSet: pair.alwaysSet
-          });
-        }
-        return syncPairs;
-      }).then((syncPairs) => {
-        return ParseStatus2.mergeObjectSync(status, syncPairs);
-      });
-    } else {
-      return ParseStatus2.mergeObjectSync(status, pairs);
-    }
-  }
-  get shape() {
-    return this._def.shape();
-  }
-  strict(message) {
-    errorUtil2.errToObj;
-    return new ZodObject2({
-      ...this._def,
-      unknownKeys: "strict",
-      ...message !== undefined ? {
-        errorMap: (issue, ctx) => {
-          const defaultError = this._def.errorMap?.(issue, ctx).message ?? ctx.defaultError;
-          if (issue.code === "unrecognized_keys")
-            return {
-              message: errorUtil2.errToObj(message).message ?? defaultError
-            };
-          return {
-            message: defaultError
-          };
-        }
-      } : {}
-    });
-  }
-  strip() {
-    return new ZodObject2({
-      ...this._def,
-      unknownKeys: "strip"
-    });
-  }
-  passthrough() {
-    return new ZodObject2({
-      ...this._def,
-      unknownKeys: "passthrough"
-    });
-  }
-  extend(augmentation) {
-    return new ZodObject2({
-      ...this._def,
-      shape: () => ({
-        ...this._def.shape(),
-        ...augmentation
-      })
-    });
-  }
-  merge(merging) {
-    const merged = new ZodObject2({
-      unknownKeys: merging._def.unknownKeys,
-      catchall: merging._def.catchall,
-      shape: () => ({
-        ...this._def.shape(),
-        ...merging._def.shape()
-      }),
-      typeName: ZodFirstPartyTypeKind2.ZodObject
-    });
-    return merged;
-  }
-  setKey(key, schema) {
-    return this.augment({ [key]: schema });
-  }
-  catchall(index) {
-    return new ZodObject2({
-      ...this._def,
-      catchall: index
-    });
-  }
-  pick(mask) {
-    const shape = {};
-    for (const key of util2.objectKeys(mask)) {
-      if (mask[key] && this.shape[key]) {
-        shape[key] = this.shape[key];
-      }
-    }
-    return new ZodObject2({
-      ...this._def,
-      shape: () => shape
-    });
-  }
-  omit(mask) {
-    const shape = {};
-    for (const key of util2.objectKeys(this.shape)) {
-      if (!mask[key]) {
-        shape[key] = this.shape[key];
-      }
-    }
-    return new ZodObject2({
-      ...this._def,
-      shape: () => shape
-    });
-  }
-  deepPartial() {
-    return deepPartialify2(this);
-  }
-  partial(mask) {
-    const newShape = {};
-    for (const key of util2.objectKeys(this.shape)) {
-      const fieldSchema = this.shape[key];
-      if (mask && !mask[key]) {
-        newShape[key] = fieldSchema;
-      } else {
-        newShape[key] = fieldSchema.optional();
-      }
-    }
-    return new ZodObject2({
-      ...this._def,
-      shape: () => newShape
-    });
-  }
-  required(mask) {
-    const newShape = {};
-    for (const key of util2.objectKeys(this.shape)) {
-      if (mask && !mask[key]) {
-        newShape[key] = this.shape[key];
-      } else {
-        const fieldSchema = this.shape[key];
-        let newField = fieldSchema;
-        while (newField instanceof ZodOptional2) {
-          newField = newField._def.innerType;
-        }
-        newShape[key] = newField;
-      }
-    }
-    return new ZodObject2({
-      ...this._def,
-      shape: () => newShape
-    });
-  }
-  keyof() {
-    return createZodEnum2(util2.objectKeys(this.shape));
-  }
-}
-ZodObject2.create = (shape, params) => {
-  return new ZodObject2({
-    shape: () => shape,
-    unknownKeys: "strip",
-    catchall: ZodNever2.create(),
-    typeName: ZodFirstPartyTypeKind2.ZodObject,
-    ...processCreateParams2(params)
-  });
-};
-ZodObject2.strictCreate = (shape, params) => {
-  return new ZodObject2({
-    shape: () => shape,
-    unknownKeys: "strict",
-    catchall: ZodNever2.create(),
-    typeName: ZodFirstPartyTypeKind2.ZodObject,
-    ...processCreateParams2(params)
-  });
-};
-ZodObject2.lazycreate = (shape, params) => {
-  return new ZodObject2({
-    shape,
-    unknownKeys: "strip",
-    catchall: ZodNever2.create(),
-    typeName: ZodFirstPartyTypeKind2.ZodObject,
-    ...processCreateParams2(params)
-  });
-};
-
-class ZodUnion2 extends ZodType2 {
-  _parse(input) {
-    const { ctx } = this._processInputParams(input);
-    const options = this._def.options;
-    function handleResults(results) {
-      for (const result of results) {
-        if (result.result.status === "valid") {
-          return result.result;
-        }
-      }
-      for (const result of results) {
-        if (result.result.status === "dirty") {
-          ctx.common.issues.push(...result.ctx.common.issues);
-          return result.result;
-        }
-      }
-      const unionErrors = results.map((result) => new ZodError2(result.ctx.common.issues));
-      addIssueToContext2(ctx, {
-        code: ZodIssueCode2.invalid_union,
-        unionErrors
-      });
-      return INVALID2;
-    }
-    if (ctx.common.async) {
-      return Promise.all(options.map(async (option) => {
-        const childCtx = {
-          ...ctx,
-          common: {
-            ...ctx.common,
-            issues: []
-          },
-          parent: null
-        };
-        return {
-          result: await option._parseAsync({
-            data: ctx.data,
-            path: ctx.path,
-            parent: childCtx
-          }),
-          ctx: childCtx
-        };
-      })).then(handleResults);
-    } else {
-      let dirty = undefined;
-      const issues = [];
-      for (const option of options) {
-        const childCtx = {
-          ...ctx,
-          common: {
-            ...ctx.common,
-            issues: []
-          },
-          parent: null
-        };
-        const result = option._parseSync({
-          data: ctx.data,
-          path: ctx.path,
-          parent: childCtx
-        });
-        if (result.status === "valid") {
-          return result;
-        } else if (result.status === "dirty" && !dirty) {
-          dirty = { result, ctx: childCtx };
-        }
-        if (childCtx.common.issues.length) {
-          issues.push(childCtx.common.issues);
-        }
-      }
-      if (dirty) {
-        ctx.common.issues.push(...dirty.ctx.common.issues);
-        return dirty.result;
-      }
-      const unionErrors = issues.map((issues) => new ZodError2(issues));
-      addIssueToContext2(ctx, {
-        code: ZodIssueCode2.invalid_union,
-        unionErrors
-      });
-      return INVALID2;
-    }
-  }
-  get options() {
-    return this._def.options;
-  }
-}
-ZodUnion2.create = (types, params) => {
-  return new ZodUnion2({
-    options: types,
-    typeName: ZodFirstPartyTypeKind2.ZodUnion,
-    ...processCreateParams2(params)
-  });
-};
-var getDiscriminator2 = (type) => {
-  if (type instanceof ZodLazy2) {
-    return getDiscriminator2(type.schema);
-  } else if (type instanceof ZodEffects2) {
-    return getDiscriminator2(type.innerType());
-  } else if (type instanceof ZodLiteral2) {
-    return [type.value];
-  } else if (type instanceof ZodEnum2) {
-    return type.options;
-  } else if (type instanceof ZodNativeEnum2) {
-    return util2.objectValues(type.enum);
-  } else if (type instanceof ZodDefault2) {
-    return getDiscriminator2(type._def.innerType);
-  } else if (type instanceof ZodUndefined2) {
-    return [undefined];
-  } else if (type instanceof ZodNull2) {
-    return [null];
-  } else if (type instanceof ZodOptional2) {
-    return [undefined, ...getDiscriminator2(type.unwrap())];
-  } else if (type instanceof ZodNullable2) {
-    return [null, ...getDiscriminator2(type.unwrap())];
-  } else if (type instanceof ZodBranded2) {
-    return getDiscriminator2(type.unwrap());
-  } else if (type instanceof ZodReadonly2) {
-    return getDiscriminator2(type.unwrap());
-  } else if (type instanceof ZodCatch2) {
-    return getDiscriminator2(type._def.innerType);
-  } else {
-    return [];
-  }
-};
-
-class ZodDiscriminatedUnion2 extends ZodType2 {
-  _parse(input) {
-    const { ctx } = this._processInputParams(input);
-    if (ctx.parsedType !== ZodParsedType2.object) {
-      addIssueToContext2(ctx, {
-        code: ZodIssueCode2.invalid_type,
-        expected: ZodParsedType2.object,
-        received: ctx.parsedType
-      });
-      return INVALID2;
-    }
-    const discriminator = this.discriminator;
-    const discriminatorValue = ctx.data[discriminator];
-    const option = this.optionsMap.get(discriminatorValue);
-    if (!option) {
-      addIssueToContext2(ctx, {
-        code: ZodIssueCode2.invalid_union_discriminator,
-        options: Array.from(this.optionsMap.keys()),
-        path: [discriminator]
-      });
-      return INVALID2;
-    }
-    if (ctx.common.async) {
-      return option._parseAsync({
-        data: ctx.data,
-        path: ctx.path,
-        parent: ctx
-      });
-    } else {
-      return option._parseSync({
-        data: ctx.data,
-        path: ctx.path,
-        parent: ctx
-      });
-    }
-  }
-  get discriminator() {
-    return this._def.discriminator;
-  }
-  get options() {
-    return this._def.options;
-  }
-  get optionsMap() {
-    return this._def.optionsMap;
-  }
-  static create(discriminator, options, params) {
-    const optionsMap = new Map;
-    for (const type of options) {
-      const discriminatorValues = getDiscriminator2(type.shape[discriminator]);
-      if (!discriminatorValues.length) {
-        throw new Error(`A discriminator value for key \`${discriminator}\` could not be extracted from all schema options`);
-      }
-      for (const value of discriminatorValues) {
-        if (optionsMap.has(value)) {
-          throw new Error(`Discriminator property ${String(discriminator)} has duplicate value ${String(value)}`);
-        }
-        optionsMap.set(value, type);
-      }
-    }
-    return new ZodDiscriminatedUnion2({
-      typeName: ZodFirstPartyTypeKind2.ZodDiscriminatedUnion,
-      discriminator,
-      options,
-      optionsMap,
-      ...processCreateParams2(params)
-    });
-  }
-}
-function mergeValues2(a, b) {
-  const aType = getParsedType2(a);
-  const bType = getParsedType2(b);
-  if (a === b) {
-    return { valid: true, data: a };
-  } else if (aType === ZodParsedType2.object && bType === ZodParsedType2.object) {
-    const bKeys = util2.objectKeys(b);
-    const sharedKeys = util2.objectKeys(a).filter((key) => bKeys.indexOf(key) !== -1);
-    const newObj = { ...a, ...b };
-    for (const key of sharedKeys) {
-      const sharedValue = mergeValues2(a[key], b[key]);
-      if (!sharedValue.valid) {
-        return { valid: false };
-      }
-      newObj[key] = sharedValue.data;
-    }
-    return { valid: true, data: newObj };
-  } else if (aType === ZodParsedType2.array && bType === ZodParsedType2.array) {
-    if (a.length !== b.length) {
-      return { valid: false };
-    }
-    const newArray = [];
-    for (let index = 0;index < a.length; index++) {
-      const itemA = a[index];
-      const itemB = b[index];
-      const sharedValue = mergeValues2(itemA, itemB);
-      if (!sharedValue.valid) {
-        return { valid: false };
-      }
-      newArray.push(sharedValue.data);
-    }
-    return { valid: true, data: newArray };
-  } else if (aType === ZodParsedType2.date && bType === ZodParsedType2.date && +a === +b) {
-    return { valid: true, data: a };
-  } else {
-    return { valid: false };
-  }
-}
-
-class ZodIntersection2 extends ZodType2 {
-  _parse(input) {
-    const { status, ctx } = this._processInputParams(input);
-    const handleParsed = (parsedLeft, parsedRight) => {
-      if (isAborted2(parsedLeft) || isAborted2(parsedRight)) {
-        return INVALID2;
-      }
-      const merged = mergeValues2(parsedLeft.value, parsedRight.value);
-      if (!merged.valid) {
-        addIssueToContext2(ctx, {
-          code: ZodIssueCode2.invalid_intersection_types
-        });
-        return INVALID2;
-      }
-      if (isDirty2(parsedLeft) || isDirty2(parsedRight)) {
-        status.dirty();
-      }
-      return { status: status.value, value: merged.data };
-    };
-    if (ctx.common.async) {
-      return Promise.all([
-        this._def.left._parseAsync({
-          data: ctx.data,
-          path: ctx.path,
-          parent: ctx
-        }),
-        this._def.right._parseAsync({
-          data: ctx.data,
-          path: ctx.path,
-          parent: ctx
-        })
-      ]).then(([left, right]) => handleParsed(left, right));
-    } else {
-      return handleParsed(this._def.left._parseSync({
-        data: ctx.data,
-        path: ctx.path,
-        parent: ctx
-      }), this._def.right._parseSync({
-        data: ctx.data,
-        path: ctx.path,
-        parent: ctx
-      }));
-    }
-  }
-}
-ZodIntersection2.create = (left, right, params) => {
-  return new ZodIntersection2({
-    left,
-    right,
-    typeName: ZodFirstPartyTypeKind2.ZodIntersection,
-    ...processCreateParams2(params)
-  });
-};
-
-class ZodTuple2 extends ZodType2 {
-  _parse(input) {
-    const { status, ctx } = this._processInputParams(input);
-    if (ctx.parsedType !== ZodParsedType2.array) {
-      addIssueToContext2(ctx, {
-        code: ZodIssueCode2.invalid_type,
-        expected: ZodParsedType2.array,
-        received: ctx.parsedType
-      });
-      return INVALID2;
-    }
-    if (ctx.data.length < this._def.items.length) {
-      addIssueToContext2(ctx, {
-        code: ZodIssueCode2.too_small,
-        minimum: this._def.items.length,
-        inclusive: true,
-        exact: false,
-        type: "array"
-      });
-      return INVALID2;
-    }
-    const rest = this._def.rest;
-    if (!rest && ctx.data.length > this._def.items.length) {
-      addIssueToContext2(ctx, {
-        code: ZodIssueCode2.too_big,
-        maximum: this._def.items.length,
-        inclusive: true,
-        exact: false,
-        type: "array"
-      });
-      status.dirty();
-    }
-    const items = [...ctx.data].map((item, itemIndex) => {
-      const schema = this._def.items[itemIndex] || this._def.rest;
-      if (!schema)
-        return null;
-      return schema._parse(new ParseInputLazyPath2(ctx, item, ctx.path, itemIndex));
-    }).filter((x) => !!x);
-    if (ctx.common.async) {
-      return Promise.all(items).then((results) => {
-        return ParseStatus2.mergeArray(status, results);
-      });
-    } else {
-      return ParseStatus2.mergeArray(status, items);
-    }
-  }
-  get items() {
-    return this._def.items;
-  }
-  rest(rest) {
-    return new ZodTuple2({
-      ...this._def,
-      rest
-    });
-  }
-}
-ZodTuple2.create = (schemas, params) => {
-  if (!Array.isArray(schemas)) {
-    throw new Error("You must pass an array of schemas to z.tuple([ ... ])");
-  }
-  return new ZodTuple2({
-    items: schemas,
-    typeName: ZodFirstPartyTypeKind2.ZodTuple,
-    rest: null,
-    ...processCreateParams2(params)
-  });
-};
-
-class ZodRecord2 extends ZodType2 {
-  get keySchema() {
-    return this._def.keyType;
-  }
-  get valueSchema() {
-    return this._def.valueType;
-  }
-  _parse(input) {
-    const { status, ctx } = this._processInputParams(input);
-    if (ctx.parsedType !== ZodParsedType2.object) {
-      addIssueToContext2(ctx, {
-        code: ZodIssueCode2.invalid_type,
-        expected: ZodParsedType2.object,
-        received: ctx.parsedType
-      });
-      return INVALID2;
-    }
-    const pairs = [];
-    const keyType = this._def.keyType;
-    const valueType = this._def.valueType;
-    for (const key in ctx.data) {
-      pairs.push({
-        key: keyType._parse(new ParseInputLazyPath2(ctx, key, ctx.path, key)),
-        value: valueType._parse(new ParseInputLazyPath2(ctx, ctx.data[key], ctx.path, key)),
-        alwaysSet: key in ctx.data
-      });
-    }
-    if (ctx.common.async) {
-      return ParseStatus2.mergeObjectAsync(status, pairs);
-    } else {
-      return ParseStatus2.mergeObjectSync(status, pairs);
-    }
-  }
-  get element() {
-    return this._def.valueType;
-  }
-  static create(first, second, third) {
-    if (second instanceof ZodType2) {
-      return new ZodRecord2({
-        keyType: first,
-        valueType: second,
-        typeName: ZodFirstPartyTypeKind2.ZodRecord,
-        ...processCreateParams2(third)
-      });
-    }
-    return new ZodRecord2({
-      keyType: ZodString2.create(),
-      valueType: first,
-      typeName: ZodFirstPartyTypeKind2.ZodRecord,
-      ...processCreateParams2(second)
-    });
-  }
-}
-
-class ZodMap2 extends ZodType2 {
-  get keySchema() {
-    return this._def.keyType;
-  }
-  get valueSchema() {
-    return this._def.valueType;
-  }
-  _parse(input) {
-    const { status, ctx } = this._processInputParams(input);
-    if (ctx.parsedType !== ZodParsedType2.map) {
-      addIssueToContext2(ctx, {
-        code: ZodIssueCode2.invalid_type,
-        expected: ZodParsedType2.map,
-        received: ctx.parsedType
-      });
-      return INVALID2;
-    }
-    const keyType = this._def.keyType;
-    const valueType = this._def.valueType;
-    const pairs = [...ctx.data.entries()].map(([key, value], index) => {
-      return {
-        key: keyType._parse(new ParseInputLazyPath2(ctx, key, ctx.path, [index, "key"])),
-        value: valueType._parse(new ParseInputLazyPath2(ctx, value, ctx.path, [index, "value"]))
-      };
-    });
-    if (ctx.common.async) {
-      const finalMap = new Map;
-      return Promise.resolve().then(async () => {
-        for (const pair of pairs) {
-          const key = await pair.key;
-          const value = await pair.value;
-          if (key.status === "aborted" || value.status === "aborted") {
-            return INVALID2;
-          }
-          if (key.status === "dirty" || value.status === "dirty") {
-            status.dirty();
-          }
-          finalMap.set(key.value, value.value);
-        }
-        return { status: status.value, value: finalMap };
-      });
-    } else {
-      const finalMap = new Map;
-      for (const pair of pairs) {
-        const key = pair.key;
-        const value = pair.value;
-        if (key.status === "aborted" || value.status === "aborted") {
-          return INVALID2;
-        }
-        if (key.status === "dirty" || value.status === "dirty") {
-          status.dirty();
-        }
-        finalMap.set(key.value, value.value);
-      }
-      return { status: status.value, value: finalMap };
-    }
-  }
-}
-ZodMap2.create = (keyType, valueType, params) => {
-  return new ZodMap2({
-    valueType,
-    keyType,
-    typeName: ZodFirstPartyTypeKind2.ZodMap,
-    ...processCreateParams2(params)
-  });
-};
-
-class ZodSet2 extends ZodType2 {
-  _parse(input) {
-    const { status, ctx } = this._processInputParams(input);
-    if (ctx.parsedType !== ZodParsedType2.set) {
-      addIssueToContext2(ctx, {
-        code: ZodIssueCode2.invalid_type,
-        expected: ZodParsedType2.set,
-        received: ctx.parsedType
-      });
-      return INVALID2;
-    }
-    const def = this._def;
-    if (def.minSize !== null) {
-      if (ctx.data.size < def.minSize.value) {
-        addIssueToContext2(ctx, {
-          code: ZodIssueCode2.too_small,
-          minimum: def.minSize.value,
-          type: "set",
-          inclusive: true,
-          exact: false,
-          message: def.minSize.message
-        });
-        status.dirty();
-      }
-    }
-    if (def.maxSize !== null) {
-      if (ctx.data.size > def.maxSize.value) {
-        addIssueToContext2(ctx, {
-          code: ZodIssueCode2.too_big,
-          maximum: def.maxSize.value,
-          type: "set",
-          inclusive: true,
-          exact: false,
-          message: def.maxSize.message
-        });
-        status.dirty();
-      }
-    }
-    const valueType = this._def.valueType;
-    function finalizeSet(elements) {
-      const parsedSet = new Set;
-      for (const element of elements) {
-        if (element.status === "aborted")
-          return INVALID2;
-        if (element.status === "dirty")
-          status.dirty();
-        parsedSet.add(element.value);
-      }
-      return { status: status.value, value: parsedSet };
-    }
-    const elements = [...ctx.data.values()].map((item, i) => valueType._parse(new ParseInputLazyPath2(ctx, item, ctx.path, i)));
-    if (ctx.common.async) {
-      return Promise.all(elements).then((elements) => finalizeSet(elements));
-    } else {
-      return finalizeSet(elements);
-    }
-  }
-  min(minSize, message) {
-    return new ZodSet2({
-      ...this._def,
-      minSize: { value: minSize, message: errorUtil2.toString(message) }
-    });
-  }
-  max(maxSize, message) {
-    return new ZodSet2({
-      ...this._def,
-      maxSize: { value: maxSize, message: errorUtil2.toString(message) }
-    });
-  }
-  size(size, message) {
-    return this.min(size, message).max(size, message);
-  }
-  nonempty(message) {
-    return this.min(1, message);
-  }
-}
-ZodSet2.create = (valueType, params) => {
-  return new ZodSet2({
-    valueType,
-    minSize: null,
-    maxSize: null,
-    typeName: ZodFirstPartyTypeKind2.ZodSet,
-    ...processCreateParams2(params)
-  });
-};
-
-class ZodFunction2 extends ZodType2 {
-  constructor() {
-    super(...arguments);
-    this.validate = this.implement;
-  }
-  _parse(input) {
-    const { ctx } = this._processInputParams(input);
-    if (ctx.parsedType !== ZodParsedType2.function) {
-      addIssueToContext2(ctx, {
-        code: ZodIssueCode2.invalid_type,
-        expected: ZodParsedType2.function,
-        received: ctx.parsedType
-      });
-      return INVALID2;
-    }
-    function makeArgsIssue(args, error) {
-      return makeIssue2({
-        data: args,
-        path: ctx.path,
-        errorMaps: [ctx.common.contextualErrorMap, ctx.schemaErrorMap, getErrorMap2(), en_default2].filter((x) => !!x),
-        issueData: {
-          code: ZodIssueCode2.invalid_arguments,
-          argumentsError: error
-        }
-      });
-    }
-    function makeReturnsIssue(returns, error) {
-      return makeIssue2({
-        data: returns,
-        path: ctx.path,
-        errorMaps: [ctx.common.contextualErrorMap, ctx.schemaErrorMap, getErrorMap2(), en_default2].filter((x) => !!x),
-        issueData: {
-          code: ZodIssueCode2.invalid_return_type,
-          returnTypeError: error
-        }
-      });
-    }
-    const params = { errorMap: ctx.common.contextualErrorMap };
-    const fn = ctx.data;
-    if (this._def.returns instanceof ZodPromise2) {
-      const me = this;
-      return OK2(async function(...args) {
-        const error = new ZodError2([]);
-        const parsedArgs = await me._def.args.parseAsync(args, params).catch((e) => {
-          error.addIssue(makeArgsIssue(args, e));
-          throw error;
-        });
-        const result = await Reflect.apply(fn, this, parsedArgs);
-        const parsedReturns = await me._def.returns._def.type.parseAsync(result, params).catch((e) => {
-          error.addIssue(makeReturnsIssue(result, e));
-          throw error;
-        });
-        return parsedReturns;
-      });
-    } else {
-      const me = this;
-      return OK2(function(...args) {
-        const parsedArgs = me._def.args.safeParse(args, params);
-        if (!parsedArgs.success) {
-          throw new ZodError2([makeArgsIssue(args, parsedArgs.error)]);
-        }
-        const result = Reflect.apply(fn, this, parsedArgs.data);
-        const parsedReturns = me._def.returns.safeParse(result, params);
-        if (!parsedReturns.success) {
-          throw new ZodError2([makeReturnsIssue(result, parsedReturns.error)]);
-        }
-        return parsedReturns.data;
-      });
-    }
-  }
-  parameters() {
-    return this._def.args;
-  }
-  returnType() {
-    return this._def.returns;
-  }
-  args(...items) {
-    return new ZodFunction2({
-      ...this._def,
-      args: ZodTuple2.create(items).rest(ZodUnknown2.create())
-    });
-  }
-  returns(returnType) {
-    return new ZodFunction2({
-      ...this._def,
-      returns: returnType
-    });
-  }
-  implement(func) {
-    const validatedFunc = this.parse(func);
-    return validatedFunc;
-  }
-  strictImplement(func) {
-    const validatedFunc = this.parse(func);
-    return validatedFunc;
-  }
-  static create(args, returns, params) {
-    return new ZodFunction2({
-      args: args ? args : ZodTuple2.create([]).rest(ZodUnknown2.create()),
-      returns: returns || ZodUnknown2.create(),
-      typeName: ZodFirstPartyTypeKind2.ZodFunction,
-      ...processCreateParams2(params)
-    });
-  }
-}
-
-class ZodLazy2 extends ZodType2 {
-  get schema() {
-    return this._def.getter();
-  }
-  _parse(input) {
-    const { ctx } = this._processInputParams(input);
-    const lazySchema = this._def.getter();
-    return lazySchema._parse({ data: ctx.data, path: ctx.path, parent: ctx });
-  }
-}
-ZodLazy2.create = (getter, params) => {
-  return new ZodLazy2({
-    getter,
-    typeName: ZodFirstPartyTypeKind2.ZodLazy,
-    ...processCreateParams2(params)
-  });
-};
-
-class ZodLiteral2 extends ZodType2 {
-  _parse(input) {
-    if (input.data !== this._def.value) {
-      const ctx = this._getOrReturnCtx(input);
-      addIssueToContext2(ctx, {
-        received: ctx.data,
-        code: ZodIssueCode2.invalid_literal,
-        expected: this._def.value
-      });
-      return INVALID2;
-    }
-    return { status: "valid", value: input.data };
-  }
-  get value() {
-    return this._def.value;
-  }
-}
-ZodLiteral2.create = (value, params) => {
-  return new ZodLiteral2({
-    value,
-    typeName: ZodFirstPartyTypeKind2.ZodLiteral,
-    ...processCreateParams2(params)
-  });
-};
-function createZodEnum2(values, params) {
-  return new ZodEnum2({
-    values,
-    typeName: ZodFirstPartyTypeKind2.ZodEnum,
-    ...processCreateParams2(params)
-  });
-}
-
-class ZodEnum2 extends ZodType2 {
-  _parse(input) {
-    if (typeof input.data !== "string") {
-      const ctx = this._getOrReturnCtx(input);
-      const expectedValues = this._def.values;
-      addIssueToContext2(ctx, {
-        expected: util2.joinValues(expectedValues),
-        received: ctx.parsedType,
-        code: ZodIssueCode2.invalid_type
-      });
-      return INVALID2;
-    }
-    if (!this._cache) {
-      this._cache = new Set(this._def.values);
-    }
-    if (!this._cache.has(input.data)) {
-      const ctx = this._getOrReturnCtx(input);
-      const expectedValues = this._def.values;
-      addIssueToContext2(ctx, {
-        received: ctx.data,
-        code: ZodIssueCode2.invalid_enum_value,
-        options: expectedValues
-      });
-      return INVALID2;
-    }
-    return OK2(input.data);
-  }
-  get options() {
-    return this._def.values;
-  }
-  get enum() {
-    const enumValues = {};
-    for (const val of this._def.values) {
-      enumValues[val] = val;
-    }
-    return enumValues;
-  }
-  get Values() {
-    const enumValues = {};
-    for (const val of this._def.values) {
-      enumValues[val] = val;
-    }
-    return enumValues;
-  }
-  get Enum() {
-    const enumValues = {};
-    for (const val of this._def.values) {
-      enumValues[val] = val;
-    }
-    return enumValues;
-  }
-  extract(values, newDef = this._def) {
-    return ZodEnum2.create(values, {
-      ...this._def,
-      ...newDef
-    });
-  }
-  exclude(values, newDef = this._def) {
-    return ZodEnum2.create(this.options.filter((opt) => !values.includes(opt)), {
-      ...this._def,
-      ...newDef
-    });
-  }
-}
-ZodEnum2.create = createZodEnum2;
-
-class ZodNativeEnum2 extends ZodType2 {
-  _parse(input) {
-    const nativeEnumValues = util2.getValidEnumValues(this._def.values);
-    const ctx = this._getOrReturnCtx(input);
-    if (ctx.parsedType !== ZodParsedType2.string && ctx.parsedType !== ZodParsedType2.number) {
-      const expectedValues = util2.objectValues(nativeEnumValues);
-      addIssueToContext2(ctx, {
-        expected: util2.joinValues(expectedValues),
-        received: ctx.parsedType,
-        code: ZodIssueCode2.invalid_type
-      });
-      return INVALID2;
-    }
-    if (!this._cache) {
-      this._cache = new Set(util2.getValidEnumValues(this._def.values));
-    }
-    if (!this._cache.has(input.data)) {
-      const expectedValues = util2.objectValues(nativeEnumValues);
-      addIssueToContext2(ctx, {
-        received: ctx.data,
-        code: ZodIssueCode2.invalid_enum_value,
-        options: expectedValues
-      });
-      return INVALID2;
-    }
-    return OK2(input.data);
-  }
-  get enum() {
-    return this._def.values;
-  }
-}
-ZodNativeEnum2.create = (values, params) => {
-  return new ZodNativeEnum2({
-    values,
-    typeName: ZodFirstPartyTypeKind2.ZodNativeEnum,
-    ...processCreateParams2(params)
-  });
-};
-
-class ZodPromise2 extends ZodType2 {
-  unwrap() {
-    return this._def.type;
-  }
-  _parse(input) {
-    const { ctx } = this._processInputParams(input);
-    if (ctx.parsedType !== ZodParsedType2.promise && ctx.common.async === false) {
-      addIssueToContext2(ctx, {
-        code: ZodIssueCode2.invalid_type,
-        expected: ZodParsedType2.promise,
-        received: ctx.parsedType
-      });
-      return INVALID2;
-    }
-    const promisified = ctx.parsedType === ZodParsedType2.promise ? ctx.data : Promise.resolve(ctx.data);
-    return OK2(promisified.then((data) => {
-      return this._def.type.parseAsync(data, {
-        path: ctx.path,
-        errorMap: ctx.common.contextualErrorMap
-      });
-    }));
-  }
-}
-ZodPromise2.create = (schema, params) => {
-  return new ZodPromise2({
-    type: schema,
-    typeName: ZodFirstPartyTypeKind2.ZodPromise,
-    ...processCreateParams2(params)
-  });
-};
-
-class ZodEffects2 extends ZodType2 {
-  innerType() {
-    return this._def.schema;
-  }
-  sourceType() {
-    return this._def.schema._def.typeName === ZodFirstPartyTypeKind2.ZodEffects ? this._def.schema.sourceType() : this._def.schema;
-  }
-  _parse(input) {
-    const { status, ctx } = this._processInputParams(input);
-    const effect = this._def.effect || null;
-    const checkCtx = {
-      addIssue: (arg) => {
-        addIssueToContext2(ctx, arg);
-        if (arg.fatal) {
-          status.abort();
-        } else {
-          status.dirty();
-        }
-      },
-      get path() {
-        return ctx.path;
-      }
-    };
-    checkCtx.addIssue = checkCtx.addIssue.bind(checkCtx);
-    if (effect.type === "preprocess") {
-      const processed = effect.transform(ctx.data, checkCtx);
-      if (ctx.common.async) {
-        return Promise.resolve(processed).then(async (processed) => {
-          if (status.value === "aborted")
-            return INVALID2;
-          const result = await this._def.schema._parseAsync({
-            data: processed,
-            path: ctx.path,
-            parent: ctx
-          });
-          if (result.status === "aborted")
-            return INVALID2;
-          if (result.status === "dirty")
-            return DIRTY2(result.value);
-          if (status.value === "dirty")
-            return DIRTY2(result.value);
-          return result;
-        });
-      } else {
-        if (status.value === "aborted")
-          return INVALID2;
-        const result = this._def.schema._parseSync({
-          data: processed,
-          path: ctx.path,
-          parent: ctx
-        });
-        if (result.status === "aborted")
-          return INVALID2;
-        if (result.status === "dirty")
-          return DIRTY2(result.value);
-        if (status.value === "dirty")
-          return DIRTY2(result.value);
-        return result;
-      }
-    }
-    if (effect.type === "refinement") {
-      const executeRefinement = (acc) => {
-        const result = effect.refinement(acc, checkCtx);
-        if (ctx.common.async) {
-          return Promise.resolve(result);
-        }
-        if (result instanceof Promise) {
-          throw new Error("Async refinement encountered during synchronous parse operation. Use .parseAsync instead.");
-        }
-        return acc;
-      };
-      if (ctx.common.async === false) {
-        const inner = this._def.schema._parseSync({
-          data: ctx.data,
-          path: ctx.path,
-          parent: ctx
-        });
-        if (inner.status === "aborted")
-          return INVALID2;
-        if (inner.status === "dirty")
-          status.dirty();
-        executeRefinement(inner.value);
-        return { status: status.value, value: inner.value };
-      } else {
-        return this._def.schema._parseAsync({ data: ctx.data, path: ctx.path, parent: ctx }).then((inner) => {
-          if (inner.status === "aborted")
-            return INVALID2;
-          if (inner.status === "dirty")
-            status.dirty();
-          return executeRefinement(inner.value).then(() => {
-            return { status: status.value, value: inner.value };
-          });
-        });
-      }
-    }
-    if (effect.type === "transform") {
-      if (ctx.common.async === false) {
-        const base = this._def.schema._parseSync({
-          data: ctx.data,
-          path: ctx.path,
-          parent: ctx
-        });
-        if (!isValid2(base))
-          return INVALID2;
-        const result = effect.transform(base.value, checkCtx);
-        if (result instanceof Promise) {
-          throw new Error(`Asynchronous transform encountered during synchronous parse operation. Use .parseAsync instead.`);
-        }
-        return { status: status.value, value: result };
-      } else {
-        return this._def.schema._parseAsync({ data: ctx.data, path: ctx.path, parent: ctx }).then((base) => {
-          if (!isValid2(base))
-            return INVALID2;
-          return Promise.resolve(effect.transform(base.value, checkCtx)).then((result) => ({
-            status: status.value,
-            value: result
-          }));
-        });
-      }
-    }
-    util2.assertNever(effect);
-  }
-}
-ZodEffects2.create = (schema, effect, params) => {
-  return new ZodEffects2({
-    schema,
-    typeName: ZodFirstPartyTypeKind2.ZodEffects,
-    effect,
-    ...processCreateParams2(params)
-  });
-};
-ZodEffects2.createWithPreprocess = (preprocess, schema, params) => {
-  return new ZodEffects2({
-    schema,
-    effect: { type: "preprocess", transform: preprocess },
-    typeName: ZodFirstPartyTypeKind2.ZodEffects,
-    ...processCreateParams2(params)
-  });
-};
-
-class ZodOptional2 extends ZodType2 {
-  _parse(input) {
-    const parsedType = this._getType(input);
-    if (parsedType === ZodParsedType2.undefined) {
-      return OK2(undefined);
-    }
-    return this._def.innerType._parse(input);
-  }
-  unwrap() {
-    return this._def.innerType;
-  }
-}
-ZodOptional2.create = (type, params) => {
-  return new ZodOptional2({
-    innerType: type,
-    typeName: ZodFirstPartyTypeKind2.ZodOptional,
-    ...processCreateParams2(params)
-  });
-};
-
-class ZodNullable2 extends ZodType2 {
-  _parse(input) {
-    const parsedType = this._getType(input);
-    if (parsedType === ZodParsedType2.null) {
-      return OK2(null);
-    }
-    return this._def.innerType._parse(input);
-  }
-  unwrap() {
-    return this._def.innerType;
-  }
-}
-ZodNullable2.create = (type, params) => {
-  return new ZodNullable2({
-    innerType: type,
-    typeName: ZodFirstPartyTypeKind2.ZodNullable,
-    ...processCreateParams2(params)
-  });
-};
-
-class ZodDefault2 extends ZodType2 {
-  _parse(input) {
-    const { ctx } = this._processInputParams(input);
-    let data = ctx.data;
-    if (ctx.parsedType === ZodParsedType2.undefined) {
-      data = this._def.defaultValue();
-    }
-    return this._def.innerType._parse({
-      data,
-      path: ctx.path,
-      parent: ctx
-    });
-  }
-  removeDefault() {
-    return this._def.innerType;
-  }
-}
-ZodDefault2.create = (type, params) => {
-  return new ZodDefault2({
-    innerType: type,
-    typeName: ZodFirstPartyTypeKind2.ZodDefault,
-    defaultValue: typeof params.default === "function" ? params.default : () => params.default,
-    ...processCreateParams2(params)
-  });
-};
-
-class ZodCatch2 extends ZodType2 {
-  _parse(input) {
-    const { ctx } = this._processInputParams(input);
-    const newCtx = {
-      ...ctx,
-      common: {
-        ...ctx.common,
-        issues: []
-      }
-    };
-    const result = this._def.innerType._parse({
-      data: newCtx.data,
-      path: newCtx.path,
-      parent: {
-        ...newCtx
-      }
-    });
-    if (isAsync2(result)) {
-      return result.then((result) => {
-        return {
-          status: "valid",
-          value: result.status === "valid" ? result.value : this._def.catchValue({
-            get error() {
-              return new ZodError2(newCtx.common.issues);
-            },
-            input: newCtx.data
-          })
-        };
-      });
-    } else {
-      return {
-        status: "valid",
-        value: result.status === "valid" ? result.value : this._def.catchValue({
-          get error() {
-            return new ZodError2(newCtx.common.issues);
-          },
-          input: newCtx.data
-        })
-      };
-    }
-  }
-  removeCatch() {
-    return this._def.innerType;
-  }
-}
-ZodCatch2.create = (type, params) => {
-  return new ZodCatch2({
-    innerType: type,
-    typeName: ZodFirstPartyTypeKind2.ZodCatch,
-    catchValue: typeof params.catch === "function" ? params.catch : () => params.catch,
-    ...processCreateParams2(params)
-  });
-};
-
-class ZodNaN2 extends ZodType2 {
-  _parse(input) {
-    const parsedType = this._getType(input);
-    if (parsedType !== ZodParsedType2.nan) {
-      const ctx = this._getOrReturnCtx(input);
-      addIssueToContext2(ctx, {
-        code: ZodIssueCode2.invalid_type,
-        expected: ZodParsedType2.nan,
-        received: ctx.parsedType
-      });
-      return INVALID2;
-    }
-    return { status: "valid", value: input.data };
-  }
-}
-ZodNaN2.create = (params) => {
-  return new ZodNaN2({
-    typeName: ZodFirstPartyTypeKind2.ZodNaN,
-    ...processCreateParams2(params)
-  });
-};
-var BRAND2 = Symbol("zod_brand");
-
-class ZodBranded2 extends ZodType2 {
-  _parse(input) {
-    const { ctx } = this._processInputParams(input);
-    const data = ctx.data;
-    return this._def.type._parse({
-      data,
-      path: ctx.path,
-      parent: ctx
-    });
-  }
-  unwrap() {
-    return this._def.type;
-  }
-}
-
-class ZodPipeline2 extends ZodType2 {
-  _parse(input) {
-    const { status, ctx } = this._processInputParams(input);
-    if (ctx.common.async) {
-      const handleAsync = async () => {
-        const inResult = await this._def.in._parseAsync({
-          data: ctx.data,
-          path: ctx.path,
-          parent: ctx
-        });
-        if (inResult.status === "aborted")
-          return INVALID2;
-        if (inResult.status === "dirty") {
-          status.dirty();
-          return DIRTY2(inResult.value);
-        } else {
-          return this._def.out._parseAsync({
-            data: inResult.value,
-            path: ctx.path,
-            parent: ctx
-          });
-        }
-      };
-      return handleAsync();
-    } else {
-      const inResult = this._def.in._parseSync({
-        data: ctx.data,
-        path: ctx.path,
-        parent: ctx
-      });
-      if (inResult.status === "aborted")
-        return INVALID2;
-      if (inResult.status === "dirty") {
-        status.dirty();
-        return {
-          status: "dirty",
-          value: inResult.value
-        };
-      } else {
-        return this._def.out._parseSync({
-          data: inResult.value,
-          path: ctx.path,
-          parent: ctx
-        });
-      }
-    }
-  }
-  static create(a, b) {
-    return new ZodPipeline2({
-      in: a,
-      out: b,
-      typeName: ZodFirstPartyTypeKind2.ZodPipeline
-    });
-  }
-}
-
-class ZodReadonly2 extends ZodType2 {
-  _parse(input) {
-    const result = this._def.innerType._parse(input);
-    const freeze = (data) => {
-      if (isValid2(data)) {
-        data.value = Object.freeze(data.value);
-      }
-      return data;
-    };
-    return isAsync2(result) ? result.then((data) => freeze(data)) : freeze(result);
-  }
-  unwrap() {
-    return this._def.innerType;
-  }
-}
-ZodReadonly2.create = (type, params) => {
-  return new ZodReadonly2({
-    innerType: type,
-    typeName: ZodFirstPartyTypeKind2.ZodReadonly,
-    ...processCreateParams2(params)
-  });
-};
-function cleanParams2(params, data) {
-  const p = typeof params === "function" ? params(data) : typeof params === "string" ? { message: params } : params;
-  const p2 = typeof p === "string" ? { message: p } : p;
-  return p2;
-}
-function custom5(check, _params = {}, fatal) {
-  if (check)
-    return ZodAny2.create().superRefine((data, ctx) => {
-      const r = check(data);
-      if (r instanceof Promise) {
-        return r.then((r) => {
-          if (!r) {
-            const params = cleanParams2(_params, data);
-            const _fatal = params.fatal ?? fatal ?? true;
-            ctx.addIssue({ code: "custom", ...params, fatal: _fatal });
-          }
-        });
-      }
-      if (!r) {
-        const params = cleanParams2(_params, data);
-        const _fatal = params.fatal ?? fatal ?? true;
-        ctx.addIssue({ code: "custom", ...params, fatal: _fatal });
-      }
-      return;
-    });
-  return ZodAny2.create();
-}
-var late2 = {
-  object: ZodObject2.lazycreate
-};
-var ZodFirstPartyTypeKind2;
-(function(ZodFirstPartyTypeKind) {
-  ZodFirstPartyTypeKind["ZodString"] = "ZodString";
-  ZodFirstPartyTypeKind["ZodNumber"] = "ZodNumber";
-  ZodFirstPartyTypeKind["ZodNaN"] = "ZodNaN";
-  ZodFirstPartyTypeKind["ZodBigInt"] = "ZodBigInt";
-  ZodFirstPartyTypeKind["ZodBoolean"] = "ZodBoolean";
-  ZodFirstPartyTypeKind["ZodDate"] = "ZodDate";
-  ZodFirstPartyTypeKind["ZodSymbol"] = "ZodSymbol";
-  ZodFirstPartyTypeKind["ZodUndefined"] = "ZodUndefined";
-  ZodFirstPartyTypeKind["ZodNull"] = "ZodNull";
-  ZodFirstPartyTypeKind["ZodAny"] = "ZodAny";
-  ZodFirstPartyTypeKind["ZodUnknown"] = "ZodUnknown";
-  ZodFirstPartyTypeKind["ZodNever"] = "ZodNever";
-  ZodFirstPartyTypeKind["ZodVoid"] = "ZodVoid";
-  ZodFirstPartyTypeKind["ZodArray"] = "ZodArray";
-  ZodFirstPartyTypeKind["ZodObject"] = "ZodObject";
-  ZodFirstPartyTypeKind["ZodUnion"] = "ZodUnion";
-  ZodFirstPartyTypeKind["ZodDiscriminatedUnion"] = "ZodDiscriminatedUnion";
-  ZodFirstPartyTypeKind["ZodIntersection"] = "ZodIntersection";
-  ZodFirstPartyTypeKind["ZodTuple"] = "ZodTuple";
-  ZodFirstPartyTypeKind["ZodRecord"] = "ZodRecord";
-  ZodFirstPartyTypeKind["ZodMap"] = "ZodMap";
-  ZodFirstPartyTypeKind["ZodSet"] = "ZodSet";
-  ZodFirstPartyTypeKind["ZodFunction"] = "ZodFunction";
-  ZodFirstPartyTypeKind["ZodLazy"] = "ZodLazy";
-  ZodFirstPartyTypeKind["ZodLiteral"] = "ZodLiteral";
-  ZodFirstPartyTypeKind["ZodEnum"] = "ZodEnum";
-  ZodFirstPartyTypeKind["ZodEffects"] = "ZodEffects";
-  ZodFirstPartyTypeKind["ZodNativeEnum"] = "ZodNativeEnum";
-  ZodFirstPartyTypeKind["ZodOptional"] = "ZodOptional";
-  ZodFirstPartyTypeKind["ZodNullable"] = "ZodNullable";
-  ZodFirstPartyTypeKind["ZodDefault"] = "ZodDefault";
-  ZodFirstPartyTypeKind["ZodCatch"] = "ZodCatch";
-  ZodFirstPartyTypeKind["ZodPromise"] = "ZodPromise";
-  ZodFirstPartyTypeKind["ZodBranded"] = "ZodBranded";
-  ZodFirstPartyTypeKind["ZodPipeline"] = "ZodPipeline";
-  ZodFirstPartyTypeKind["ZodReadonly"] = "ZodReadonly";
-})(ZodFirstPartyTypeKind2 || (ZodFirstPartyTypeKind2 = {}));
-var instanceOfType2 = (cls, params = {
-  message: `Input not instance of ${cls.name}`
-}) => custom5((data) => data instanceof cls, params);
-var stringType2 = ZodString2.create;
-var numberType2 = ZodNumber2.create;
-var nanType2 = ZodNaN2.create;
-var bigIntType2 = ZodBigInt2.create;
-var booleanType2 = ZodBoolean2.create;
-var dateType2 = ZodDate2.create;
-var symbolType2 = ZodSymbol2.create;
-var undefinedType2 = ZodUndefined2.create;
-var nullType2 = ZodNull2.create;
-var anyType2 = ZodAny2.create;
-var unknownType2 = ZodUnknown2.create;
-var neverType2 = ZodNever2.create;
-var voidType2 = ZodVoid2.create;
-var arrayType2 = ZodArray2.create;
-var objectType2 = ZodObject2.create;
-var strictObjectType2 = ZodObject2.strictCreate;
-var unionType2 = ZodUnion2.create;
-var discriminatedUnionType2 = ZodDiscriminatedUnion2.create;
-var intersectionType2 = ZodIntersection2.create;
-var tupleType2 = ZodTuple2.create;
-var recordType2 = ZodRecord2.create;
-var mapType2 = ZodMap2.create;
-var setType2 = ZodSet2.create;
-var functionType2 = ZodFunction2.create;
-var lazyType2 = ZodLazy2.create;
-var literalType2 = ZodLiteral2.create;
-var enumType2 = ZodEnum2.create;
-var nativeEnumType2 = ZodNativeEnum2.create;
-var promiseType2 = ZodPromise2.create;
-var effectsType2 = ZodEffects2.create;
-var optionalType2 = ZodOptional2.create;
-var nullableType2 = ZodNullable2.create;
-var preprocessType2 = ZodEffects2.createWithPreprocess;
-var pipelineType2 = ZodPipeline2.create;
-var REGIONS2 = ["us-west-2"];
-var NITRO_REGIONS2 = ["us-west-2"];
-var regionSchema2 = enumType2(REGIONS2, {
-  message: `unknown region; expected one of: ${REGIONS2.join(", ")}`
-});
-var nitroRegionSchema2 = enumType2(NITRO_REGIONS2, {
-  message: `aws nitro does not support this region; expected one of: ${NITRO_REGIONS2.join(", ")}`
-});
-var nitroBindingSchema2 = objectType2({
-  tee: literalType2("nitro"),
-  regions: arrayType2(nitroRegionSchema2).nonempty().optional()
+  const data = "inputs" in abiItem && abiItem.inputs ? encodeAbiParameters2(abiItem.inputs, args ?? []) : undefined;
+  return concatHex2([signature, data ?? "0x"]);
+}
+var probability = numberType().min(0).max(1);
+var httpUrl = stringType().regex(/^https?:\/\/[^\s]+$/);
+var ReasoningCard = objectType({
+  card_id: stringType().min(1),
+  created_at: stringType().datetime({ offset: true }),
+  token: stringType().min(1),
+  window_h: numberType().positive(),
+  sources: arrayType(objectType({
+    kol: stringType().min(1),
+    platform: enumType(["telegram", "x", "discord"]),
+    url: httpUrl,
+    posted_at: stringType().datetime({ offset: true }),
+    quote: stringType(),
+    extract: objectType({
+      sentiment: enumType(["bull", "bear", "neutral"]),
+      conviction: probability,
+      urgency: probability
+    }).strict(),
+    indep: unionType([literalType(0.3), literalType(0.5), literalType(1)]),
+    echo_of: httpUrl.optional()
+  }).strict()),
+  convergence: objectType({
+    score: numberType().min(-1).max(1),
+    independent_kols: numberType().int().nonnegative(),
+    echo_dropped: numberType().int().nonnegative(),
+    threshold: numberType().min(-1).max(1)
+  }).strict(),
+  evidence: objectType({
+    lead_min: numberType(),
+    px_change_before_pct: numberType(),
+    vol_ratio: numberType().nonnegative(),
+    price_sources: arrayType(stringType().min(1))
+  }).strict(),
+  debate: objectType({
+    bull: stringType(),
+    bear: stringType(),
+    verdict: enumType(["APPROVE", "REJECT", "HOLD"]),
+    confidence: probability,
+    models: arrayType(stringType().min(1))
+  }).strict(),
+  risk_rules: objectType({
+    max_position_pct: probability,
+    max_open: numberType().int().nonnegative(),
+    stop_loss_pct: probability,
+    min_mcap_usd: numberType().nonnegative(),
+    horizon_h: numberType().positive()
+  }).strict(),
+  models: objectType({
+    extract_model: stringType().min(1),
+    judge_model: stringType().min(1),
+    prompt_hashes: recordType(stringType())
+  }).strict(),
+  decision: objectType({
+    side: enumType(["long", "short", "none"]),
+    size_pct: probability
+  }).strict()
 }).strict();
-var teeBindingSchema2 = discriminatedUnionType2("tee", [nitroBindingSchema2]);
-var oneOfTeesSchema2 = arrayType2(teeBindingSchema2).nonempty();
-var anyTeeConstraintSchema2 = objectType2({
-  regions: arrayType2(regionSchema2).nonempty().optional()
-}).strict();
-var teeConstraintSchema2 = unionType2([oneOfTeesSchema2, anyTeeConstraintSchema2]);
-prepareRuntime2();
-function assertSafeIntegerNumber2(value, label) {
-  if (!Number.isFinite(value) || !Number.isInteger(value)) {
-    throw new Error(`${label} requires an integer number, received ${value}`);
-  }
-  if (!Number.isSafeInteger(value)) {
-    throw new Error(`${label} requires a safe integer number, received ${value}. Pass a bigint or string for larger values`);
-  }
-}
-var prepareReportRequestFromBytes2 = (payload, reportEncoder) => ({
-  encodedPayload: bytesToBase642(payload),
-  ...reportEncoder
-});
-var LAST_FINALIZED_BLOCK_NUMBER2 = {
-  absVal: Buffer.from([3]).toString("base64"),
-  sign: "-1"
-};
-var LATEST_BLOCK_NUMBER2 = {
-  absVal: Buffer.from([2]).toString("base64"),
-  sign: "-1"
-};
-var encodeCallMsg = (payload) => {
-  const encodeField = (fieldName, value) => {
-    try {
-      return hexToBase642(value);
-    } catch (e) {
-      throw new Error(`Invalid hex in '${fieldName}' field of CallMsg: ${e instanceof Error ? e.message : String(e)}`);
+var canonicalJson = (value) => {
+  const encoded = JSON.stringify(value, (_key, current) => {
+    if (current !== null && typeof current === "object" && !Array.isArray(current)) {
+      const object = current;
+      return Object.keys(object).sort().reduce((sorted, key) => {
+        sorted[key] = object[key];
+        return sorted;
+      }, {});
     }
-  };
-  return {
-    from: encodeField("from", payload.from),
-    to: encodeField("to", payload.to),
-    data: encodeField("data", payload.data)
-  };
-};
-var EVM_DEFAULT_REPORT_ENCODER = {
-  encoderName: "evm",
-  signingAlgo: "ecdsa",
-  hashingAlgo: "keccak256"
-};
-var prepareReportRequest = (hexEncodedPayload, reportEncoder = EVM_DEFAULT_REPORT_ENCODER) => prepareReportRequestFromBytes2(hexToBytes7(hexEncodedPayload), reportEncoder);
-var SOLANA_ERROR__BLOCK_HEIGHT_EXCEEDED2 = 1;
-var SOLANA_ERROR__INVALID_NONCE2 = 2;
-var SOLANA_ERROR__NONCE_ACCOUNT_NOT_FOUND2 = 3;
-var SOLANA_ERROR__BLOCKHASH_STRING_LENGTH_OUT_OF_RANGE2 = 4;
-var SOLANA_ERROR__INVALID_BLOCKHASH_BYTE_LENGTH2 = 5;
-var SOLANA_ERROR__LAMPORTS_OUT_OF_RANGE2 = 6;
-var SOLANA_ERROR__MALFORMED_BIGINT_STRING2 = 7;
-var SOLANA_ERROR__MALFORMED_NUMBER_STRING2 = 8;
-var SOLANA_ERROR__TIMESTAMP_OUT_OF_RANGE2 = 9;
-var SOLANA_ERROR__MALFORMED_JSON_RPC_ERROR2 = 10;
-var SOLANA_ERROR__FAILED_TO_SEND_TRANSACTION2 = 11;
-var SOLANA_ERROR__FAILED_TO_SEND_TRANSACTIONS2 = 12;
-var SOLANA_ERROR__JSON_RPC__PARSE_ERROR2 = -32700;
-var SOLANA_ERROR__JSON_RPC__INTERNAL_ERROR2 = -32603;
-var SOLANA_ERROR__JSON_RPC__INVALID_PARAMS2 = -32602;
-var SOLANA_ERROR__JSON_RPC__METHOD_NOT_FOUND2 = -32601;
-var SOLANA_ERROR__JSON_RPC__INVALID_REQUEST2 = -32600;
-var SOLANA_ERROR__JSON_RPC__SERVER_ERROR_NO_SLOT_HISTORY2 = -32021;
-var SOLANA_ERROR__JSON_RPC__SERVER_ERROR_FILTER_TRANSACTION_NOT_FOUND2 = -32020;
-var SOLANA_ERROR__JSON_RPC__SERVER_ERROR_LONG_TERM_STORAGE_UNREACHABLE2 = -32019;
-var SOLANA_ERROR__JSON_RPC__SERVER_ERROR_SLOT_NOT_EPOCH_BOUNDARY2 = -32018;
-var SOLANA_ERROR__JSON_RPC__SERVER_ERROR_EPOCH_REWARDS_PERIOD_ACTIVE2 = -32017;
-var SOLANA_ERROR__JSON_RPC__SERVER_ERROR_MIN_CONTEXT_SLOT_NOT_REACHED2 = -32016;
-var SOLANA_ERROR__JSON_RPC__SERVER_ERROR_UNSUPPORTED_TRANSACTION_VERSION2 = -32015;
-var SOLANA_ERROR__JSON_RPC__SERVER_ERROR_BLOCK_STATUS_NOT_AVAILABLE_YET2 = -32014;
-var SOLANA_ERROR__JSON_RPC__SERVER_ERROR_TRANSACTION_SIGNATURE_LEN_MISMATCH2 = -32013;
-var SOLANA_ERROR__JSON_RPC__SCAN_ERROR2 = -32012;
-var SOLANA_ERROR__JSON_RPC__SERVER_ERROR_TRANSACTION_HISTORY_NOT_AVAILABLE2 = -32011;
-var SOLANA_ERROR__JSON_RPC__SERVER_ERROR_KEY_EXCLUDED_FROM_SECONDARY_INDEX2 = -32010;
-var SOLANA_ERROR__JSON_RPC__SERVER_ERROR_LONG_TERM_STORAGE_SLOT_SKIPPED2 = -32009;
-var SOLANA_ERROR__JSON_RPC__SERVER_ERROR_NO_SNAPSHOT2 = -32008;
-var SOLANA_ERROR__JSON_RPC__SERVER_ERROR_SLOT_SKIPPED2 = -32007;
-var SOLANA_ERROR__JSON_RPC__SERVER_ERROR_TRANSACTION_PRECOMPILE_VERIFICATION_FAILURE2 = -32006;
-var SOLANA_ERROR__JSON_RPC__SERVER_ERROR_NODE_UNHEALTHY2 = -32005;
-var SOLANA_ERROR__JSON_RPC__SERVER_ERROR_BLOCK_NOT_AVAILABLE2 = -32004;
-var SOLANA_ERROR__JSON_RPC__SERVER_ERROR_TRANSACTION_SIGNATURE_VERIFICATION_FAILURE2 = -32003;
-var SOLANA_ERROR__JSON_RPC__SERVER_ERROR_SEND_TRANSACTION_PREFLIGHT_FAILURE2 = -32002;
-var SOLANA_ERROR__JSON_RPC__SERVER_ERROR_BLOCK_CLEANED_UP2 = -32001;
-var SOLANA_ERROR__ADDRESSES__INVALID_BYTE_LENGTH2 = 2800000;
-var SOLANA_ERROR__ADDRESSES__STRING_LENGTH_OUT_OF_RANGE2 = 2800001;
-var SOLANA_ERROR__ADDRESSES__INVALID_BASE58_ENCODED_ADDRESS2 = 2800002;
-var SOLANA_ERROR__ADDRESSES__INVALID_ED25519_PUBLIC_KEY2 = 2800003;
-var SOLANA_ERROR__ADDRESSES__MALFORMED_PDA2 = 2800004;
-var SOLANA_ERROR__ADDRESSES__PDA_BUMP_SEED_OUT_OF_RANGE2 = 2800005;
-var SOLANA_ERROR__ADDRESSES__MAX_NUMBER_OF_PDA_SEEDS_EXCEEDED2 = 2800006;
-var SOLANA_ERROR__ADDRESSES__MAX_PDA_SEED_LENGTH_EXCEEDED2 = 2800007;
-var SOLANA_ERROR__ADDRESSES__INVALID_SEEDS_POINT_ON_CURVE2 = 2800008;
-var SOLANA_ERROR__ADDRESSES__FAILED_TO_FIND_VIABLE_PDA_BUMP_SEED2 = 2800009;
-var SOLANA_ERROR__ADDRESSES__PDA_ENDS_WITH_PDA_MARKER2 = 2800010;
-var SOLANA_ERROR__ADDRESSES__INVALID_OFF_CURVE_ADDRESS2 = 2800011;
-var SOLANA_ERROR__ACCOUNTS__ACCOUNT_NOT_FOUND2 = 3230000;
-var SOLANA_ERROR__ACCOUNTS__ONE_OR_MORE_ACCOUNTS_NOT_FOUND2 = 32300001;
-var SOLANA_ERROR__ACCOUNTS__FAILED_TO_DECODE_ACCOUNT2 = 3230002;
-var SOLANA_ERROR__ACCOUNTS__EXPECTED_DECODED_ACCOUNT2 = 3230003;
-var SOLANA_ERROR__ACCOUNTS__EXPECTED_ALL_ACCOUNTS_TO_BE_DECODED2 = 3230004;
-var SOLANA_ERROR__SUBTLE_CRYPTO__DISALLOWED_IN_INSECURE_CONTEXT2 = 3610000;
-var SOLANA_ERROR__SUBTLE_CRYPTO__DIGEST_UNIMPLEMENTED2 = 3610001;
-var SOLANA_ERROR__SUBTLE_CRYPTO__ED25519_ALGORITHM_UNIMPLEMENTED2 = 3610002;
-var SOLANA_ERROR__SUBTLE_CRYPTO__EXPORT_FUNCTION_UNIMPLEMENTED2 = 3610003;
-var SOLANA_ERROR__SUBTLE_CRYPTO__GENERATE_FUNCTION_UNIMPLEMENTED2 = 3610004;
-var SOLANA_ERROR__SUBTLE_CRYPTO__SIGN_FUNCTION_UNIMPLEMENTED2 = 3610005;
-var SOLANA_ERROR__SUBTLE_CRYPTO__VERIFY_FUNCTION_UNIMPLEMENTED2 = 3610006;
-var SOLANA_ERROR__SUBTLE_CRYPTO__CANNOT_EXPORT_NON_EXTRACTABLE_KEY2 = 3610007;
-var SOLANA_ERROR__CRYPTO__RANDOM_VALUES_FUNCTION_UNIMPLEMENTED2 = 3611000;
-var SOLANA_ERROR__KEYS__INVALID_KEY_PAIR_BYTE_LENGTH2 = 3704000;
-var SOLANA_ERROR__KEYS__INVALID_PRIVATE_KEY_BYTE_LENGTH2 = 3704001;
-var SOLANA_ERROR__KEYS__INVALID_SIGNATURE_BYTE_LENGTH2 = 3704002;
-var SOLANA_ERROR__KEYS__SIGNATURE_STRING_LENGTH_OUT_OF_RANGE2 = 3704003;
-var SOLANA_ERROR__KEYS__PUBLIC_KEY_MUST_MATCH_PRIVATE_KEY2 = 3704004;
-var SOLANA_ERROR__KEYS__INVALID_BASE58_IN_GRIND_REGEX2 = 3704005;
-var SOLANA_ERROR__KEYS__WRITE_KEY_PAIR_UNSUPPORTED_ENVIRONMENT2 = 3704006;
-var SOLANA_ERROR__FS__UNSUPPORTED_ENVIRONMENT2 = 3712000;
-var SOLANA_ERROR__INSTRUCTION__EXPECTED_TO_HAVE_ACCOUNTS2 = 4128000;
-var SOLANA_ERROR__INSTRUCTION__EXPECTED_TO_HAVE_DATA2 = 4128001;
-var SOLANA_ERROR__INSTRUCTION__PROGRAM_ID_MISMATCH2 = 4128002;
-var SOLANA_ERROR__INSTRUCTION_ERROR__UNKNOWN2 = 4615000;
-var SOLANA_ERROR__INSTRUCTION_ERROR__GENERIC_ERROR2 = 4615001;
-var SOLANA_ERROR__INSTRUCTION_ERROR__INVALID_ARGUMENT2 = 4615002;
-var SOLANA_ERROR__INSTRUCTION_ERROR__INVALID_INSTRUCTION_DATA2 = 4615003;
-var SOLANA_ERROR__INSTRUCTION_ERROR__INVALID_ACCOUNT_DATA2 = 4615004;
-var SOLANA_ERROR__INSTRUCTION_ERROR__ACCOUNT_DATA_TOO_SMALL2 = 4615005;
-var SOLANA_ERROR__INSTRUCTION_ERROR__INSUFFICIENT_FUNDS2 = 4615006;
-var SOLANA_ERROR__INSTRUCTION_ERROR__INCORRECT_PROGRAM_ID2 = 4615007;
-var SOLANA_ERROR__INSTRUCTION_ERROR__MISSING_REQUIRED_SIGNATURE2 = 4615008;
-var SOLANA_ERROR__INSTRUCTION_ERROR__ACCOUNT_ALREADY_INITIALIZED2 = 4615009;
-var SOLANA_ERROR__INSTRUCTION_ERROR__UNINITIALIZED_ACCOUNT2 = 4615010;
-var SOLANA_ERROR__INSTRUCTION_ERROR__UNBALANCED_INSTRUCTION2 = 4615011;
-var SOLANA_ERROR__INSTRUCTION_ERROR__MODIFIED_PROGRAM_ID2 = 4615012;
-var SOLANA_ERROR__INSTRUCTION_ERROR__EXTERNAL_ACCOUNT_LAMPORT_SPEND2 = 4615013;
-var SOLANA_ERROR__INSTRUCTION_ERROR__EXTERNAL_ACCOUNT_DATA_MODIFIED2 = 4615014;
-var SOLANA_ERROR__INSTRUCTION_ERROR__READONLY_LAMPORT_CHANGE2 = 4615015;
-var SOLANA_ERROR__INSTRUCTION_ERROR__READONLY_DATA_MODIFIED2 = 4615016;
-var SOLANA_ERROR__INSTRUCTION_ERROR__DUPLICATE_ACCOUNT_INDEX2 = 4615017;
-var SOLANA_ERROR__INSTRUCTION_ERROR__EXECUTABLE_MODIFIED2 = 4615018;
-var SOLANA_ERROR__INSTRUCTION_ERROR__RENT_EPOCH_MODIFIED2 = 4615019;
-var SOLANA_ERROR__INSTRUCTION_ERROR__NOT_ENOUGH_ACCOUNT_KEYS2 = 4615020;
-var SOLANA_ERROR__INSTRUCTION_ERROR__ACCOUNT_DATA_SIZE_CHANGED2 = 4615021;
-var SOLANA_ERROR__INSTRUCTION_ERROR__ACCOUNT_NOT_EXECUTABLE2 = 4615022;
-var SOLANA_ERROR__INSTRUCTION_ERROR__ACCOUNT_BORROW_FAILED2 = 4615023;
-var SOLANA_ERROR__INSTRUCTION_ERROR__ACCOUNT_BORROW_OUTSTANDING2 = 4615024;
-var SOLANA_ERROR__INSTRUCTION_ERROR__DUPLICATE_ACCOUNT_OUT_OF_SYNC2 = 4615025;
-var SOLANA_ERROR__INSTRUCTION_ERROR__CUSTOM2 = 4615026;
-var SOLANA_ERROR__INSTRUCTION_ERROR__INVALID_ERROR2 = 4615027;
-var SOLANA_ERROR__INSTRUCTION_ERROR__EXECUTABLE_DATA_MODIFIED2 = 4615028;
-var SOLANA_ERROR__INSTRUCTION_ERROR__EXECUTABLE_LAMPORT_CHANGE2 = 4615029;
-var SOLANA_ERROR__INSTRUCTION_ERROR__EXECUTABLE_ACCOUNT_NOT_RENT_EXEMPT2 = 4615030;
-var SOLANA_ERROR__INSTRUCTION_ERROR__UNSUPPORTED_PROGRAM_ID2 = 4615031;
-var SOLANA_ERROR__INSTRUCTION_ERROR__CALL_DEPTH2 = 4615032;
-var SOLANA_ERROR__INSTRUCTION_ERROR__MISSING_ACCOUNT2 = 4615033;
-var SOLANA_ERROR__INSTRUCTION_ERROR__REENTRANCY_NOT_ALLOWED2 = 4615034;
-var SOLANA_ERROR__INSTRUCTION_ERROR__MAX_SEED_LENGTH_EXCEEDED2 = 4615035;
-var SOLANA_ERROR__INSTRUCTION_ERROR__INVALID_SEEDS2 = 4615036;
-var SOLANA_ERROR__INSTRUCTION_ERROR__INVALID_REALLOC2 = 4615037;
-var SOLANA_ERROR__INSTRUCTION_ERROR__COMPUTATIONAL_BUDGET_EXCEEDED2 = 4615038;
-var SOLANA_ERROR__INSTRUCTION_ERROR__PRIVILEGE_ESCALATION2 = 4615039;
-var SOLANA_ERROR__INSTRUCTION_ERROR__PROGRAM_ENVIRONMENT_SETUP_FAILURE2 = 4615040;
-var SOLANA_ERROR__INSTRUCTION_ERROR__PROGRAM_FAILED_TO_COMPLETE2 = 4615041;
-var SOLANA_ERROR__INSTRUCTION_ERROR__PROGRAM_FAILED_TO_COMPILE2 = 4615042;
-var SOLANA_ERROR__INSTRUCTION_ERROR__IMMUTABLE2 = 4615043;
-var SOLANA_ERROR__INSTRUCTION_ERROR__INCORRECT_AUTHORITY2 = 4615044;
-var SOLANA_ERROR__INSTRUCTION_ERROR__BORSH_IO_ERROR2 = 4615045;
-var SOLANA_ERROR__INSTRUCTION_ERROR__ACCOUNT_NOT_RENT_EXEMPT2 = 4615046;
-var SOLANA_ERROR__INSTRUCTION_ERROR__INVALID_ACCOUNT_OWNER2 = 4615047;
-var SOLANA_ERROR__INSTRUCTION_ERROR__ARITHMETIC_OVERFLOW2 = 4615048;
-var SOLANA_ERROR__INSTRUCTION_ERROR__UNSUPPORTED_SYSVAR2 = 4615049;
-var SOLANA_ERROR__INSTRUCTION_ERROR__ILLEGAL_OWNER2 = 4615050;
-var SOLANA_ERROR__INSTRUCTION_ERROR__MAX_ACCOUNTS_DATA_ALLOCATIONS_EXCEEDED2 = 4615051;
-var SOLANA_ERROR__INSTRUCTION_ERROR__MAX_ACCOUNTS_EXCEEDED2 = 4615052;
-var SOLANA_ERROR__INSTRUCTION_ERROR__MAX_INSTRUCTION_TRACE_LENGTH_EXCEEDED2 = 4615053;
-var SOLANA_ERROR__INSTRUCTION_ERROR__BUILTIN_PROGRAMS_MUST_CONSUME_COMPUTE_UNITS2 = 4615054;
-var SOLANA_ERROR__SIGNER__ADDRESS_CANNOT_HAVE_MULTIPLE_SIGNERS2 = 5508000;
-var SOLANA_ERROR__SIGNER__EXPECTED_KEY_PAIR_SIGNER2 = 5508001;
-var SOLANA_ERROR__SIGNER__EXPECTED_MESSAGE_SIGNER2 = 5508002;
-var SOLANA_ERROR__SIGNER__EXPECTED_MESSAGE_MODIFYING_SIGNER2 = 5508003;
-var SOLANA_ERROR__SIGNER__EXPECTED_MESSAGE_PARTIAL_SIGNER2 = 5508004;
-var SOLANA_ERROR__SIGNER__EXPECTED_TRANSACTION_SIGNER2 = 5508005;
-var SOLANA_ERROR__SIGNER__EXPECTED_TRANSACTION_MODIFYING_SIGNER2 = 5508006;
-var SOLANA_ERROR__SIGNER__EXPECTED_TRANSACTION_PARTIAL_SIGNER2 = 5508007;
-var SOLANA_ERROR__SIGNER__EXPECTED_TRANSACTION_SENDING_SIGNER2 = 5508008;
-var SOLANA_ERROR__SIGNER__TRANSACTION_CANNOT_HAVE_MULTIPLE_SENDING_SIGNERS2 = 5508009;
-var SOLANA_ERROR__SIGNER__TRANSACTION_SENDING_SIGNER_MISSING2 = 5508010;
-var SOLANA_ERROR__SIGNER__WALLET_MULTISIGN_UNIMPLEMENTED2 = 5508011;
-var SOLANA_ERROR__SIGNER__WALLET_ACCOUNT_CANNOT_SIGN_TRANSACTION2 = 5508012;
-var SOLANA_ERROR__OFFCHAIN_MESSAGE__MAXIMUM_LENGTH_EXCEEDED2 = 5607000;
-var SOLANA_ERROR__OFFCHAIN_MESSAGE__RESTRICTED_ASCII_BODY_CHARACTER_OUT_OF_RANGE2 = 5607001;
-var SOLANA_ERROR__OFFCHAIN_MESSAGE__APPLICATION_DOMAIN_STRING_LENGTH_OUT_OF_RANGE2 = 5607002;
-var SOLANA_ERROR__OFFCHAIN_MESSAGE__INVALID_APPLICATION_DOMAIN_BYTE_LENGTH2 = 5607003;
-var SOLANA_ERROR__OFFCHAIN_MESSAGE__NUM_SIGNATURES_MISMATCH2 = 5607004;
-var SOLANA_ERROR__OFFCHAIN_MESSAGE__NUM_REQUIRED_SIGNERS_CANNOT_BE_ZERO2 = 5607005;
-var SOLANA_ERROR__OFFCHAIN_MESSAGE__VERSION_NUMBER_NOT_SUPPORTED2 = 5607006;
-var SOLANA_ERROR__OFFCHAIN_MESSAGE__MESSAGE_FORMAT_MISMATCH2 = 5607007;
-var SOLANA_ERROR__OFFCHAIN_MESSAGE__MESSAGE_LENGTH_MISMATCH2 = 5607008;
-var SOLANA_ERROR__OFFCHAIN_MESSAGE__MESSAGE_MUST_BE_NON_EMPTY2 = 5607009;
-var SOLANA_ERROR__OFFCHAIN_MESSAGE__NUM_ENVELOPE_SIGNATURES_CANNOT_BE_ZERO2 = 5607010;
-var SOLANA_ERROR__OFFCHAIN_MESSAGE__SIGNATURES_MISSING2 = 5607011;
-var SOLANA_ERROR__OFFCHAIN_MESSAGE__ENVELOPE_SIGNERS_MISMATCH2 = 5607012;
-var SOLANA_ERROR__OFFCHAIN_MESSAGE__ADDRESSES_CANNOT_SIGN_OFFCHAIN_MESSAGE2 = 5607013;
-var SOLANA_ERROR__OFFCHAIN_MESSAGE__UNEXPECTED_VERSION2 = 5607014;
-var SOLANA_ERROR__OFFCHAIN_MESSAGE__SIGNATORIES_MUST_BE_SORTED2 = 5607015;
-var SOLANA_ERROR__OFFCHAIN_MESSAGE__SIGNATORIES_MUST_BE_UNIQUE2 = 5607016;
-var SOLANA_ERROR__OFFCHAIN_MESSAGE__SIGNATURE_VERIFICATION_FAILURE2 = 5607017;
-var SOLANA_ERROR__TRANSACTION__INVOKED_PROGRAMS_CANNOT_PAY_FEES2 = 5663000;
-var SOLANA_ERROR__TRANSACTION__INVOKED_PROGRAMS_MUST_NOT_BE_WRITABLE2 = 5663001;
-var SOLANA_ERROR__TRANSACTION__EXPECTED_BLOCKHASH_LIFETIME2 = 5663002;
-var SOLANA_ERROR__TRANSACTION__EXPECTED_NONCE_LIFETIME2 = 5663003;
-var SOLANA_ERROR__TRANSACTION__VERSION_NUMBER_OUT_OF_RANGE2 = 5663004;
-var SOLANA_ERROR__TRANSACTION__FAILED_TO_DECOMPILE_ADDRESS_LOOKUP_TABLE_CONTENTS_MISSING2 = 5663005;
-var SOLANA_ERROR__TRANSACTION__FAILED_TO_DECOMPILE_ADDRESS_LOOKUP_TABLE_INDEX_OUT_OF_RANGE2 = 5663006;
-var SOLANA_ERROR__TRANSACTION__FAILED_TO_DECOMPILE_INSTRUCTION_PROGRAM_ADDRESS_NOT_FOUND2 = 5663007;
-var SOLANA_ERROR__TRANSACTION__FAILED_TO_DECOMPILE_FEE_PAYER_MISSING2 = 5663008;
-var SOLANA_ERROR__TRANSACTION__SIGNATURES_MISSING2 = 5663009;
-var SOLANA_ERROR__TRANSACTION__ADDRESS_MISSING2 = 5663010;
-var SOLANA_ERROR__TRANSACTION__FEE_PAYER_MISSING2 = 5663011;
-var SOLANA_ERROR__TRANSACTION__FEE_PAYER_SIGNATURE_MISSING2 = 5663012;
-var SOLANA_ERROR__TRANSACTION__INVALID_NONCE_TRANSACTION_INSTRUCTIONS_MISSING2 = 5663013;
-var SOLANA_ERROR__TRANSACTION__INVALID_NONCE_TRANSACTION_FIRST_INSTRUCTION_MUST_BE_ADVANCE_NONCE2 = 5663014;
-var SOLANA_ERROR__TRANSACTION__ADDRESSES_CANNOT_SIGN_TRANSACTION2 = 5663015;
-var SOLANA_ERROR__TRANSACTION__CANNOT_ENCODE_WITH_EMPTY_SIGNATURES2 = 5663016;
-var SOLANA_ERROR__TRANSACTION__MESSAGE_SIGNATURES_MISMATCH2 = 5663017;
-var SOLANA_ERROR__TRANSACTION__FAILED_TO_ESTIMATE_COMPUTE_LIMIT2 = 5663018;
-var SOLANA_ERROR__TRANSACTION__FAILED_WHEN_SIMULATING_TO_ESTIMATE_COMPUTE_LIMIT2 = 5663019;
-var SOLANA_ERROR__TRANSACTION__EXCEEDS_SIZE_LIMIT2 = 5663020;
-var SOLANA_ERROR__TRANSACTION__VERSION_NUMBER_NOT_SUPPORTED2 = 5663021;
-var SOLANA_ERROR__TRANSACTION__NONCE_ACCOUNT_CANNOT_BE_IN_LOOKUP_TABLE2 = 5663022;
-var SOLANA_ERROR__TRANSACTION__MALFORMED_MESSAGE_BYTES2 = 5663023;
-var SOLANA_ERROR__TRANSACTION__CANNOT_ENCODE_WITH_EMPTY_MESSAGE_BYTES2 = 5663024;
-var SOLANA_ERROR__TRANSACTION__CANNOT_DECODE_EMPTY_TRANSACTION_BYTES2 = 5663025;
-var SOLANA_ERROR__TRANSACTION__VERSION_ZERO_MUST_BE_ENCODED_WITH_SIGNATURES_FIRST2 = 5663026;
-var SOLANA_ERROR__TRANSACTION__SIGNATURE_COUNT_TOO_HIGH_FOR_TRANSACTION_BYTES2 = 5663027;
-var SOLANA_ERROR__TRANSACTION__INVALID_CONFIG_MASK_PRIORITY_FEE_BITS2 = 5663028;
-var SOLANA_ERROR__TRANSACTION__INVALID_NONCE_ACCOUNT_INDEX2 = 5663029;
-var SOLANA_ERROR__TRANSACTION__INVALID_CONFIG_VALUE_KIND2 = 5663030;
-var SOLANA_ERROR__TRANSACTION__INSTRUCTION_HEADERS_PAYLOADS_MISMATCH2 = 5663031;
-var SOLANA_ERROR__TRANSACTION__TOO_MANY_SIGNER_ADDRESSES2 = 5663032;
-var SOLANA_ERROR__TRANSACTION__TOO_MANY_ACCOUNT_ADDRESSES2 = 5663033;
-var SOLANA_ERROR__TRANSACTION__TOO_MANY_INSTRUCTIONS2 = 5663034;
-var SOLANA_ERROR__TRANSACTION__TOO_MANY_ACCOUNTS_IN_INSTRUCTION2 = 5663035;
-var SOLANA_ERROR__TRANSACTION__FAILED_TO_ESTIMATE_LOADED_ACCOUNTS_DATA_SIZE_LIMIT2 = 5663036;
-var SOLANA_ERROR__TRANSACTION__FAILED_WHEN_SIMULATING_TO_ESTIMATE_RESOURCE_LIMITS2 = 5663037;
-var SOLANA_ERROR__TRANSACTION_ERROR__UNKNOWN2 = 7050000;
-var SOLANA_ERROR__TRANSACTION_ERROR__ACCOUNT_IN_USE2 = 7050001;
-var SOLANA_ERROR__TRANSACTION_ERROR__ACCOUNT_LOADED_TWICE2 = 7050002;
-var SOLANA_ERROR__TRANSACTION_ERROR__ACCOUNT_NOT_FOUND2 = 7050003;
-var SOLANA_ERROR__TRANSACTION_ERROR__PROGRAM_ACCOUNT_NOT_FOUND2 = 7050004;
-var SOLANA_ERROR__TRANSACTION_ERROR__INSUFFICIENT_FUNDS_FOR_FEE2 = 7050005;
-var SOLANA_ERROR__TRANSACTION_ERROR__INVALID_ACCOUNT_FOR_FEE2 = 7050006;
-var SOLANA_ERROR__TRANSACTION_ERROR__ALREADY_PROCESSED2 = 7050007;
-var SOLANA_ERROR__TRANSACTION_ERROR__BLOCKHASH_NOT_FOUND2 = 7050008;
-var SOLANA_ERROR__TRANSACTION_ERROR__CALL_CHAIN_TOO_DEEP2 = 7050009;
-var SOLANA_ERROR__TRANSACTION_ERROR__MISSING_SIGNATURE_FOR_FEE2 = 7050010;
-var SOLANA_ERROR__TRANSACTION_ERROR__INVALID_ACCOUNT_INDEX2 = 7050011;
-var SOLANA_ERROR__TRANSACTION_ERROR__SIGNATURE_FAILURE2 = 7050012;
-var SOLANA_ERROR__TRANSACTION_ERROR__INVALID_PROGRAM_FOR_EXECUTION2 = 7050013;
-var SOLANA_ERROR__TRANSACTION_ERROR__SANITIZE_FAILURE2 = 7050014;
-var SOLANA_ERROR__TRANSACTION_ERROR__CLUSTER_MAINTENANCE2 = 7050015;
-var SOLANA_ERROR__TRANSACTION_ERROR__ACCOUNT_BORROW_OUTSTANDING2 = 7050016;
-var SOLANA_ERROR__TRANSACTION_ERROR__WOULD_EXCEED_MAX_BLOCK_COST_LIMIT2 = 7050017;
-var SOLANA_ERROR__TRANSACTION_ERROR__UNSUPPORTED_VERSION2 = 7050018;
-var SOLANA_ERROR__TRANSACTION_ERROR__INVALID_WRITABLE_ACCOUNT2 = 7050019;
-var SOLANA_ERROR__TRANSACTION_ERROR__WOULD_EXCEED_MAX_ACCOUNT_COST_LIMIT2 = 7050020;
-var SOLANA_ERROR__TRANSACTION_ERROR__WOULD_EXCEED_ACCOUNT_DATA_BLOCK_LIMIT2 = 7050021;
-var SOLANA_ERROR__TRANSACTION_ERROR__TOO_MANY_ACCOUNT_LOCKS2 = 7050022;
-var SOLANA_ERROR__TRANSACTION_ERROR__ADDRESS_LOOKUP_TABLE_NOT_FOUND2 = 7050023;
-var SOLANA_ERROR__TRANSACTION_ERROR__INVALID_ADDRESS_LOOKUP_TABLE_OWNER2 = 7050024;
-var SOLANA_ERROR__TRANSACTION_ERROR__INVALID_ADDRESS_LOOKUP_TABLE_DATA2 = 7050025;
-var SOLANA_ERROR__TRANSACTION_ERROR__INVALID_ADDRESS_LOOKUP_TABLE_INDEX2 = 7050026;
-var SOLANA_ERROR__TRANSACTION_ERROR__INVALID_RENT_PAYING_ACCOUNT2 = 7050027;
-var SOLANA_ERROR__TRANSACTION_ERROR__WOULD_EXCEED_MAX_VOTE_COST_LIMIT2 = 7050028;
-var SOLANA_ERROR__TRANSACTION_ERROR__WOULD_EXCEED_ACCOUNT_DATA_TOTAL_LIMIT2 = 7050029;
-var SOLANA_ERROR__TRANSACTION_ERROR__DUPLICATE_INSTRUCTION2 = 7050030;
-var SOLANA_ERROR__TRANSACTION_ERROR__INSUFFICIENT_FUNDS_FOR_RENT2 = 7050031;
-var SOLANA_ERROR__TRANSACTION_ERROR__MAX_LOADED_ACCOUNTS_DATA_SIZE_EXCEEDED2 = 7050032;
-var SOLANA_ERROR__TRANSACTION_ERROR__INVALID_LOADED_ACCOUNTS_DATA_SIZE_LIMIT2 = 7050033;
-var SOLANA_ERROR__TRANSACTION_ERROR__RESANITIZATION_NEEDED2 = 7050034;
-var SOLANA_ERROR__TRANSACTION_ERROR__PROGRAM_EXECUTION_TEMPORARILY_RESTRICTED2 = 7050035;
-var SOLANA_ERROR__TRANSACTION_ERROR__UNBALANCED_TRANSACTION2 = 7050036;
-var SOLANA_ERROR__INSTRUCTION_PLANS__MESSAGE_CANNOT_ACCOMMODATE_PLAN2 = 7618000;
-var SOLANA_ERROR__INSTRUCTION_PLANS__MESSAGE_PACKER_ALREADY_COMPLETE2 = 7618001;
-var SOLANA_ERROR__INSTRUCTION_PLANS__EMPTY_INSTRUCTION_PLAN2 = 7618002;
-var SOLANA_ERROR__INSTRUCTION_PLANS__FAILED_TO_EXECUTE_TRANSACTION_PLAN2 = 7618003;
-var SOLANA_ERROR__INSTRUCTION_PLANS__NON_DIVISIBLE_TRANSACTION_PLANS_NOT_SUPPORTED2 = 7618004;
-var SOLANA_ERROR__INSTRUCTION_PLANS__FAILED_SINGLE_TRANSACTION_PLAN_RESULT_NOT_FOUND2 = 7618005;
-var SOLANA_ERROR__INSTRUCTION_PLANS__UNEXPECTED_INSTRUCTION_PLAN2 = 7618006;
-var SOLANA_ERROR__INSTRUCTION_PLANS__UNEXPECTED_TRANSACTION_PLAN2 = 7618007;
-var SOLANA_ERROR__INSTRUCTION_PLANS__UNEXPECTED_TRANSACTION_PLAN_RESULT2 = 7618008;
-var SOLANA_ERROR__INSTRUCTION_PLANS__EXPECTED_SUCCESSFUL_TRANSACTION_PLAN_RESULT2 = 7618009;
-var SOLANA_ERROR__CODECS__CANNOT_DECODE_EMPTY_BYTE_ARRAY2 = 8078000;
-var SOLANA_ERROR__CODECS__INVALID_BYTE_LENGTH2 = 8078001;
-var SOLANA_ERROR__CODECS__EXPECTED_FIXED_LENGTH2 = 8078002;
-var SOLANA_ERROR__CODECS__EXPECTED_VARIABLE_LENGTH2 = 8078003;
-var SOLANA_ERROR__CODECS__ENCODER_DECODER_SIZE_COMPATIBILITY_MISMATCH2 = 8078004;
-var SOLANA_ERROR__CODECS__ENCODER_DECODER_FIXED_SIZE_MISMATCH2 = 8078005;
-var SOLANA_ERROR__CODECS__ENCODER_DECODER_MAX_SIZE_MISMATCH2 = 8078006;
-var SOLANA_ERROR__CODECS__INVALID_NUMBER_OF_ITEMS2 = 8078007;
-var SOLANA_ERROR__CODECS__ENUM_DISCRIMINATOR_OUT_OF_RANGE2 = 8078008;
-var SOLANA_ERROR__CODECS__INVALID_DISCRIMINATED_UNION_VARIANT2 = 8078009;
-var SOLANA_ERROR__CODECS__INVALID_ENUM_VARIANT2 = 8078010;
-var SOLANA_ERROR__CODECS__NUMBER_OUT_OF_RANGE2 = 8078011;
-var SOLANA_ERROR__CODECS__INVALID_STRING_FOR_BASE2 = 8078012;
-var SOLANA_ERROR__CODECS__EXPECTED_POSITIVE_BYTE_LENGTH2 = 8078013;
-var SOLANA_ERROR__CODECS__OFFSET_OUT_OF_RANGE2 = 8078014;
-var SOLANA_ERROR__CODECS__INVALID_LITERAL_UNION_VARIANT2 = 8078015;
-var SOLANA_ERROR__CODECS__LITERAL_UNION_DISCRIMINATOR_OUT_OF_RANGE2 = 8078016;
-var SOLANA_ERROR__CODECS__UNION_VARIANT_OUT_OF_RANGE2 = 8078017;
-var SOLANA_ERROR__CODECS__INVALID_CONSTANT2 = 8078018;
-var SOLANA_ERROR__CODECS__EXPECTED_ZERO_VALUE_TO_MATCH_ITEM_FIXED_SIZE2 = 8078019;
-var SOLANA_ERROR__CODECS__ENCODED_BYTES_MUST_NOT_INCLUDE_SENTINEL2 = 8078020;
-var SOLANA_ERROR__CODECS__SENTINEL_MISSING_IN_DECODED_BYTES2 = 8078021;
-var SOLANA_ERROR__CODECS__CANNOT_USE_LEXICAL_VALUES_AS_ENUM_DISCRIMINATORS2 = 8078022;
-var SOLANA_ERROR__CODECS__EXPECTED_DECODER_TO_CONSUME_ENTIRE_BYTE_ARRAY2 = 8078023;
-var SOLANA_ERROR__CODECS__INVALID_PATTERN_MATCH_VALUE2 = 8078024;
-var SOLANA_ERROR__CODECS__INVALID_PATTERN_MATCH_BYTES2 = 8078025;
-var SOLANA_ERROR__FIXED_POINTS__INVALID_TOTAL_BITS2 = 8090000;
-var SOLANA_ERROR__FIXED_POINTS__INVALID_FRACTIONAL_BITS2 = 8090001;
-var SOLANA_ERROR__FIXED_POINTS__INVALID_DECIMALS2 = 8090002;
-var SOLANA_ERROR__FIXED_POINTS__FRACTIONAL_BITS_EXCEED_TOTAL_BITS2 = 8090003;
-var SOLANA_ERROR__FIXED_POINTS__VALUE_OUT_OF_RANGE2 = 8090004;
-var SOLANA_ERROR__FIXED_POINTS__INVALID_STRING2 = 8090005;
-var SOLANA_ERROR__FIXED_POINTS__INVALID_ZERO_DENOMINATOR_RATIO2 = 8090006;
-var SOLANA_ERROR__FIXED_POINTS__ARITHMETIC_OVERFLOW2 = 8090007;
-var SOLANA_ERROR__FIXED_POINTS__SHAPE_MISMATCH2 = 8090008;
-var SOLANA_ERROR__FIXED_POINTS__DIVISION_BY_ZERO2 = 8090009;
-var SOLANA_ERROR__FIXED_POINTS__STRICT_MODE_PRECISION_LOSS2 = 8090010;
-var SOLANA_ERROR__FIXED_POINTS__MALFORMED_RAW_VALUE2 = 8090011;
-var SOLANA_ERROR__FIXED_POINTS__TOTAL_BITS_NOT_BYTE_ALIGNED2 = 8090012;
-var SOLANA_ERROR__RPC__INTEGER_OVERFLOW2 = 8100000;
-var SOLANA_ERROR__RPC__TRANSPORT_HTTP_HEADER_FORBIDDEN2 = 8100001;
-var SOLANA_ERROR__RPC__TRANSPORT_HTTP_ERROR2 = 8100002;
-var SOLANA_ERROR__RPC__API_PLAN_MISSING_FOR_RPC_METHOD2 = 8100003;
-var SOLANA_ERROR__RPC_SUBSCRIPTIONS__CANNOT_CREATE_SUBSCRIPTION_PLAN2 = 8190000;
-var SOLANA_ERROR__RPC_SUBSCRIPTIONS__EXPECTED_SERVER_SUBSCRIPTION_ID2 = 8190001;
-var SOLANA_ERROR__RPC_SUBSCRIPTIONS__CHANNEL_CLOSED_BEFORE_MESSAGE_BUFFERED2 = 8190002;
-var SOLANA_ERROR__RPC_SUBSCRIPTIONS__CHANNEL_CONNECTION_CLOSED2 = 8190003;
-var SOLANA_ERROR__RPC_SUBSCRIPTIONS__CHANNEL_FAILED_TO_CONNECT2 = 8190004;
-var SOLANA_ERROR__SUBSCRIBABLE__RETRY_NOT_SUPPORTED2 = 8195000;
-var SOLANA_ERROR__PROGRAM_CLIENTS__INSUFFICIENT_ACCOUNT_METAS2 = 8500000;
-var SOLANA_ERROR__PROGRAM_CLIENTS__UNRECOGNIZED_INSTRUCTION_TYPE2 = 8500001;
-var SOLANA_ERROR__PROGRAM_CLIENTS__FAILED_TO_IDENTIFY_INSTRUCTION2 = 8500002;
-var SOLANA_ERROR__PROGRAM_CLIENTS__UNEXPECTED_RESOLVED_INSTRUCTION_INPUT_TYPE2 = 8500003;
-var SOLANA_ERROR__PROGRAM_CLIENTS__RESOLVED_INSTRUCTION_INPUT_MUST_BE_NON_NULL2 = 8500004;
-var SOLANA_ERROR__PROGRAM_CLIENTS__UNRECOGNIZED_ACCOUNT_TYPE2 = 8500005;
-var SOLANA_ERROR__PROGRAM_CLIENTS__FAILED_TO_IDENTIFY_ACCOUNT2 = 8500006;
-var SOLANA_ERROR__WALLET__NOT_CONNECTED2 = 8900000;
-var SOLANA_ERROR__WALLET__NO_SIGNER_CONNECTED2 = 8900001;
-var SOLANA_ERROR__WALLET__SIGNER_NOT_AVAILABLE2 = 8900002;
-var SOLANA_ERROR__WALLET__ACCOUNT_NOT_AVAILABLE2 = 8900003;
-var SOLANA_ERROR__INVARIANT_VIOLATION__SUBSCRIPTION_ITERATOR_STATE_MISSING2 = 9900000;
-var SOLANA_ERROR__INVARIANT_VIOLATION__SUBSCRIPTION_ITERATOR_MUST_NOT_POLL_BEFORE_RESOLVING_EXISTING_MESSAGE_PROMISE2 = 9900001;
-var SOLANA_ERROR__INVARIANT_VIOLATION__CACHED_ABORTABLE_ITERABLE_CACHE_ENTRY_MISSING2 = 9900002;
-var SOLANA_ERROR__INVARIANT_VIOLATION__SWITCH_MUST_BE_EXHAUSTIVE2 = 9900003;
-var SOLANA_ERROR__INVARIANT_VIOLATION__DATA_PUBLISHER_CHANNEL_UNIMPLEMENTED2 = 9900004;
-var SOLANA_ERROR__INVARIANT_VIOLATION__INVALID_INSTRUCTION_PLAN_KIND2 = 9900005;
-var SOLANA_ERROR__INVARIANT_VIOLATION__INVALID_TRANSACTION_PLAN_KIND2 = 9900006;
-var SolanaErrorMessages2 = {
-  [SOLANA_ERROR__ACCOUNTS__ACCOUNT_NOT_FOUND2]: "Account not found at address: $address",
-  [SOLANA_ERROR__ACCOUNTS__EXPECTED_ALL_ACCOUNTS_TO_BE_DECODED2]: "Not all accounts were decoded. Encoded accounts found at addresses: $addresses.",
-  [SOLANA_ERROR__ACCOUNTS__EXPECTED_DECODED_ACCOUNT2]: "Expected decoded account at address: $address",
-  [SOLANA_ERROR__ACCOUNTS__FAILED_TO_DECODE_ACCOUNT2]: "Failed to decode account data at address: $address",
-  [SOLANA_ERROR__ACCOUNTS__ONE_OR_MORE_ACCOUNTS_NOT_FOUND2]: "Accounts not found at addresses: $addresses",
-  [SOLANA_ERROR__ADDRESSES__FAILED_TO_FIND_VIABLE_PDA_BUMP_SEED2]: "Unable to find a viable program address bump seed.",
-  [SOLANA_ERROR__ADDRESSES__INVALID_BASE58_ENCODED_ADDRESS2]: "$putativeAddress is not a base58-encoded address.",
-  [SOLANA_ERROR__ADDRESSES__INVALID_BYTE_LENGTH2]: "Expected base58 encoded address to decode to a byte array of length 32. Actual length: $actualLength.",
-  [SOLANA_ERROR__ADDRESSES__INVALID_ED25519_PUBLIC_KEY2]: "The `CryptoKey` must be an `Ed25519` public key.",
-  [SOLANA_ERROR__ADDRESSES__INVALID_OFF_CURVE_ADDRESS2]: "$putativeOffCurveAddress is not a base58-encoded off-curve address.",
-  [SOLANA_ERROR__ADDRESSES__INVALID_SEEDS_POINT_ON_CURVE2]: "Invalid seeds; point must fall off the Ed25519 curve.",
-  [SOLANA_ERROR__ADDRESSES__MALFORMED_PDA2]: "Expected given program derived address to have the following format: [Address, ProgramDerivedAddressBump].",
-  [SOLANA_ERROR__ADDRESSES__MAX_NUMBER_OF_PDA_SEEDS_EXCEEDED2]: "A maximum of $maxSeeds seeds, including the bump seed, may be supplied when creating an address. Received: $actual.",
-  [SOLANA_ERROR__ADDRESSES__MAX_PDA_SEED_LENGTH_EXCEEDED2]: "The seed at index $index with length $actual exceeds the maximum length of $maxSeedLength bytes.",
-  [SOLANA_ERROR__ADDRESSES__PDA_BUMP_SEED_OUT_OF_RANGE2]: "Expected program derived address bump to be in the range [0, 255], got: $bump.",
-  [SOLANA_ERROR__ADDRESSES__PDA_ENDS_WITH_PDA_MARKER2]: "Program address cannot end with PDA marker.",
-  [SOLANA_ERROR__ADDRESSES__STRING_LENGTH_OUT_OF_RANGE2]: "Expected base58-encoded address string of length in the range [32, 44]. Actual length: $actualLength.",
-  [SOLANA_ERROR__BLOCKHASH_STRING_LENGTH_OUT_OF_RANGE2]: "Expected base58-encoded blockhash string of length in the range [32, 44]. Actual length: $actualLength.",
-  [SOLANA_ERROR__BLOCK_HEIGHT_EXCEEDED2]: "The network has progressed past the last block for which this transaction could have been committed.",
-  [SOLANA_ERROR__CODECS__CANNOT_DECODE_EMPTY_BYTE_ARRAY2]: "Codec [$codecDescription] cannot decode empty byte arrays.",
-  [SOLANA_ERROR__CODECS__CANNOT_USE_LEXICAL_VALUES_AS_ENUM_DISCRIMINATORS2]: "Enum codec cannot use lexical values [$stringValues] as discriminators. Either remove all lexical values or set `useValuesAsDiscriminators` to `false`.",
-  [SOLANA_ERROR__CODECS__ENCODED_BYTES_MUST_NOT_INCLUDE_SENTINEL2]: "Sentinel [$hexSentinel] must not be present in encoded bytes [$hexEncodedBytes].",
-  [SOLANA_ERROR__CODECS__ENCODER_DECODER_FIXED_SIZE_MISMATCH2]: "Encoder and decoder must have the same fixed size, got [$encoderFixedSize] and [$decoderFixedSize].",
-  [SOLANA_ERROR__CODECS__ENCODER_DECODER_MAX_SIZE_MISMATCH2]: "Encoder and decoder must have the same max size, got [$encoderMaxSize] and [$decoderMaxSize].",
-  [SOLANA_ERROR__CODECS__ENCODER_DECODER_SIZE_COMPATIBILITY_MISMATCH2]: "Encoder and decoder must either both be fixed-size or variable-size.",
-  [SOLANA_ERROR__CODECS__ENUM_DISCRIMINATOR_OUT_OF_RANGE2]: "Enum discriminator out of range. Expected a number in [$formattedValidDiscriminators], got $discriminator.",
-  [SOLANA_ERROR__CODECS__EXPECTED_FIXED_LENGTH2]: "Expected a fixed-size codec, got a variable-size one.",
-  [SOLANA_ERROR__CODECS__EXPECTED_POSITIVE_BYTE_LENGTH2]: "Codec [$codecDescription] expected a positive byte length, got $bytesLength.",
-  [SOLANA_ERROR__CODECS__EXPECTED_VARIABLE_LENGTH2]: "Expected a variable-size codec, got a fixed-size one.",
-  [SOLANA_ERROR__CODECS__EXPECTED_ZERO_VALUE_TO_MATCH_ITEM_FIXED_SIZE2]: "Codec [$codecDescription] expected zero-value [$hexZeroValue] to have the same size as the provided fixed-size item [$expectedSize bytes].",
-  [SOLANA_ERROR__CODECS__INVALID_BYTE_LENGTH2]: "Codec [$codecDescription] expected $expected bytes, got $bytesLength.",
-  [SOLANA_ERROR__CODECS__INVALID_CONSTANT2]: "Expected byte array constant [$hexConstant] to be present in data [$hexData] at offset [$offset].",
-  [SOLANA_ERROR__CODECS__INVALID_DISCRIMINATED_UNION_VARIANT2]: "Invalid discriminated union variant. Expected one of [$variants], got $value.",
-  [SOLANA_ERROR__CODECS__INVALID_ENUM_VARIANT2]: "Invalid enum variant. Expected one of [$stringValues] or a number in [$formattedNumericalValues], got $variant.",
-  [SOLANA_ERROR__CODECS__INVALID_LITERAL_UNION_VARIANT2]: "Invalid literal union variant. Expected one of [$variants], got $value.",
-  [SOLANA_ERROR__CODECS__INVALID_NUMBER_OF_ITEMS2]: "Expected [$codecDescription] to have $expected items, got $actual.",
-  [SOLANA_ERROR__CODECS__INVALID_STRING_FOR_BASE2]: "Invalid value $value for base $base with alphabet $alphabet.",
-  [SOLANA_ERROR__CODECS__LITERAL_UNION_DISCRIMINATOR_OUT_OF_RANGE2]: "Literal union discriminator out of range. Expected a number between $minRange and $maxRange, got $discriminator.",
-  [SOLANA_ERROR__CODECS__NUMBER_OUT_OF_RANGE2]: "Codec [$codecDescription] expected number to be in the range [$min, $max], got $value.",
-  [SOLANA_ERROR__CODECS__OFFSET_OUT_OF_RANGE2]: "Codec [$codecDescription] expected offset to be in the range [0, $bytesLength], got $offset.",
-  [SOLANA_ERROR__CODECS__SENTINEL_MISSING_IN_DECODED_BYTES2]: "Expected sentinel [$hexSentinel] to be present in decoded bytes [$hexDecodedBytes].",
-  [SOLANA_ERROR__CODECS__UNION_VARIANT_OUT_OF_RANGE2]: "Union variant out of range. Expected an index between $minRange and $maxRange, got $variant.",
-  [SOLANA_ERROR__CODECS__EXPECTED_DECODER_TO_CONSUME_ENTIRE_BYTE_ARRAY2]: "This decoder expected a byte array of exactly $expectedLength bytes, but $numExcessBytes unexpected excess bytes remained after decoding. Are you sure that you have chosen the correct decoder for this data?",
-  [SOLANA_ERROR__CODECS__INVALID_PATTERN_MATCH_VALUE2]: "Invalid pattern match value. The provided value does not match any of the specified patterns.",
-  [SOLANA_ERROR__CODECS__INVALID_PATTERN_MATCH_BYTES2]: "Invalid pattern match bytes. The provided byte array does not match any of the specified patterns.",
-  [SOLANA_ERROR__CRYPTO__RANDOM_VALUES_FUNCTION_UNIMPLEMENTED2]: "No random values implementation could be found.",
-  [SOLANA_ERROR__FAILED_TO_SEND_TRANSACTION2]: "Failed to send transaction$causeMessage",
-  [SOLANA_ERROR__FAILED_TO_SEND_TRANSACTIONS2]: "Failed to send transactions$causeMessages",
-  [SOLANA_ERROR__FIXED_POINTS__ARITHMETIC_OVERFLOW2]: "Fixed-point operation `$operation` of kind `$kind` overflowed. Expected a raw bigint in [$min, $max], got $result.",
-  [SOLANA_ERROR__FIXED_POINTS__DIVISION_BY_ZERO2]: "Fixed-point division by zero for value of kind `$kind` ($signedness, $totalBits bits).",
-  [SOLANA_ERROR__FIXED_POINTS__FRACTIONAL_BITS_EXCEED_TOTAL_BITS2]: "`fractionalBits` ($fractionalBits) must not exceed `totalBits` ($totalBits).",
-  [SOLANA_ERROR__FIXED_POINTS__INVALID_DECIMALS2]: "Invalid `decimals`. Expected a non-negative integer, got $decimals.",
-  [SOLANA_ERROR__FIXED_POINTS__INVALID_FRACTIONAL_BITS2]: "Invalid `fractionalBits`. Expected a non-negative integer, got $fractionalBits.",
-  [SOLANA_ERROR__FIXED_POINTS__INVALID_STRING2]: "Invalid string `$input` for fixed-point value of kind `$kind`.",
-  [SOLANA_ERROR__FIXED_POINTS__INVALID_TOTAL_BITS2]: "Invalid `totalBits`. Expected a positive integer, got $totalBits.",
-  [SOLANA_ERROR__FIXED_POINTS__INVALID_ZERO_DENOMINATOR_RATIO2]: "Invalid ratio $numerator/$denominator for fixed-point value of kind `$kind`. Denominator must be non-zero.",
-  [SOLANA_ERROR__FIXED_POINTS__MALFORMED_RAW_VALUE2]: "Fixed-point value of kind `$kind` has a malformed `raw` field. Expected a bigint, got `$raw`.",
-  [SOLANA_ERROR__FIXED_POINTS__SHAPE_MISMATCH2]: "Fixed-point `$operation` operation expected $expectedKind ($expectedSignedness, $expectedTotalBits bits, $expectedScale $expectedScaleLabel); got $actualKind ($actualSignedness, $actualTotalBits bits, $actualScale $actualScaleLabel).",
-  [SOLANA_ERROR__FIXED_POINTS__STRICT_MODE_PRECISION_LOSS2]: "Fixed-point operation `$operation` of kind `$kind` cannot be performed exactly; pass a rounding mode other than `strict` to allow a rounded result.",
-  [SOLANA_ERROR__FIXED_POINTS__TOTAL_BITS_NOT_BYTE_ALIGNED2]: "Fixed-point codec of kind `$kind` requires `totalBits` to be a multiple of 8; got $totalBits.",
-  [SOLANA_ERROR__FIXED_POINTS__VALUE_OUT_OF_RANGE2]: "Fixed-point value of kind `$kind` is out of range for $signedness $totalBits-bit storage. Expected a raw bigint in [$min, $max], got $raw.",
-  [SOLANA_ERROR__FS__UNSUPPORTED_ENVIRONMENT2]: "Filesystem operation `$operation` is not supported in this environment.",
-  [SOLANA_ERROR__INSTRUCTION_ERROR__ACCOUNT_ALREADY_INITIALIZED2]: "Instruction requires an uninitialized account",
-  [SOLANA_ERROR__INSTRUCTION_ERROR__ACCOUNT_BORROW_FAILED2]: "Instruction tries to borrow reference for an account which is already borrowed",
-  [SOLANA_ERROR__INSTRUCTION_ERROR__ACCOUNT_BORROW_OUTSTANDING2]: "Instruction left account with an outstanding borrowed reference",
-  [SOLANA_ERROR__INSTRUCTION_ERROR__ACCOUNT_DATA_SIZE_CHANGED2]: "Program other than the account's owner changed the size of the account data",
-  [SOLANA_ERROR__INSTRUCTION_ERROR__ACCOUNT_DATA_TOO_SMALL2]: "Account data too small for instruction",
-  [SOLANA_ERROR__INSTRUCTION_ERROR__ACCOUNT_NOT_EXECUTABLE2]: "Instruction expected an executable account",
-  [SOLANA_ERROR__INSTRUCTION_ERROR__ACCOUNT_NOT_RENT_EXEMPT2]: "An account does not have enough lamports to be rent-exempt",
-  [SOLANA_ERROR__INSTRUCTION_ERROR__ARITHMETIC_OVERFLOW2]: "Program arithmetic overflowed",
-  [SOLANA_ERROR__INSTRUCTION_ERROR__BORSH_IO_ERROR2]: "Failed to serialize or deserialize account data",
-  [SOLANA_ERROR__INSTRUCTION_ERROR__BUILTIN_PROGRAMS_MUST_CONSUME_COMPUTE_UNITS2]: "Builtin programs must consume compute units",
-  [SOLANA_ERROR__INSTRUCTION_ERROR__CALL_DEPTH2]: "Cross-program invocation call depth too deep",
-  [SOLANA_ERROR__INSTRUCTION_ERROR__COMPUTATIONAL_BUDGET_EXCEEDED2]: "Computational budget exceeded",
-  [SOLANA_ERROR__INSTRUCTION_ERROR__CUSTOM2]: "Custom program error: #$code",
-  [SOLANA_ERROR__INSTRUCTION_ERROR__DUPLICATE_ACCOUNT_INDEX2]: "Instruction contains duplicate accounts",
-  [SOLANA_ERROR__INSTRUCTION_ERROR__DUPLICATE_ACCOUNT_OUT_OF_SYNC2]: "Instruction modifications of multiply-passed account differ",
-  [SOLANA_ERROR__INSTRUCTION_ERROR__EXECUTABLE_ACCOUNT_NOT_RENT_EXEMPT2]: "Executable accounts must be rent exempt",
-  [SOLANA_ERROR__INSTRUCTION_ERROR__EXECUTABLE_DATA_MODIFIED2]: "Instruction changed executable accounts data",
-  [SOLANA_ERROR__INSTRUCTION_ERROR__EXECUTABLE_LAMPORT_CHANGE2]: "Instruction changed the balance of an executable account",
-  [SOLANA_ERROR__INSTRUCTION_ERROR__EXECUTABLE_MODIFIED2]: "Instruction changed executable bit of an account",
-  [SOLANA_ERROR__INSTRUCTION_ERROR__EXTERNAL_ACCOUNT_DATA_MODIFIED2]: "Instruction modified data of an account it does not own",
-  [SOLANA_ERROR__INSTRUCTION_ERROR__EXTERNAL_ACCOUNT_LAMPORT_SPEND2]: "Instruction spent from the balance of an account it does not own",
-  [SOLANA_ERROR__INSTRUCTION_ERROR__GENERIC_ERROR2]: "Generic instruction error",
-  [SOLANA_ERROR__INSTRUCTION_ERROR__ILLEGAL_OWNER2]: "Provided owner is not allowed",
-  [SOLANA_ERROR__INSTRUCTION_ERROR__IMMUTABLE2]: "Account is immutable",
-  [SOLANA_ERROR__INSTRUCTION_ERROR__INCORRECT_AUTHORITY2]: "Incorrect authority provided",
-  [SOLANA_ERROR__INSTRUCTION_ERROR__INCORRECT_PROGRAM_ID2]: "Incorrect program id for instruction",
-  [SOLANA_ERROR__INSTRUCTION_ERROR__INSUFFICIENT_FUNDS2]: "Insufficient funds for instruction",
-  [SOLANA_ERROR__INSTRUCTION_ERROR__INVALID_ACCOUNT_DATA2]: "Invalid account data for instruction",
-  [SOLANA_ERROR__INSTRUCTION_ERROR__INVALID_ACCOUNT_OWNER2]: "Invalid account owner",
-  [SOLANA_ERROR__INSTRUCTION_ERROR__INVALID_ARGUMENT2]: "Invalid program argument",
-  [SOLANA_ERROR__INSTRUCTION_ERROR__INVALID_ERROR2]: "Program returned invalid error code",
-  [SOLANA_ERROR__INSTRUCTION_ERROR__INVALID_INSTRUCTION_DATA2]: "Invalid instruction data",
-  [SOLANA_ERROR__INSTRUCTION_ERROR__INVALID_REALLOC2]: "Failed to reallocate account data",
-  [SOLANA_ERROR__INSTRUCTION_ERROR__INVALID_SEEDS2]: "Provided seeds do not result in a valid address",
-  [SOLANA_ERROR__INSTRUCTION_ERROR__MAX_ACCOUNTS_DATA_ALLOCATIONS_EXCEEDED2]: "Accounts data allocations exceeded the maximum allowed per transaction",
-  [SOLANA_ERROR__INSTRUCTION_ERROR__MAX_ACCOUNTS_EXCEEDED2]: "Max accounts exceeded",
-  [SOLANA_ERROR__INSTRUCTION_ERROR__MAX_INSTRUCTION_TRACE_LENGTH_EXCEEDED2]: "Max instruction trace length exceeded",
-  [SOLANA_ERROR__INSTRUCTION_ERROR__MAX_SEED_LENGTH_EXCEEDED2]: "Length of the seed is too long for address generation",
-  [SOLANA_ERROR__INSTRUCTION_ERROR__MISSING_ACCOUNT2]: "An account required by the instruction is missing",
-  [SOLANA_ERROR__INSTRUCTION_ERROR__MISSING_REQUIRED_SIGNATURE2]: "Missing required signature for instruction",
-  [SOLANA_ERROR__INSTRUCTION_ERROR__MODIFIED_PROGRAM_ID2]: "Instruction illegally modified the program id of an account",
-  [SOLANA_ERROR__INSTRUCTION_ERROR__NOT_ENOUGH_ACCOUNT_KEYS2]: "Insufficient account keys for instruction",
-  [SOLANA_ERROR__INSTRUCTION_ERROR__PRIVILEGE_ESCALATION2]: "Cross-program invocation with unauthorized signer or writable account",
-  [SOLANA_ERROR__INSTRUCTION_ERROR__PROGRAM_ENVIRONMENT_SETUP_FAILURE2]: "Failed to create program execution environment",
-  [SOLANA_ERROR__INSTRUCTION_ERROR__PROGRAM_FAILED_TO_COMPILE2]: "Program failed to compile",
-  [SOLANA_ERROR__INSTRUCTION_ERROR__PROGRAM_FAILED_TO_COMPLETE2]: "Program failed to complete",
-  [SOLANA_ERROR__INSTRUCTION_ERROR__READONLY_DATA_MODIFIED2]: "Instruction modified data of a read-only account",
-  [SOLANA_ERROR__INSTRUCTION_ERROR__READONLY_LAMPORT_CHANGE2]: "Instruction changed the balance of a read-only account",
-  [SOLANA_ERROR__INSTRUCTION_ERROR__REENTRANCY_NOT_ALLOWED2]: "Cross-program invocation reentrancy not allowed for this instruction",
-  [SOLANA_ERROR__INSTRUCTION_ERROR__RENT_EPOCH_MODIFIED2]: "Instruction modified rent epoch of an account",
-  [SOLANA_ERROR__INSTRUCTION_ERROR__UNBALANCED_INSTRUCTION2]: "Sum of account balances before and after instruction do not match",
-  [SOLANA_ERROR__INSTRUCTION_ERROR__UNINITIALIZED_ACCOUNT2]: "Instruction requires an initialized account",
-  [SOLANA_ERROR__INSTRUCTION_ERROR__UNKNOWN2]: "The instruction failed with the error: $errorName",
-  [SOLANA_ERROR__INSTRUCTION_ERROR__UNSUPPORTED_PROGRAM_ID2]: "Unsupported program id",
-  [SOLANA_ERROR__INSTRUCTION_ERROR__UNSUPPORTED_SYSVAR2]: "Unsupported sysvar",
-  [SOLANA_ERROR__INVARIANT_VIOLATION__INVALID_INSTRUCTION_PLAN_KIND2]: "Invalid instruction plan kind: $kind.",
-  [SOLANA_ERROR__INSTRUCTION_PLANS__EMPTY_INSTRUCTION_PLAN2]: "The provided instruction plan is empty.",
-  [SOLANA_ERROR__INSTRUCTION_PLANS__FAILED_SINGLE_TRANSACTION_PLAN_RESULT_NOT_FOUND2]: "No failed transaction plan result was found in the provided transaction plan result.",
-  [SOLANA_ERROR__INSTRUCTION_PLANS__NON_DIVISIBLE_TRANSACTION_PLANS_NOT_SUPPORTED2]: "This transaction plan executor does not support non-divisible sequential plans. To support them, you may create your own executor such that multi-transaction atomicity is preserved — e.g. by targetting RPCs that support transaction bundles.",
-  [SOLANA_ERROR__INSTRUCTION_PLANS__FAILED_TO_EXECUTE_TRANSACTION_PLAN2]: "The provided transaction plan failed to execute. See the `transactionPlanResult` attribute for more details. Note that the `cause` property is deprecated, and a future version will not set it.",
-  [SOLANA_ERROR__INSTRUCTION_PLANS__MESSAGE_CANNOT_ACCOMMODATE_PLAN2]: "The provided message has insufficient capacity to accommodate the next instruction(s) in this plan. Expected at least $numBytesRequired free byte(s), got $numFreeBytes byte(s).",
-  [SOLANA_ERROR__INVARIANT_VIOLATION__INVALID_TRANSACTION_PLAN_KIND2]: "Invalid transaction plan kind: $kind.",
-  [SOLANA_ERROR__INSTRUCTION_PLANS__MESSAGE_PACKER_ALREADY_COMPLETE2]: "No more instructions to pack; the message packer has completed the instruction plan.",
-  [SOLANA_ERROR__INSTRUCTION_PLANS__UNEXPECTED_INSTRUCTION_PLAN2]: "Unexpected instruction plan. Expected $expectedKind plan, got $actualKind plan.",
-  [SOLANA_ERROR__INSTRUCTION_PLANS__UNEXPECTED_TRANSACTION_PLAN2]: "Unexpected transaction plan. Expected $expectedKind plan, got $actualKind plan.",
-  [SOLANA_ERROR__INSTRUCTION_PLANS__UNEXPECTED_TRANSACTION_PLAN_RESULT2]: "Unexpected transaction plan result. Expected $expectedKind plan, got $actualKind plan.",
-  [SOLANA_ERROR__INSTRUCTION_PLANS__EXPECTED_SUCCESSFUL_TRANSACTION_PLAN_RESULT2]: "Expected a successful transaction plan result. I.e. there is at least one failed or cancelled transaction in the plan.",
-  [SOLANA_ERROR__INSTRUCTION__EXPECTED_TO_HAVE_ACCOUNTS2]: "The instruction does not have any accounts.",
-  [SOLANA_ERROR__INSTRUCTION__EXPECTED_TO_HAVE_DATA2]: "The instruction does not have any data.",
-  [SOLANA_ERROR__INSTRUCTION__PROGRAM_ID_MISMATCH2]: "Expected instruction to have progress address $expectedProgramAddress, got $actualProgramAddress.",
-  [SOLANA_ERROR__INVALID_BLOCKHASH_BYTE_LENGTH2]: "Expected base58 encoded blockhash to decode to a byte array of length 32. Actual length: $actualLength.",
-  [SOLANA_ERROR__INVALID_NONCE2]: "The nonce `$expectedNonceValue` is no longer valid. It has advanced to `$actualNonceValue`",
-  [SOLANA_ERROR__INVARIANT_VIOLATION__CACHED_ABORTABLE_ITERABLE_CACHE_ENTRY_MISSING2]: "Invariant violation: Found no abortable iterable cache entry for key `$cacheKey`. It should be impossible to hit this error; please file an issue at https://sola.na/web3invariant",
-  [SOLANA_ERROR__INVARIANT_VIOLATION__DATA_PUBLISHER_CHANNEL_UNIMPLEMENTED2]: "Invariant violation: This data publisher does not publish to the channel named `$channelName`. Supported channels include $supportedChannelNames.",
-  [SOLANA_ERROR__INVARIANT_VIOLATION__SUBSCRIPTION_ITERATOR_MUST_NOT_POLL_BEFORE_RESOLVING_EXISTING_MESSAGE_PROMISE2]: "Invariant violation: WebSocket message iterator state is corrupt; iterated without first resolving existing message promise. It should be impossible to hit this error; please file an issue at https://sola.na/web3invariant",
-  [SOLANA_ERROR__INVARIANT_VIOLATION__SUBSCRIPTION_ITERATOR_STATE_MISSING2]: "Invariant violation: WebSocket message iterator is missing state storage. It should be impossible to hit this error; please file an issue at https://sola.na/web3invariant",
-  [SOLANA_ERROR__INVARIANT_VIOLATION__SWITCH_MUST_BE_EXHAUSTIVE2]: "Invariant violation: Switch statement non-exhaustive. Received unexpected value `$unexpectedValue`. It should be impossible to hit this error; please file an issue at https://sola.na/web3invariant",
-  [SOLANA_ERROR__JSON_RPC__INTERNAL_ERROR2]: "JSON-RPC error: Internal JSON-RPC error ($__serverMessage)",
-  [SOLANA_ERROR__JSON_RPC__INVALID_PARAMS2]: "JSON-RPC error: Invalid method parameter(s) ($__serverMessage)",
-  [SOLANA_ERROR__JSON_RPC__INVALID_REQUEST2]: "JSON-RPC error: The JSON sent is not a valid `Request` object ($__serverMessage)",
-  [SOLANA_ERROR__JSON_RPC__METHOD_NOT_FOUND2]: "JSON-RPC error: The method does not exist / is not available ($__serverMessage)",
-  [SOLANA_ERROR__JSON_RPC__PARSE_ERROR2]: "JSON-RPC error: An error occurred on the server while parsing the JSON text ($__serverMessage)",
-  [SOLANA_ERROR__JSON_RPC__SCAN_ERROR2]: "$__serverMessage",
-  [SOLANA_ERROR__JSON_RPC__SERVER_ERROR_BLOCK_CLEANED_UP2]: "$__serverMessage",
-  [SOLANA_ERROR__JSON_RPC__SERVER_ERROR_BLOCK_NOT_AVAILABLE2]: "$__serverMessage",
-  [SOLANA_ERROR__JSON_RPC__SERVER_ERROR_BLOCK_STATUS_NOT_AVAILABLE_YET2]: "$__serverMessage",
-  [SOLANA_ERROR__JSON_RPC__SERVER_ERROR_EPOCH_REWARDS_PERIOD_ACTIVE2]: "Epoch rewards period still active at slot $slot",
-  [SOLANA_ERROR__JSON_RPC__SERVER_ERROR_FILTER_TRANSACTION_NOT_FOUND2]: "$__serverMessage",
-  [SOLANA_ERROR__JSON_RPC__SERVER_ERROR_KEY_EXCLUDED_FROM_SECONDARY_INDEX2]: "$__serverMessage",
-  [SOLANA_ERROR__JSON_RPC__SERVER_ERROR_LONG_TERM_STORAGE_SLOT_SKIPPED2]: "$__serverMessage",
-  [SOLANA_ERROR__JSON_RPC__SERVER_ERROR_LONG_TERM_STORAGE_UNREACHABLE2]: "Failed to query long-term storage; please try again",
-  [SOLANA_ERROR__JSON_RPC__SERVER_ERROR_MIN_CONTEXT_SLOT_NOT_REACHED2]: "Minimum context slot has not been reached",
-  [SOLANA_ERROR__JSON_RPC__SERVER_ERROR_NODE_UNHEALTHY2]: "Node is unhealthy; behind by $numSlotsBehind slots",
-  [SOLANA_ERROR__JSON_RPC__SERVER_ERROR_NO_SLOT_HISTORY2]: "No slot history",
-  [SOLANA_ERROR__JSON_RPC__SERVER_ERROR_NO_SNAPSHOT2]: "No snapshot",
-  [SOLANA_ERROR__JSON_RPC__SERVER_ERROR_SEND_TRANSACTION_PREFLIGHT_FAILURE2]: "Transaction simulation failed",
-  [SOLANA_ERROR__JSON_RPC__SERVER_ERROR_SLOT_NOT_EPOCH_BOUNDARY2]: "Rewards cannot be found because slot $slot is not the epoch boundary. This may be due to gap in the queried node's local ledger or long-term storage",
-  [SOLANA_ERROR__JSON_RPC__SERVER_ERROR_SLOT_SKIPPED2]: "$__serverMessage",
-  [SOLANA_ERROR__JSON_RPC__SERVER_ERROR_TRANSACTION_HISTORY_NOT_AVAILABLE2]: "Transaction history is not available from this node",
-  [SOLANA_ERROR__JSON_RPC__SERVER_ERROR_TRANSACTION_PRECOMPILE_VERIFICATION_FAILURE2]: "$__serverMessage",
-  [SOLANA_ERROR__JSON_RPC__SERVER_ERROR_TRANSACTION_SIGNATURE_LEN_MISMATCH2]: "Transaction signature length mismatch",
-  [SOLANA_ERROR__JSON_RPC__SERVER_ERROR_TRANSACTION_SIGNATURE_VERIFICATION_FAILURE2]: "Transaction signature verification failure",
-  [SOLANA_ERROR__JSON_RPC__SERVER_ERROR_UNSUPPORTED_TRANSACTION_VERSION2]: "$__serverMessage",
-  [SOLANA_ERROR__KEYS__INVALID_BASE58_IN_GRIND_REGEX2]: "The grind regex `/$source/` contains the character `$character`, which is not in the base58 alphabet and can never match a Solana address.",
-  [SOLANA_ERROR__KEYS__INVALID_KEY_PAIR_BYTE_LENGTH2]: "Key pair bytes must be of length 64, got $byteLength.",
-  [SOLANA_ERROR__KEYS__INVALID_PRIVATE_KEY_BYTE_LENGTH2]: "Expected private key bytes with length 32. Actual length: $actualLength.",
-  [SOLANA_ERROR__KEYS__INVALID_SIGNATURE_BYTE_LENGTH2]: "Expected base58-encoded signature to decode to a byte array of length 64. Actual length: $actualLength.",
-  [SOLANA_ERROR__KEYS__PUBLIC_KEY_MUST_MATCH_PRIVATE_KEY2]: "The provided private key does not match the provided public key.",
-  [SOLANA_ERROR__KEYS__SIGNATURE_STRING_LENGTH_OUT_OF_RANGE2]: "Expected base58-encoded signature string of length in the range [64, 88]. Actual length: $actualLength.",
-  [SOLANA_ERROR__KEYS__WRITE_KEY_PAIR_UNSUPPORTED_ENVIRONMENT2]: "Writing a key pair to disk is not supported in this environment.",
-  [SOLANA_ERROR__LAMPORTS_OUT_OF_RANGE2]: "Lamports value must be in the range [0, 2e64-1]",
-  [SOLANA_ERROR__MALFORMED_BIGINT_STRING2]: "`$value` cannot be parsed as a `BigInt`",
-  [SOLANA_ERROR__MALFORMED_JSON_RPC_ERROR2]: "$message",
-  [SOLANA_ERROR__MALFORMED_NUMBER_STRING2]: "`$value` cannot be parsed as a `Number`",
-  [SOLANA_ERROR__NONCE_ACCOUNT_NOT_FOUND2]: "No nonce account could be found at address `$nonceAccountAddress`",
-  [SOLANA_ERROR__OFFCHAIN_MESSAGE__INVALID_APPLICATION_DOMAIN_BYTE_LENGTH2]: "Expected base58 encoded application domain to decode to a byte array of length 32. Actual length: $actualLength.",
-  [SOLANA_ERROR__OFFCHAIN_MESSAGE__ADDRESSES_CANNOT_SIGN_OFFCHAIN_MESSAGE2]: "Attempted to sign an offchain message with an address that is not a signer for it",
-  [SOLANA_ERROR__OFFCHAIN_MESSAGE__APPLICATION_DOMAIN_STRING_LENGTH_OUT_OF_RANGE2]: "Expected base58-encoded application domain string of length in the range [32, 44]. Actual length: $actualLength.",
-  [SOLANA_ERROR__OFFCHAIN_MESSAGE__ENVELOPE_SIGNERS_MISMATCH2]: "The signer addresses in this offchain message envelope do not match the list of required signers in the message preamble. These unexpected signers were present in the envelope: `[$unexpectedSigners]`. These required signers were missing from the envelope `[$missingSigners]`.",
-  [SOLANA_ERROR__OFFCHAIN_MESSAGE__MAXIMUM_LENGTH_EXCEEDED2]: "The message body provided has a byte-length of $actualBytes. The maximum allowable byte-length is $maxBytes",
-  [SOLANA_ERROR__OFFCHAIN_MESSAGE__MESSAGE_FORMAT_MISMATCH2]: "Expected message format $expectedMessageFormat, got $actualMessageFormat",
-  [SOLANA_ERROR__OFFCHAIN_MESSAGE__MESSAGE_LENGTH_MISMATCH2]: "The message length specified in the message preamble is $specifiedLength bytes. The actual length of the message is $actualLength bytes.",
-  [SOLANA_ERROR__OFFCHAIN_MESSAGE__MESSAGE_MUST_BE_NON_EMPTY2]: "Offchain message content must be non-empty",
-  [SOLANA_ERROR__OFFCHAIN_MESSAGE__NUM_REQUIRED_SIGNERS_CANNOT_BE_ZERO2]: "Offchain message must specify the address of at least one required signer",
-  [SOLANA_ERROR__OFFCHAIN_MESSAGE__NUM_ENVELOPE_SIGNATURES_CANNOT_BE_ZERO2]: "Offchain message envelope must reserve space for at least one signature",
-  [SOLANA_ERROR__OFFCHAIN_MESSAGE__NUM_SIGNATURES_MISMATCH2]: "The offchain message preamble specifies $numRequiredSignatures required signature(s), got $signaturesLength.",
-  [SOLANA_ERROR__OFFCHAIN_MESSAGE__SIGNATORIES_MUST_BE_SORTED2]: "The signatories of this offchain message must be listed in lexicographical order",
-  [SOLANA_ERROR__OFFCHAIN_MESSAGE__SIGNATORIES_MUST_BE_UNIQUE2]: "An address must be listed no more than once among the signatories of an offchain message",
-  [SOLANA_ERROR__OFFCHAIN_MESSAGE__SIGNATURES_MISSING2]: "Offchain message is missing signatures for addresses: $addresses.",
-  [SOLANA_ERROR__OFFCHAIN_MESSAGE__SIGNATURE_VERIFICATION_FAILURE2]: "Offchain message signature verification failed. Signature mismatch for required signatories [$signatoriesWithInvalidSignatures]. Missing signatures for signatories [$signatoriesWithMissingSignatures]",
-  [SOLANA_ERROR__OFFCHAIN_MESSAGE__RESTRICTED_ASCII_BODY_CHARACTER_OUT_OF_RANGE2]: "The message body provided contains characters whose codes fall outside the allowed range. In order to ensure clear-signing compatiblity with hardware wallets, the message may only contain line feeds and characters in the range [\\x20-\\x7e].",
-  [SOLANA_ERROR__OFFCHAIN_MESSAGE__UNEXPECTED_VERSION2]: "Expected offchain message version $expectedVersion. Got $actualVersion.",
-  [SOLANA_ERROR__OFFCHAIN_MESSAGE__VERSION_NUMBER_NOT_SUPPORTED2]: "This version of Kit does not support decoding offchain messages with version $unsupportedVersion. The current max supported version is 0.",
-  [SOLANA_ERROR__PROGRAM_CLIENTS__FAILED_TO_IDENTIFY_ACCOUNT2]: "The provided account could not be identified as an account from the $programName program.",
-  [SOLANA_ERROR__PROGRAM_CLIENTS__FAILED_TO_IDENTIFY_INSTRUCTION2]: "The provided instruction could not be identified as an instruction from the $programName program.",
-  [SOLANA_ERROR__PROGRAM_CLIENTS__INSUFFICIENT_ACCOUNT_METAS2]: "The provided instruction is missing some accounts. Expected at least $expectedAccountMetas account(s), got $actualAccountMetas.",
-  [SOLANA_ERROR__PROGRAM_CLIENTS__RESOLVED_INSTRUCTION_INPUT_MUST_BE_NON_NULL2]: "Expected resolved instruction input '$inputName' to be non-null.",
-  [SOLANA_ERROR__PROGRAM_CLIENTS__UNEXPECTED_RESOLVED_INSTRUCTION_INPUT_TYPE2]: "Expected resolved instruction input '$inputName' to be of type `$expectedType`.",
-  [SOLANA_ERROR__PROGRAM_CLIENTS__UNRECOGNIZED_ACCOUNT_TYPE2]: "Unrecognized account type '$accountType' for the $programName program.",
-  [SOLANA_ERROR__PROGRAM_CLIENTS__UNRECOGNIZED_INSTRUCTION_TYPE2]: "Unrecognized instruction type '$instructionType' for the $programName program.",
-  [SOLANA_ERROR__RPC_SUBSCRIPTIONS__CANNOT_CREATE_SUBSCRIPTION_PLAN2]: "The notification name must end in 'Notifications' and the API must supply a subscription plan creator function for the notification '$notificationName'.",
-  [SOLANA_ERROR__RPC_SUBSCRIPTIONS__CHANNEL_CLOSED_BEFORE_MESSAGE_BUFFERED2]: "WebSocket was closed before payload could be added to the send buffer",
-  [SOLANA_ERROR__RPC_SUBSCRIPTIONS__CHANNEL_CONNECTION_CLOSED2]: "WebSocket connection closed",
-  [SOLANA_ERROR__RPC_SUBSCRIPTIONS__CHANNEL_FAILED_TO_CONNECT2]: "WebSocket failed to connect",
-  [SOLANA_ERROR__RPC_SUBSCRIPTIONS__EXPECTED_SERVER_SUBSCRIPTION_ID2]: "Failed to obtain a subscription id from the server",
-  [SOLANA_ERROR__RPC__API_PLAN_MISSING_FOR_RPC_METHOD2]: "Could not find an API plan for RPC method: `$method`",
-  [SOLANA_ERROR__RPC__INTEGER_OVERFLOW2]: "The $argumentLabel argument to the `$methodName` RPC method$optionalPathLabel was `$value`. This number is unsafe for use with the Solana JSON-RPC because it exceeds `Number.MAX_SAFE_INTEGER`.",
-  [SOLANA_ERROR__RPC__TRANSPORT_HTTP_ERROR2]: "HTTP error ($statusCode): $message",
-  [SOLANA_ERROR__RPC__TRANSPORT_HTTP_HEADER_FORBIDDEN2]: "HTTP header(s) forbidden: $headers. Learn more at https://developer.mozilla.org/en-US/docs/Glossary/Forbidden_header_name.",
-  [SOLANA_ERROR__SIGNER__ADDRESS_CANNOT_HAVE_MULTIPLE_SIGNERS2]: "Multiple distinct signers were identified for address `$address`. Please ensure that you are using the same signer instance for each address.",
-  [SOLANA_ERROR__SIGNER__EXPECTED_KEY_PAIR_SIGNER2]: "The provided value does not implement the `KeyPairSigner` interface",
-  [SOLANA_ERROR__SIGNER__EXPECTED_MESSAGE_MODIFYING_SIGNER2]: "The provided value does not implement the `MessageModifyingSigner` interface",
-  [SOLANA_ERROR__SIGNER__EXPECTED_MESSAGE_PARTIAL_SIGNER2]: "The provided value does not implement the `MessagePartialSigner` interface",
-  [SOLANA_ERROR__SIGNER__EXPECTED_MESSAGE_SIGNER2]: "The provided value does not implement any of the `MessageSigner` interfaces",
-  [SOLANA_ERROR__SIGNER__EXPECTED_TRANSACTION_MODIFYING_SIGNER2]: "The provided value does not implement the `TransactionModifyingSigner` interface",
-  [SOLANA_ERROR__SIGNER__EXPECTED_TRANSACTION_PARTIAL_SIGNER2]: "The provided value does not implement the `TransactionPartialSigner` interface",
-  [SOLANA_ERROR__SIGNER__EXPECTED_TRANSACTION_SENDING_SIGNER2]: "The provided value does not implement the `TransactionSendingSigner` interface",
-  [SOLANA_ERROR__SIGNER__EXPECTED_TRANSACTION_SIGNER2]: "The provided value does not implement any of the `TransactionSigner` interfaces",
-  [SOLANA_ERROR__SIGNER__TRANSACTION_CANNOT_HAVE_MULTIPLE_SENDING_SIGNERS2]: "More than one `TransactionSendingSigner` was identified.",
-  [SOLANA_ERROR__SIGNER__TRANSACTION_SENDING_SIGNER_MISSING2]: "No `TransactionSendingSigner` was identified. Please provide a valid `TransactionWithSingleSendingSigner` transaction.",
-  [SOLANA_ERROR__SIGNER__WALLET_ACCOUNT_CANNOT_SIGN_TRANSACTION2]: "The wallet account $address cannot be used to create a transaction signer because it does not implement either the `solana:signTransaction` or `solana:signAndSendTransaction` feature. At least one of these features is required. The account supports the following features: $supportedFeatures.",
-  [SOLANA_ERROR__SIGNER__WALLET_MULTISIGN_UNIMPLEMENTED2]: "Wallet account signers do not support signing multiple messages/transactions in a single operation",
-  [SOLANA_ERROR__SUBSCRIBABLE__RETRY_NOT_SUPPORTED2]: "This `ReactiveStreamStore` does not support retry. Use `createReactiveStoreFromDataPublisherFactory` to construct a retryable store.",
-  [SOLANA_ERROR__SUBTLE_CRYPTO__CANNOT_EXPORT_NON_EXTRACTABLE_KEY2]: "Cannot export a non-extractable key.",
-  [SOLANA_ERROR__SUBTLE_CRYPTO__DIGEST_UNIMPLEMENTED2]: "No digest implementation could be found.",
-  [SOLANA_ERROR__SUBTLE_CRYPTO__DISALLOWED_IN_INSECURE_CONTEXT2]: "Cryptographic operations are only allowed in secure browser contexts. Read more here: https://developer.mozilla.org/en-US/docs/Web/Security/Secure_Contexts.",
-  [SOLANA_ERROR__SUBTLE_CRYPTO__ED25519_ALGORITHM_UNIMPLEMENTED2]: `This runtime does not support the generation of Ed25519 key pairs.
-
-Install @solana/webcrypto-ed25519-polyfill and call its \`install\` function before generating keys in environments that do not support Ed25519.
-
-For a list of runtimes that currently support Ed25519 operations, visit https://github.com/WICG/webcrypto-secure-curves/issues/20.`,
-  [SOLANA_ERROR__SUBTLE_CRYPTO__EXPORT_FUNCTION_UNIMPLEMENTED2]: "No key export implementation could be found.",
-  [SOLANA_ERROR__SUBTLE_CRYPTO__GENERATE_FUNCTION_UNIMPLEMENTED2]: "No key generation implementation could be found.",
-  [SOLANA_ERROR__SUBTLE_CRYPTO__SIGN_FUNCTION_UNIMPLEMENTED2]: "No signing implementation could be found.",
-  [SOLANA_ERROR__SUBTLE_CRYPTO__VERIFY_FUNCTION_UNIMPLEMENTED2]: "No signature verification implementation could be found.",
-  [SOLANA_ERROR__TIMESTAMP_OUT_OF_RANGE2]: "Timestamp value must be in the range [-(2n ** 63n), (2n ** 63n) - 1]. `$value` given",
-  [SOLANA_ERROR__TRANSACTION_ERROR__ACCOUNT_BORROW_OUTSTANDING2]: "Transaction processing left an account with an outstanding borrowed reference",
-  [SOLANA_ERROR__TRANSACTION_ERROR__ACCOUNT_IN_USE2]: "Account in use",
-  [SOLANA_ERROR__TRANSACTION_ERROR__ACCOUNT_LOADED_TWICE2]: "Account loaded twice",
-  [SOLANA_ERROR__TRANSACTION_ERROR__ACCOUNT_NOT_FOUND2]: "Attempt to debit an account but found no record of a prior credit.",
-  [SOLANA_ERROR__TRANSACTION_ERROR__ADDRESS_LOOKUP_TABLE_NOT_FOUND2]: "Transaction loads an address table account that doesn't exist",
-  [SOLANA_ERROR__TRANSACTION_ERROR__ALREADY_PROCESSED2]: "This transaction has already been processed",
-  [SOLANA_ERROR__TRANSACTION_ERROR__BLOCKHASH_NOT_FOUND2]: "Blockhash not found",
-  [SOLANA_ERROR__TRANSACTION_ERROR__CALL_CHAIN_TOO_DEEP2]: "Loader call chain is too deep",
-  [SOLANA_ERROR__TRANSACTION_ERROR__CLUSTER_MAINTENANCE2]: "Transactions are currently disabled due to cluster maintenance",
-  [SOLANA_ERROR__TRANSACTION_ERROR__DUPLICATE_INSTRUCTION2]: "Transaction contains a duplicate instruction ($index) that is not allowed",
-  [SOLANA_ERROR__TRANSACTION_ERROR__INSUFFICIENT_FUNDS_FOR_FEE2]: "Insufficient funds for fee",
-  [SOLANA_ERROR__TRANSACTION_ERROR__INSUFFICIENT_FUNDS_FOR_RENT2]: "Transaction results in an account ($accountIndex) with insufficient funds for rent",
-  [SOLANA_ERROR__TRANSACTION_ERROR__INVALID_ACCOUNT_FOR_FEE2]: "This account may not be used to pay transaction fees",
-  [SOLANA_ERROR__TRANSACTION_ERROR__INVALID_ACCOUNT_INDEX2]: "Transaction contains an invalid account reference",
-  [SOLANA_ERROR__TRANSACTION_ERROR__INVALID_ADDRESS_LOOKUP_TABLE_DATA2]: "Transaction loads an address table account with invalid data",
-  [SOLANA_ERROR__TRANSACTION_ERROR__INVALID_ADDRESS_LOOKUP_TABLE_INDEX2]: "Transaction address table lookup uses an invalid index",
-  [SOLANA_ERROR__TRANSACTION_ERROR__INVALID_ADDRESS_LOOKUP_TABLE_OWNER2]: "Transaction loads an address table account with an invalid owner",
-  [SOLANA_ERROR__TRANSACTION_ERROR__INVALID_LOADED_ACCOUNTS_DATA_SIZE_LIMIT2]: "LoadedAccountsDataSizeLimit set for transaction must be greater than 0.",
-  [SOLANA_ERROR__TRANSACTION_ERROR__INVALID_PROGRAM_FOR_EXECUTION2]: "This program may not be used for executing instructions",
-  [SOLANA_ERROR__TRANSACTION_ERROR__INVALID_RENT_PAYING_ACCOUNT2]: "Transaction leaves an account with a lower balance than rent-exempt minimum",
-  [SOLANA_ERROR__TRANSACTION_ERROR__INVALID_WRITABLE_ACCOUNT2]: "Transaction loads a writable account that cannot be written",
-  [SOLANA_ERROR__TRANSACTION_ERROR__MAX_LOADED_ACCOUNTS_DATA_SIZE_EXCEEDED2]: "Transaction exceeded max loaded accounts data size cap",
-  [SOLANA_ERROR__TRANSACTION_ERROR__MISSING_SIGNATURE_FOR_FEE2]: "Transaction requires a fee but has no signature present",
-  [SOLANA_ERROR__TRANSACTION_ERROR__PROGRAM_ACCOUNT_NOT_FOUND2]: "Attempt to load a program that does not exist",
-  [SOLANA_ERROR__TRANSACTION_ERROR__PROGRAM_EXECUTION_TEMPORARILY_RESTRICTED2]: "Execution of the program referenced by account at index $accountIndex is temporarily restricted.",
-  [SOLANA_ERROR__TRANSACTION_ERROR__RESANITIZATION_NEEDED2]: "ResanitizationNeeded",
-  [SOLANA_ERROR__TRANSACTION_ERROR__SANITIZE_FAILURE2]: "Transaction failed to sanitize accounts offsets correctly",
-  [SOLANA_ERROR__TRANSACTION_ERROR__SIGNATURE_FAILURE2]: "Transaction did not pass signature verification",
-  [SOLANA_ERROR__TRANSACTION_ERROR__TOO_MANY_ACCOUNT_LOCKS2]: "Transaction locked too many accounts",
-  [SOLANA_ERROR__TRANSACTION_ERROR__UNBALANCED_TRANSACTION2]: "Sum of account balances before and after transaction do not match",
-  [SOLANA_ERROR__TRANSACTION_ERROR__UNKNOWN2]: "The transaction failed with the error `$errorName`",
-  [SOLANA_ERROR__TRANSACTION_ERROR__UNSUPPORTED_VERSION2]: "Transaction version is unsupported",
-  [SOLANA_ERROR__TRANSACTION_ERROR__WOULD_EXCEED_ACCOUNT_DATA_BLOCK_LIMIT2]: "Transaction would exceed account data limit within the block",
-  [SOLANA_ERROR__TRANSACTION_ERROR__WOULD_EXCEED_ACCOUNT_DATA_TOTAL_LIMIT2]: "Transaction would exceed total account data limit",
-  [SOLANA_ERROR__TRANSACTION_ERROR__WOULD_EXCEED_MAX_ACCOUNT_COST_LIMIT2]: "Transaction would exceed max account limit within the block",
-  [SOLANA_ERROR__TRANSACTION_ERROR__WOULD_EXCEED_MAX_BLOCK_COST_LIMIT2]: "Transaction would exceed max Block Cost Limit",
-  [SOLANA_ERROR__TRANSACTION_ERROR__WOULD_EXCEED_MAX_VOTE_COST_LIMIT2]: "Transaction would exceed max Vote Cost Limit",
-  [SOLANA_ERROR__TRANSACTION__ADDRESSES_CANNOT_SIGN_TRANSACTION2]: "Attempted to sign a transaction with an address that is not a signer for it",
-  [SOLANA_ERROR__TRANSACTION__ADDRESS_MISSING2]: "Transaction is missing an address at index: $index.",
-  [SOLANA_ERROR__TRANSACTION__CANNOT_ENCODE_WITH_EMPTY_SIGNATURES2]: "Transaction has no expected signers therefore it cannot be encoded",
-  [SOLANA_ERROR__TRANSACTION__EXCEEDS_SIZE_LIMIT2]: "Transaction size $transactionSize exceeds limit of $transactionSizeLimit bytes",
-  [SOLANA_ERROR__TRANSACTION__EXPECTED_BLOCKHASH_LIFETIME2]: "Transaction does not have a blockhash lifetime",
-  [SOLANA_ERROR__TRANSACTION__EXPECTED_NONCE_LIFETIME2]: "Transaction is not a durable nonce transaction",
-  [SOLANA_ERROR__TRANSACTION__FAILED_TO_DECOMPILE_ADDRESS_LOOKUP_TABLE_CONTENTS_MISSING2]: "Contents of these address lookup tables unknown: $lookupTableAddresses",
-  [SOLANA_ERROR__TRANSACTION__FAILED_TO_DECOMPILE_ADDRESS_LOOKUP_TABLE_INDEX_OUT_OF_RANGE2]: "Lookup of address at index $highestRequestedIndex failed for lookup table `$lookupTableAddress`. Highest known index is $highestKnownIndex. The lookup table may have been extended since its contents were retrieved",
-  [SOLANA_ERROR__TRANSACTION__FAILED_TO_DECOMPILE_FEE_PAYER_MISSING2]: "No fee payer set in CompiledTransaction",
-  [SOLANA_ERROR__TRANSACTION__FAILED_TO_DECOMPILE_INSTRUCTION_PROGRAM_ADDRESS_NOT_FOUND2]: "Could not find program address at index $index",
-  [SOLANA_ERROR__TRANSACTION__FAILED_TO_ESTIMATE_COMPUTE_LIMIT2]: "Failed to estimate the compute unit consumption for this transaction message. This is likely because simulating the transaction failed. Inspect the `cause` property of this error to learn more",
-  [SOLANA_ERROR__TRANSACTION__FAILED_TO_ESTIMATE_LOADED_ACCOUNTS_DATA_SIZE_LIMIT2]: "Failed to estimate the loaded accounts data size for this transaction message. The RPC did not return a `loadedAccountsDataSize` value from simulation. This value is required for version 1 transactions",
-  [SOLANA_ERROR__TRANSACTION__FAILED_WHEN_SIMULATING_TO_ESTIMATE_COMPUTE_LIMIT2]: "Transaction failed when it was simulated in order to estimate the compute unit consumption. The compute unit estimate provided is for a transaction that failed when simulated and may not be representative of the compute units this transaction would consume if successful. Inspect the `cause` property of this error to learn more",
-  [SOLANA_ERROR__TRANSACTION__FAILED_WHEN_SIMULATING_TO_ESTIMATE_RESOURCE_LIMITS2]: "Transaction failed when it was simulated in order to estimate its resource limits. The resource limit estimates provided are for a transaction that failed when simulated and may not be representative of the resources this transaction would consume if successful. Inspect the `cause` property of this error to learn more",
-  [SOLANA_ERROR__TRANSACTION__FEE_PAYER_MISSING2]: "Transaction is missing a fee payer.",
-  [SOLANA_ERROR__TRANSACTION__FEE_PAYER_SIGNATURE_MISSING2]: "Could not determine this transaction's signature. Make sure that the transaction has been signed by its fee payer.",
-  [SOLANA_ERROR__TRANSACTION__INVALID_NONCE_TRANSACTION_FIRST_INSTRUCTION_MUST_BE_ADVANCE_NONCE2]: "Transaction first instruction is not advance nonce account instruction.",
-  [SOLANA_ERROR__TRANSACTION__INVALID_NONCE_TRANSACTION_INSTRUCTIONS_MISSING2]: "Transaction with no instructions cannot be durable nonce transaction.",
-  [SOLANA_ERROR__TRANSACTION__INVOKED_PROGRAMS_CANNOT_PAY_FEES2]: "This transaction includes an address (`$programAddress`) which is both invoked and set as the fee payer. Program addresses may not pay fees",
-  [SOLANA_ERROR__TRANSACTION__INVOKED_PROGRAMS_MUST_NOT_BE_WRITABLE2]: "This transaction includes an address (`$programAddress`) which is both invoked and marked writable. Program addresses may not be writable",
-  [SOLANA_ERROR__TRANSACTION__MESSAGE_SIGNATURES_MISMATCH2]: "The transaction message expected the transaction to have $numRequiredSignatures signatures, got $signaturesLength.",
-  [SOLANA_ERROR__TRANSACTION__SIGNATURES_MISSING2]: "Transaction is missing signatures for addresses: $addresses.",
-  [SOLANA_ERROR__TRANSACTION__VERSION_NUMBER_OUT_OF_RANGE2]: "Transaction version must be in the range [0, 127]. `$actualVersion` given",
-  [SOLANA_ERROR__TRANSACTION__VERSION_NUMBER_NOT_SUPPORTED2]: "This version of Kit does not support decoding transactions with version $unsupportedVersion. The current max supported version is 1.",
-  [SOLANA_ERROR__TRANSACTION__NONCE_ACCOUNT_CANNOT_BE_IN_LOOKUP_TABLE2]: "The transaction has a durable nonce lifetime (with nonce `$nonce`), but the nonce account address is in a lookup table. The lifetime constraint cannot be constructed without fetching the lookup tables for the transaction.",
-  [SOLANA_ERROR__TRANSACTION__INVALID_CONFIG_MASK_PRIORITY_FEE_BITS2]: "Invalid transaction config mask: $mask. Bits 0 and 1 must match (both set or both unset)",
-  [SOLANA_ERROR__TRANSACTION__MALFORMED_MESSAGE_BYTES2]: "Transaction message bytes are malformed: $messageBytes",
-  [SOLANA_ERROR__TRANSACTION__CANNOT_ENCODE_WITH_EMPTY_MESSAGE_BYTES2]: "Transaction message bytes are empty, so the transaction cannot be encoded",
-  [SOLANA_ERROR__TRANSACTION__CANNOT_DECODE_EMPTY_TRANSACTION_BYTES2]: "Transaction bytes are empty, so no transaction can be decoded",
-  [SOLANA_ERROR__TRANSACTION__VERSION_ZERO_MUST_BE_ENCODED_WITH_SIGNATURES_FIRST2]: "Transaction version 0 must be encoded with signatures first. This transaction was encoded with first byte $firstByte, which is expected to be a signature count for v0 transactions.",
-  [SOLANA_ERROR__TRANSACTION__SIGNATURE_COUNT_TOO_HIGH_FOR_TRANSACTION_BYTES2]: "The provided transaction bytes expect that there should be $numExpectedSignatures signatures, but the bytes are not long enough to contain a transaction message with this many signatures. The provided bytes are $transactionBytesLength bytes long.",
-  [SOLANA_ERROR__TRANSACTION__INVALID_NONCE_ACCOUNT_INDEX2]: "The transaction has a durable nonce lifetime, but the nonce account index is invalid. Expected a nonce account index less than $numberOfStaticAccounts, got $nonceAccountIndex.",
-  [SOLANA_ERROR__TRANSACTION__INVALID_CONFIG_VALUE_KIND2]: "The transaction config value for $configName has the incorrect kind. Expected $expectedKind, got $actualKind.",
-  [SOLANA_ERROR__TRANSACTION__INSTRUCTION_HEADERS_PAYLOADS_MISMATCH2]: "The transaction does not have the same number of instruction headers and instruction payloads. Got $numInstructionHeaders instruction headers, and $numInstructionPayloads instruction payloads.",
-  [SOLANA_ERROR__TRANSACTION__TOO_MANY_SIGNER_ADDRESSES2]: "Transaction has $actualCount unique signer addresses but the maximum allowed is $maxAllowed",
-  [SOLANA_ERROR__TRANSACTION__TOO_MANY_ACCOUNT_ADDRESSES2]: "Transaction has $actualCount unique account addresses but the maximum allowed is $maxAllowed",
-  [SOLANA_ERROR__TRANSACTION__TOO_MANY_INSTRUCTIONS2]: "Transaction has $actualCount instructions but the maximum allowed is $maxAllowed",
-  [SOLANA_ERROR__TRANSACTION__TOO_MANY_ACCOUNTS_IN_INSTRUCTION2]: "The instruction at index $instructionIndex has $actualCount account references but the maximum allowed is $maxAllowed",
-  [SOLANA_ERROR__WALLET__NOT_CONNECTED2]: "Cannot $operation: no wallet connected",
-  [SOLANA_ERROR__WALLET__NO_SIGNER_CONNECTED2]: "No signing wallet connected (status: $status)",
-  [SOLANA_ERROR__WALLET__SIGNER_NOT_AVAILABLE2]: "Connected wallet does not support signing",
-  [SOLANA_ERROR__WALLET__ACCOUNT_NOT_AVAILABLE2]: 'Account $address is not available in wallet "$walletName"'
-};
-var INSTRUCTION_ERROR_RANGE_SIZE2 = 1000;
-var START_INDEX2 = "i";
-var TYPE2 = "t";
-function getHumanReadableErrorMessage2(code, context = {}) {
-  const messageFormatString = SolanaErrorMessages2[code];
-  if (messageFormatString.length === 0) {
-    return "";
-  }
-  let state;
-  function commitStateUpTo(endIndex) {
-    if (state[TYPE2] === 2) {
-      const variableName = messageFormatString.slice(state[START_INDEX2] + 1, endIndex);
-      fragments.push(variableName in context ? `${context[variableName]}` : `$${variableName}`);
-    } else if (state[TYPE2] === 1) {
-      fragments.push(messageFormatString.slice(state[START_INDEX2], endIndex));
-    }
-  }
-  const fragments = [];
-  messageFormatString.split("").forEach((char, ii) => {
-    if (ii === 0) {
-      state = {
-        [START_INDEX2]: 0,
-        [TYPE2]: messageFormatString[0] === "\\" ? 0 : messageFormatString[0] === "$" ? 2 : 1
-      };
-      return;
-    }
-    let nextState;
-    switch (state[TYPE2]) {
-      case 0:
-        nextState = { [START_INDEX2]: ii, [TYPE2]: 1 };
-        break;
-      case 1:
-        if (char === "\\") {
-          nextState = { [START_INDEX2]: ii, [TYPE2]: 0 };
-        } else if (char === "$") {
-          nextState = { [START_INDEX2]: ii, [TYPE2]: 2 };
-        }
-        break;
-      case 2:
-        if (char === "\\") {
-          nextState = { [START_INDEX2]: ii, [TYPE2]: 0 };
-        } else if (char === "$") {
-          nextState = { [START_INDEX2]: ii, [TYPE2]: 2 };
-        } else if (!char.match(/\w/)) {
-          nextState = { [START_INDEX2]: ii, [TYPE2]: 1 };
-        }
-        break;
-    }
-    if (nextState) {
-      if (state !== nextState) {
-        commitStateUpTo(ii);
-      }
-      state = nextState;
-    }
+    return current;
   });
-  commitStateUpTo();
-  let message = fragments.join("");
-  if (code >= SOLANA_ERROR__INSTRUCTION_ERROR__UNKNOWN2 && code < SOLANA_ERROR__INSTRUCTION_ERROR__UNKNOWN2 + INSTRUCTION_ERROR_RANGE_SIZE2 && "index" in context) {
-    message += ` (instruction #${context.index + 1})`;
-  }
-  return message;
-}
-function getErrorMessage2(code, context = {}) {
-  if (true) {
-    return getHumanReadableErrorMessage2(code, context);
-  }
-}
-var SolanaError2 = class extends Error {
-  cause = this.cause;
-  context;
-  constructor(...[code, contextAndErrorOptions]) {
-    let context;
-    let errorOptions;
-    if (contextAndErrorOptions) {
-      Object.entries(Object.getOwnPropertyDescriptors(contextAndErrorOptions)).forEach(([name, descriptor]) => {
-        if (name === "cause") {
-          errorOptions = { cause: descriptor.value };
-        } else {
-          if (context === undefined) {
-            context = {
-              __code: code
-            };
-          }
-          Object.defineProperty(context, name, descriptor);
-        }
-      });
-    }
-    const message = getErrorMessage2(code, context);
-    super(message, errorOptions);
-    this.context = Object.freeze(context === undefined ? {
-      __code: code
-    } : context);
-    this.name = "SolanaError";
-  }
+  if (encoded === undefined)
+    throw new TypeError("Card is not JSON-serializable");
+  return encoded;
 };
-function getEncodedSize2(value, encoder) {
-  return "fixedSize" in encoder ? encoder.fixedSize : encoder.getSizeFromValue(value);
-}
-function createEncoder2(encoder) {
-  return Object.freeze({
-    ...encoder,
-    encode: (value) => {
-      const bytes = new Uint8Array(getEncodedSize2(value, encoder));
-      encoder.write(value, bytes, 0);
-      return bytes;
-    }
-  });
-}
-function isFixedSize2(codec) {
-  return "fixedSize" in codec && typeof codec.fixedSize === "number";
-}
-function isVariableSize2(codec) {
-  return !isFixedSize2(codec);
-}
-function fixEncoderSize2(encoder, fixedBytes) {
-  return createEncoder2({
-    fixedSize: fixedBytes,
-    write: (value, bytes, offset) => {
-      const variableByteArray = encoder.encode(value);
-      const fixedByteArray = variableByteArray.length > fixedBytes ? variableByteArray.slice(0, fixedBytes) : variableByteArray;
-      bytes.set(fixedByteArray, offset);
-      return offset + fixedBytes;
-    }
-  });
-}
-function transformEncoder2(encoder, unmap) {
-  return createEncoder2({
-    ...isVariableSize2(encoder) ? { ...encoder, getSizeFromValue: (value) => encoder.getSizeFromValue(unmap(value)) } : encoder,
-    write: (value, bytes, offset) => encoder.write(unmap(value), bytes, offset)
-  });
-}
-function assertValidBaseString2(alphabet4, testValue, givenValue = testValue) {
-  if (!testValue.match(new RegExp(`^[${alphabet4}]*$`))) {
-    throw new SolanaError2(SOLANA_ERROR__CODECS__INVALID_STRING_FOR_BASE2, {
-      alphabet: alphabet4,
-      base: alphabet4.length,
-      value: givenValue
-    });
-  }
-}
-var getBaseXEncoder2 = (alphabet4) => {
-  return createEncoder2({
-    getSizeFromValue: (value) => {
-      const [leadingZeroes, tailChars] = partitionLeadingZeroes2(value, alphabet4[0]);
-      if (!tailChars)
-        return value.length;
-      const base10Number = getBigIntFromBaseX2(tailChars, alphabet4);
-      return leadingZeroes.length + Math.ceil(base10Number.toString(16).length / 2);
-    },
-    write(value, bytes, offset) {
-      assertValidBaseString2(alphabet4, value);
-      if (value === "")
-        return offset;
-      const [leadingZeroes, tailChars] = partitionLeadingZeroes2(value, alphabet4[0]);
-      if (!tailChars) {
-        bytes.set(new Uint8Array(leadingZeroes.length).fill(0), offset);
-        return offset + leadingZeroes.length;
-      }
-      let base10Number = getBigIntFromBaseX2(tailChars, alphabet4);
-      const tailBytes = [];
-      while (base10Number > 0n) {
-        tailBytes.unshift(Number(base10Number % 256n));
-        base10Number /= 256n;
-      }
-      const bytesToAdd = [...Array(leadingZeroes.length).fill(0), ...tailBytes];
-      bytes.set(bytesToAdd, offset);
-      return offset + bytesToAdd.length;
-    }
-  });
-};
-function partitionLeadingZeroes2(value, zeroCharacter) {
-  const [leadingZeros, tailChars] = value.split(new RegExp(`((?!${zeroCharacter}).*)`));
-  return [leadingZeros, tailChars];
-}
-function getBigIntFromBaseX2(value, alphabet4) {
-  const base = BigInt(alphabet4.length);
-  let sum = 0n;
-  for (const char of value) {
-    sum *= base;
-    sum += BigInt(alphabet4.indexOf(char));
-  }
-  return sum;
-}
-var alphabet22 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
-var getBase58Encoder2 = () => getBaseXEncoder2(alphabet22);
-var e2 = globalThis.TextDecoder;
-var o2 = globalThis.TextEncoder;
-var memoizedBase58Encoder2;
-function getMemoizedBase58Encoder2() {
-  if (!memoizedBase58Encoder2)
-    memoizedBase58Encoder2 = getBase58Encoder2();
-  return memoizedBase58Encoder2;
-}
-function assertIsAddress2(putativeAddress) {
-  if (putativeAddress.length < 32 || putativeAddress.length > 44) {
-    throw new SolanaError2(SOLANA_ERROR__ADDRESSES__STRING_LENGTH_OUT_OF_RANGE2, {
-      actualLength: putativeAddress.length
-    });
-  }
-  const base58Encoder = getMemoizedBase58Encoder2();
-  const bytes = base58Encoder.encode(putativeAddress);
-  const numBytes = bytes.byteLength;
-  if (numBytes !== 32) {
-    throw new SolanaError2(SOLANA_ERROR__ADDRESSES__INVALID_BYTE_LENGTH2, {
-      actualLength: numBytes
-    });
-  }
-}
-function address2(putativeAddress) {
-  assertIsAddress2(putativeAddress);
-  return putativeAddress;
-}
-function getAddressEncoder2() {
-  return transformEncoder2(fixEncoderSize2(getMemoizedBase58Encoder2(), 32), (putativeAddress) => address2(putativeAddress));
-}
-var ADDRESS_ENCODER2 = getAddressEncoder2();
-var U64_SIGN_BIT2 = 1n << 63n;
-var UTF8_ENCODER2 = new TextEncoder;
-var ANCHOR_CPI_METHOD_NAME2 = "anchor:event";
-var ANCHOR_CPI_METHOD_NAME_B642 = bytesToBase642(UTF8_ENCODER2.encode(ANCHOR_CPI_METHOD_NAME2));
-function sendReport2(runtime, report, fn) {
-  const rawReport = report.x_generatedCodeOnly_unwrap();
-  const request = fn(rawReport);
-  return this.sendRequest(runtime, request);
-}
-function sendRequesterSendReport2(report, fn) {
-  const rawReport = report.x_generatedCodeOnly_unwrap();
-  const request = fn(rawReport);
-  return this.sendRequest(request);
-}
-ClientCapability5.prototype.sendReport = sendReport2;
-SendRequester2.prototype.sendReport = sendRequesterSendReport2;
-var network300 = {
-  chainId: "1",
-  chainSelector: {
-    name: "aptos-mainnet",
-    selector: 4741433654826277614n
-  },
-  chainFamily: "aptos",
-  networkType: "mainnet"
-};
-var aptos_mainnet_default2 = network300;
-var network301 = {
-  chainId: "16661",
-  chainSelector: {
-    name: "0g-mainnet",
-    selector: 4426351306075016396n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var _0g_mainnet_default2 = network301;
-var network302 = {
-  chainId: "36888",
-  chainSelector: {
-    name: "ab-mainnet",
-    selector: 4829375610284793157n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var ab_mainnet_default2 = network302;
-var network303 = {
-  chainId: "2741",
-  chainSelector: {
-    name: "abstract-mainnet",
-    selector: 3577778157919314504n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var abstract_mainnet_default2 = network303;
-var network304 = {
-  chainId: "36900",
-  chainSelector: {
-    name: "adi-mainnet",
-    selector: 4059281736450291836n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var adi_mainnet_default2 = network304;
-var network305 = {
-  chainId: "33139",
-  chainSelector: {
-    name: "apechain-mainnet",
-    selector: 14894068710063348487n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var apechain_mainnet_default2 = network305;
-var network306 = {
-  chainId: "5042",
-  chainSelector: {
-    name: "arc-mainnet",
-    selector: 6370580034781731079n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var arc_mainnet_default2 = network306;
-var network307 = {
-  chainId: "463",
-  chainSelector: {
-    name: "areon-mainnet",
-    selector: 1939936305787790600n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var areon_mainnet_default2 = network307;
-var network308 = {
-  chainId: "43114",
-  chainSelector: {
-    name: "avalanche-mainnet",
-    selector: 6433500567565415381n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var avalanche_mainnet_default2 = network308;
-var network309 = {
-  chainId: "432204",
-  chainSelector: {
-    name: "avalanche-subnet-dexalot-mainnet",
-    selector: 5463201557265485081n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var avalanche_subnet_dexalot_mainnet_default2 = network309;
-var network310 = {
-  chainId: "80094",
-  chainSelector: {
-    name: "berachain-mainnet",
-    selector: 1294465214383781161n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var berachain_mainnet_default2 = network310;
-var network311 = {
-  chainId: "56",
-  chainSelector: {
-    name: "binance_smart_chain-mainnet",
-    selector: 11344663589394136015n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var binance_smart_chain_mainnet_default2 = network311;
-var network312 = {
-  chainId: "204",
-  chainSelector: {
-    name: "binance_smart_chain-mainnet-opbnb-1",
-    selector: 465944652040885897n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var binance_smart_chain_mainnet_opbnb_1_default2 = network312;
-var network313 = {
-  chainId: "1907",
-  chainSelector: {
-    name: "bitcichain-mainnet",
-    selector: 4874388048629246000n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var bitcichain_mainnet_default2 = network313;
-var network314 = {
-  chainId: "200901",
-  chainSelector: {
-    name: "bitcoin-mainnet-bitlayer-1",
-    selector: 7937294810946806131n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var bitcoin_mainnet_bitlayer_1_default2 = network314;
-var network315 = {
-  chainId: "60808",
-  chainSelector: {
-    name: "bitcoin-mainnet-bob-1",
-    selector: 3849287863852499584n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var bitcoin_mainnet_bob_1_default2 = network315;
-var network316 = {
-  chainId: "3637",
-  chainSelector: {
-    name: "bitcoin-mainnet-botanix",
-    selector: 4560701533377838164n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var bitcoin_mainnet_botanix_default2 = network316;
-var network317 = {
-  chainId: "223",
-  chainSelector: {
-    name: "bitcoin-mainnet-bsquared-1",
-    selector: 5406759801798337480n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var bitcoin_mainnet_bsquared_1_default2 = network317;
-var network318 = {
-  chainId: "4200",
-  chainSelector: {
-    name: "bitcoin-merlin-mainnet",
-    selector: 241851231317828981n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var bitcoin_merlin_mainnet_default2 = network318;
-var network319 = {
-  chainId: "964",
-  chainSelector: {
-    name: "bittensor-mainnet",
-    selector: 2135107236357186872n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var bittensor_mainnet_default2 = network319;
-var network320 = {
-  chainId: "199",
-  chainSelector: {
-    name: "bittorrent_chain-mainnet",
-    selector: 3776006016387883143n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var bittorrent_chain_mainnet_default2 = network320;
-var network321 = {
-  chainId: "42220",
-  chainSelector: {
-    name: "celo-mainnet",
-    selector: 1346049177634351622n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var celo_mainnet_default2 = network321;
-var network322 = {
-  chainId: "81224",
-  chainSelector: {
-    name: "codex-mainnet",
-    selector: 9478124434908827753n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var codex_mainnet_default2 = network322;
-var network323 = {
-  chainId: "52",
-  chainSelector: {
-    name: "coinex_smart_chain-mainnet",
-    selector: 1761333065194157300n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var coinex_smart_chain_mainnet_default2 = network323;
-var network324 = {
-  chainId: "1030",
-  chainSelector: {
-    name: "conflux-mainnet",
-    selector: 3358365939762719202n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var conflux_mainnet_default2 = network324;
-var network325 = {
-  chainId: "1116",
-  chainSelector: {
-    name: "core-mainnet",
-    selector: 1224752112135636129n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var core_mainnet_default2 = network325;
-var network326 = {
-  chainId: "21000000",
-  chainSelector: {
-    name: "corn-mainnet",
-    selector: 9043146809313071210n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var corn_mainnet_default2 = network326;
-var network327 = {
-  chainId: "102030",
-  chainSelector: {
-    name: "creditcoin-mainnet",
-    selector: 18240105181246962294n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var creditcoin_mainnet_default2 = network327;
-var network328 = {
-  chainId: "25",
-  chainSelector: {
-    name: "cronos-mainnet",
-    selector: 1456215246176062136n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var cronos_mainnet_default2 = network328;
-var network329 = {
-  chainId: "388",
-  chainSelector: {
-    name: "cronos-zkevm-mainnet",
-    selector: 8788096068760390840n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var cronos_zkevm_mainnet_default2 = network329;
-var network330 = {
-  chainId: "2026041005",
-  chainSelector: {
-    name: "dtcc-mainnet-appchain",
-    selector: 13879014182901017172n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var dtcc_mainnet_appchain_default2 = network330;
-var network331 = {
-  chainId: "3343",
-  chainSelector: {
-    name: "edge-mainnet",
-    selector: 6325494908023253251n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var edge_mainnet_default2 = network331;
-var network332 = {
-  chainId: "1",
-  chainSelector: {
-    name: "ethereum-mainnet",
-    selector: 5009297550715157269n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var ethereum_mainnet_default2 = network332;
-var network333 = {
-  chainId: "42161",
-  chainSelector: {
-    name: "ethereum-mainnet-arbitrum-1",
-    selector: 4949039107694359620n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var ethereum_mainnet_arbitrum_1_default2 = network333;
-var network334 = {
-  chainId: "12324",
-  chainSelector: {
-    name: "ethereum-mainnet-arbitrum-1-l3x-1",
-    selector: 3162193654116181371n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var ethereum_mainnet_arbitrum_1_l3x_1_default2 = network334;
-var network335 = {
-  chainId: "978670",
-  chainSelector: {
-    name: "ethereum-mainnet-arbitrum-1-treasure-1",
-    selector: 1010349088906777999n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var ethereum_mainnet_arbitrum_1_treasure_1_default2 = network335;
-var network336 = {
-  chainId: "3776",
-  chainSelector: {
-    name: "ethereum-mainnet-astar-zkevm-1",
-    selector: 1540201334317828111n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var ethereum_mainnet_astar_zkevm_1_default2 = network336;
-var network337 = {
-  chainId: "8453",
-  chainSelector: {
-    name: "ethereum-mainnet-base-1",
-    selector: 15971525489660198786n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var ethereum_mainnet_base_1_default2 = network337;
-var network338 = {
-  chainId: "81457",
-  chainSelector: {
-    name: "ethereum-mainnet-blast-1",
-    selector: 4411394078118774322n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var ethereum_mainnet_blast_1_default2 = network338;
-var network339 = {
-  chainId: "177",
-  chainSelector: {
-    name: "ethereum-mainnet-hashkey-1",
-    selector: 7613811247471741961n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var ethereum_mainnet_hashkey_1_default2 = network339;
-var network340 = {
-  chainId: "13371",
-  chainSelector: {
-    name: "ethereum-mainnet-immutable-zkevm-1",
-    selector: 1237925231416731909n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var ethereum_mainnet_immutable_zkevm_1_default2 = network340;
-var network341 = {
-  chainId: "57073",
-  chainSelector: {
-    name: "ethereum-mainnet-ink-1",
-    selector: 3461204551265785888n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var ethereum_mainnet_ink_1_default2 = network341;
-var network342 = {
-  chainId: "255",
-  chainSelector: {
-    name: "ethereum-mainnet-kroma-1",
-    selector: 3719320017875267166n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var ethereum_mainnet_kroma_1_default2 = network342;
-var network343 = {
-  chainId: "59144",
-  chainSelector: {
-    name: "ethereum-mainnet-linea-1",
-    selector: 4627098889531055414n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var ethereum_mainnet_linea_1_default2 = network343;
-var network344 = {
-  chainId: "5000",
-  chainSelector: {
-    name: "ethereum-mainnet-mantle-1",
-    selector: 1556008542357238666n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var ethereum_mainnet_mantle_1_default2 = network344;
-var network345 = {
-  chainId: "1088",
-  chainSelector: {
-    name: "ethereum-mainnet-metis-1",
-    selector: 8805746078405598895n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var ethereum_mainnet_metis_1_default2 = network345;
-var network346 = {
-  chainId: "34443",
-  chainSelector: {
-    name: "ethereum-mainnet-mode-1",
-    selector: 7264351850409363825n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var ethereum_mainnet_mode_1_default2 = network346;
-var network347 = {
-  chainId: "10",
-  chainSelector: {
-    name: "ethereum-mainnet-optimism-1",
-    selector: 3734403246176062136n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var ethereum_mainnet_optimism_1_default2 = network347;
-var network348 = {
-  chainId: "1101",
-  chainSelector: {
-    name: "ethereum-mainnet-polygon-zkevm-1",
-    selector: 4348158687435793198n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var ethereum_mainnet_polygon_zkevm_1_default2 = network348;
-var network349 = {
-  chainId: "534352",
-  chainSelector: {
-    name: "ethereum-mainnet-scroll-1",
-    selector: 13204309965629103672n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var ethereum_mainnet_scroll_1_default2 = network349;
-var network350 = {
-  chainId: "167000",
-  chainSelector: {
-    name: "ethereum-mainnet-taiko-1",
-    selector: 16468599424800719238n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var ethereum_mainnet_taiko_1_default2 = network350;
-var network351 = {
-  chainId: "130",
-  chainSelector: {
-    name: "ethereum-mainnet-unichain-1",
-    selector: 1923510103922296319n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var ethereum_mainnet_unichain_1_default2 = network351;
-var network352 = {
-  chainId: "480",
-  chainSelector: {
-    name: "ethereum-mainnet-worldchain-1",
-    selector: 2049429975587534727n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var ethereum_mainnet_worldchain_1_default2 = network352;
-var network353 = {
-  chainId: "196",
-  chainSelector: {
-    name: "ethereum-mainnet-xlayer-1",
-    selector: 3016212468291539606n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var ethereum_mainnet_xlayer_1_default2 = network353;
-var network354 = {
-  chainId: "48900",
-  chainSelector: {
-    name: "ethereum-mainnet-zircuit-1",
-    selector: 17198166215261833993n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var ethereum_mainnet_zircuit_1_default2 = network354;
-var network355 = {
-  chainId: "324",
-  chainSelector: {
-    name: "ethereum-mainnet-zksync-1",
-    selector: 1562403441176082196n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var ethereum_mainnet_zksync_1_default2 = network355;
-var network356 = {
-  chainId: "42793",
-  chainSelector: {
-    name: "etherlink-mainnet",
-    selector: 13624601974233774587n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var etherlink_mainnet_default2 = network356;
-var network357 = {
-  chainId: "25327",
-  chainSelector: {
-    name: "everclear-mainnet",
-    selector: 9723842205701363942n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var everclear_mainnet_default2 = network357;
-var network358 = {
-  chainId: "250",
-  chainSelector: {
-    name: "fantom-mainnet",
-    selector: 3768048213127883732n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var fantom_mainnet_default2 = network358;
-var network359 = {
-  chainId: "314",
-  chainSelector: {
-    name: "filecoin-mainnet",
-    selector: 4561443241176882990n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var filecoin_mainnet_default2 = network359;
-var network360 = {
-  chainId: "252",
-  chainSelector: {
-    name: "fraxtal-mainnet",
-    selector: 1462016016387883143n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var fraxtal_mainnet_default2 = network360;
-var network361 = {
-  chainId: "86",
-  chainSelector: {
-    name: "gate-chain-mainnet",
-    selector: 9688382747979139404n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var gate_chain_mainnet_default2 = network361;
-var network362 = {
-  chainId: "10088",
-  chainSelector: {
-    name: "gate-layer-mainnet",
-    selector: 9373518659714509671n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var gate_layer_mainnet_default2 = network362;
-var network363 = {
-  chainId: "100",
-  chainSelector: {
-    name: "gnosis_chain-mainnet",
-    selector: 465200170687744372n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var gnosis_chain_mainnet_default2 = network363;
-var network364 = {
-  chainId: "127001",
-  chainSelector: {
-    name: "gravity-mainnet",
-    selector: 2988178761202034333n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var gravity_mainnet_default2 = network364;
-var network365 = {
-  chainId: "295",
-  chainSelector: {
-    name: "hedera-mainnet",
-    selector: 3229138320728879060n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var hedera_mainnet_default2 = network365;
-var network366 = {
-  chainId: "43111",
-  chainSelector: {
-    name: "hemi-mainnet",
-    selector: 1804312132722180201n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var hemi_mainnet_default2 = network366;
-var network367 = {
-  chainId: "999",
-  chainSelector: {
-    name: "hyperliquid-mainnet",
-    selector: 2442541497099098535n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var hyperliquid_mainnet_default2 = network367;
-var network368 = {
-  chainId: "678",
-  chainSelector: {
-    name: "janction-mainnet",
-    selector: 9107126442626377432n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var janction_mainnet_default2 = network368;
-var network369 = {
-  chainId: "5734951",
-  chainSelector: {
-    name: "jovay-mainnet",
-    selector: 1523760397290643893n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var jovay_mainnet_default2 = network369;
-var network370 = {
-  chainId: "8217",
-  chainSelector: {
-    name: "kaia-mainnet",
-    selector: 9813823125703490621n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var kaia_mainnet_default2 = network370;
-var network371 = {
-  chainId: "2222",
-  chainSelector: {
-    name: "kava-mainnet",
-    selector: 7550000543357438061n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var kava_mainnet_default2 = network371;
-var network372 = {
-  chainId: "1285",
-  chainSelector: {
-    name: "kusama-mainnet-moonriver",
-    selector: 1355020143337428062n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var kusama_mainnet_moonriver_default2 = network372;
-var network373 = {
-  chainId: "232",
-  chainSelector: {
-    name: "lens-mainnet",
-    selector: 5608378062013572713n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var lens_mainnet_default2 = network373;
-var network374 = {
-  chainId: "1135",
-  chainSelector: {
-    name: "lisk-mainnet",
-    selector: 15293031020466096408n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var lisk_mainnet_default2 = network374;
-var network375 = {
-  chainId: "4326",
-  chainSelector: {
-    name: "megaeth-mainnet",
-    selector: 6093540873831549674n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var megaeth_mainnet_default2 = network375;
-var network376 = {
-  chainId: "51888",
-  chainSelector: {
-    name: "memento-mainnet",
-    selector: 6473245816409426016n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var memento_mainnet_default2 = network376;
-var network377 = {
-  chainId: "1750",
-  chainSelector: {
-    name: "metal-mainnet",
-    selector: 13447077090413146373n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var metal_mainnet_default2 = network377;
-var network378 = {
-  chainId: "228",
-  chainSelector: {
-    name: "mind-mainnet",
-    selector: 11690709103138290329n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var mind_mainnet_default2 = network378;
-var network379 = {
-  chainId: "185",
-  chainSelector: {
-    name: "mint-mainnet",
-    selector: 17164792800244661392n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var mint_mainnet_default2 = network379;
-var network380 = {
-  chainId: "143",
-  chainSelector: {
-    name: "monad-mainnet",
-    selector: 8481857512324358265n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var monad_mainnet_default2 = network380;
-var network381 = {
-  chainId: "2818",
-  chainSelector: {
-    name: "morph-mainnet",
-    selector: 18164309074156128038n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var morph_mainnet_default2 = network381;
-var network382 = {
-  chainId: "61900",
-  chainSelector: {
-    name: "mova-mainnet",
-    selector: 3314641565992046393n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var mova_mainnet_default2 = network382;
-var network383 = {
-  chainId: "61901",
-  chainSelector: {
-    name: "mova-mainnet-2",
-    selector: 4215185756725900654n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var mova_mainnet_2_default2 = network383;
-var network384 = {
-  chainId: "397",
-  chainSelector: {
-    name: "near-mainnet",
-    selector: 2039744413822257700n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var near_mainnet_default2 = network384;
-var network385 = {
-  chainId: "259",
-  chainSelector: {
-    name: "neonlink-mainnet",
-    selector: 8239338020728974000n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var neonlink_mainnet_default2 = network385;
-var network386 = {
-  chainId: "47763",
-  chainSelector: {
-    name: "neox-mainnet",
-    selector: 7222032299962346917n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var neox_mainnet_default2 = network386;
-var network387 = {
-  chainId: "68414",
-  chainSelector: {
-    name: "nexon-mainnet-henesys",
-    selector: 12657445206920369324n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var nexon_mainnet_henesys_default2 = network387;
-var network388 = {
-  chainId: "60118",
-  chainSelector: {
-    name: "nexon-mainnet-lith",
-    selector: 15758750456714168963n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var nexon_mainnet_lith_default2 = network388;
-var network389 = {
-  chainId: "807424",
-  chainSelector: {
-    name: "nexon-qa",
-    selector: 14632960069656270105n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var nexon_qa_default2 = network389;
-var network390 = {
-  chainId: "847799",
-  chainSelector: {
-    name: "nexon-stage",
-    selector: 5556806327594153475n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var nexon_stage_default2 = network390;
-var network391 = {
-  chainId: "6900",
-  chainSelector: {
-    name: "nibiru-mainnet",
-    selector: 17349189558768828726n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var nibiru_mainnet_default2 = network391;
-var network392 = {
-  chainId: "1672",
-  chainSelector: {
-    name: "pharos-mainnet",
-    selector: 7801139999541420232n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var pharos_mainnet_default2 = network392;
-var network393 = {
-  chainId: "9745",
-  chainSelector: {
-    name: "plasma-mainnet",
-    selector: 9335212494177455608n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var plasma_mainnet_default2 = network393;
-var network394 = {
-  chainId: "98866",
-  chainSelector: {
-    name: "plume-mainnet",
-    selector: 17912061998839310979n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var plume_mainnet_default2 = network394;
-var network395 = {
-  chainId: "592",
-  chainSelector: {
-    name: "polkadot-mainnet-astar",
-    selector: 6422105447186081193n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var polkadot_mainnet_astar_default2 = network395;
-var network396 = {
-  chainId: "2031",
-  chainSelector: {
-    name: "polkadot-mainnet-centrifuge",
-    selector: 8175830712062617656n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var polkadot_mainnet_centrifuge_default2 = network396;
-var network397 = {
-  chainId: "46",
-  chainSelector: {
-    name: "polkadot-mainnet-darwinia",
-    selector: 8866418665544333000n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var polkadot_mainnet_darwinia_default2 = network397;
-var network398 = {
-  chainId: "1284",
-  chainSelector: {
-    name: "polkadot-mainnet-moonbeam",
-    selector: 1252863800116739621n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var polkadot_mainnet_moonbeam_default2 = network398;
-var network399 = {
-  chainId: "137",
-  chainSelector: {
-    name: "polygon-mainnet",
-    selector: 4051577828743386545n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var polygon_mainnet_default2 = network399;
-var network400 = {
-  chainId: "747474",
-  chainSelector: {
-    name: "polygon-mainnet-katana",
-    selector: 2459028469735686113n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var polygon_mainnet_katana_default2 = network400;
-var network401 = {
-  chainId: "4663",
-  chainSelector: {
-    name: "robinhood-mainnet",
-    selector: 6180753054346818345n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var robinhood_mainnet_default2 = network401;
-var network402 = {
-  chainId: "2020",
-  chainSelector: {
-    name: "ronin-mainnet",
-    selector: 6916147374840168594n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var ronin_mainnet_default2 = network402;
-var network403 = {
-  chainId: "30",
-  chainSelector: {
-    name: "rootstock-mainnet",
-    selector: 11964252391146578476n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var rootstock_mainnet_default2 = network403;
-var network404 = {
-  chainId: "1329",
-  chainSelector: {
-    name: "sei-mainnet",
-    selector: 9027416829622342829n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var sei_mainnet_default2 = network404;
-var network405 = {
-  chainId: "109",
-  chainSelector: {
-    name: "shibarium-mainnet",
-    selector: 3993510008929295315n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var shibarium_mainnet_default2 = network405;
-var network406 = {
-  chainId: "1868",
-  chainSelector: {
-    name: "soneium-mainnet",
-    selector: 12505351618335765396n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var soneium_mainnet_default2 = network406;
-var network407 = {
-  chainId: "146",
-  chainSelector: {
-    name: "sonic-mainnet",
-    selector: 1673871237479749969n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var sonic_mainnet_default2 = network407;
-var network408 = {
-  chainId: "988",
-  chainSelector: {
-    name: "stable-mainnet",
-    selector: 16978377838628290997n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var stable_mainnet_default2 = network408;
-var network409 = {
-  chainId: "5330",
-  chainSelector: {
-    name: "superseed-mainnet",
-    selector: 470401360549526817n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var superseed_mainnet_default2 = network409;
-var network410 = {
-  chainId: "239",
-  chainSelector: {
-    name: "tac-mainnet",
-    selector: 5936861837188149645n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var tac_mainnet_default2 = network410;
-var network411 = {
-  chainId: "40",
-  chainSelector: {
-    name: "telos-evm-mainnet",
-    selector: 1477345371608778000n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var telos_evm_mainnet_default2 = network411;
-var network412 = {
-  chainId: "4217",
-  chainSelector: {
-    name: "tempo-mainnet",
-    selector: 7281642695469137430n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var tempo_mainnet_default2 = network412;
-var network413 = {
-  chainId: "61166",
-  chainSelector: {
-    name: "treasure-mainnet",
-    selector: 5214452172935136222n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var treasure_mainnet_default2 = network413;
-var network414 = {
-  chainId: "728126428",
-  chainSelector: {
-    name: "tron-mainnet-evm",
-    selector: 1546563616611573946n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var tron_mainnet_evm_default2 = network414;
-var network415 = {
-  chainId: "106",
-  chainSelector: {
-    name: "velas-mainnet",
-    selector: 374210358663784372n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var velas_mainnet_default2 = network415;
-var network416 = {
-  chainId: "1111",
-  chainSelector: {
-    name: "wemix-mainnet",
-    selector: 5142893604156789321n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var wemix_mainnet_default2 = network416;
-var network417 = {
-  chainId: "50",
-  chainSelector: {
-    name: "xdc-mainnet",
-    selector: 17673274061779414707n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var xdc_mainnet_default2 = network417;
-var network418 = {
-  chainId: "7000",
-  chainSelector: {
-    name: "zetachain-mainnet",
-    selector: 10817664450262215148n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var zetachain_mainnet_default2 = network418;
-var network419 = {
-  chainId: "810180",
-  chainSelector: {
-    name: "zklink_nova-mainnet",
-    selector: 4350319965322101699n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var zklink_nova_mainnet_default2 = network419;
-var network420 = {
-  chainId: "7777777",
-  chainSelector: {
-    name: "zora-mainnet",
-    selector: 3555797439612589184n
-  },
-  chainFamily: "evm",
-  networkType: "mainnet"
-};
-var zora_mainnet_default2 = network420;
-var network421 = {
-  chainId: "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
-  chainSelector: {
-    name: "solana-mainnet",
-    selector: 124615329519749607n
-  },
-  chainFamily: "solana",
-  networkType: "mainnet"
-};
-var solana_mainnet_default2 = network421;
-var network422 = {
-  chainId: "1",
-  chainSelector: {
-    name: "sui-mainnet",
-    selector: 17529533435026248318n
-  },
-  chainFamily: "sui",
-  networkType: "mainnet"
-};
-var sui_mainnet_default2 = network422;
-var network423 = {
-  chainId: "-239",
-  chainSelector: {
-    name: "ton-mainnet",
-    selector: 16448340667252469081n
-  },
-  chainFamily: "ton",
-  networkType: "mainnet"
-};
-var ton_mainnet_default2 = network423;
-var network424 = {
-  chainId: "728126428",
-  chainSelector: {
-    name: "tron-mainnet",
-    selector: 1546563616611573945n
-  },
-  chainFamily: "tron",
-  networkType: "mainnet"
-};
-var tron_mainnet_default2 = network424;
-var network425 = {
-  chainId: "4",
-  chainSelector: {
-    name: "aptos-localnet",
-    selector: 4457093679053095497n
-  },
-  chainFamily: "aptos",
-  networkType: "testnet"
-};
-var aptos_localnet_default2 = network425;
-var network426 = {
-  chainId: "2",
-  chainSelector: {
-    name: "aptos-testnet",
-    selector: 743186221051783445n
-  },
-  chainFamily: "aptos",
-  networkType: "testnet"
-};
-var aptos_testnet_default2 = network426;
-var network427 = {
-  chainId: "16601",
-  chainSelector: {
-    name: "0g-testnet-galileo",
-    selector: 2131427466778448014n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var _0g_testnet_galileo_default2 = network427;
-var network428 = {
-  chainId: "16602",
-  chainSelector: {
-    name: "0g-testnet-galileo-1",
-    selector: 6892437333620424805n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var _0g_testnet_galileo_1_default2 = network428;
-var network429 = {
-  chainId: "16600",
-  chainSelector: {
-    name: "0g-testnet-newton",
-    selector: 16088006396410204581n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var _0g_testnet_newton_default2 = network429;
-var network430 = {
-  chainId: "26888",
-  chainSelector: {
-    name: "ab-testnet",
-    selector: 7051849327615092843n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var ab_testnet_default2 = network430;
-var network431 = {
-  chainId: "11124",
-  chainSelector: {
-    name: "abstract-testnet",
-    selector: 16235373811196386733n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var abstract_testnet_default2 = network431;
-var network432 = {
-  chainId: "99999",
-  chainSelector: {
-    name: "adi-testnet",
-    selector: 9418205736192840573n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var adi_testnet_default2 = network432;
-var network433 = {
-  chainId: "31337",
-  chainSelector: {
-    name: "anvil-devnet",
-    selector: 7759470850252068959n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var anvil_devnet_default2 = network433;
-var network434 = {
-  chainId: "33111",
-  chainSelector: {
-    name: "apechain-testnet-curtis",
-    selector: 9900119385908781505n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var apechain_testnet_curtis_default2 = network434;
-var network435 = {
-  chainId: "5042002",
-  chainSelector: {
-    name: "arc-testnet",
-    selector: 3034092155422581607n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var arc_testnet_default2 = network435;
-var network436 = {
-  chainId: "462",
-  chainSelector: {
-    name: "areon-testnet",
-    selector: 7317911323415911000n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var areon_testnet_default2 = network436;
-var network437 = {
-  chainId: "432201",
-  chainSelector: {
-    name: "avalanche-subnet-dexalot-testnet",
-    selector: 1458281248224512906n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var avalanche_subnet_dexalot_testnet_default2 = network437;
-var network438 = {
-  chainId: "43113",
-  chainSelector: {
-    name: "avalanche-testnet-fuji",
-    selector: 14767482510784806043n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var avalanche_testnet_fuji_default2 = network438;
-var network439 = {
-  chainId: "595581",
-  chainSelector: {
-    name: "avalanche-testnet-nexon",
-    selector: 7837562506228496256n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var avalanche_testnet_nexon_default2 = network439;
-var network440 = {
-  chainId: "80085",
-  chainSelector: {
-    name: "berachain-testnet-artio",
-    selector: 12336603543561911511n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var berachain_testnet_artio_default2 = network440;
-var network441 = {
-  chainId: "80084",
-  chainSelector: {
-    name: "berachain-testnet-bartio",
-    selector: 8999465244383784164n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var berachain_testnet_bartio_default2 = network441;
-var network442 = {
-  chainId: "80069",
-  chainSelector: {
-    name: "berachain-testnet-bepolia",
-    selector: 7728255861635209484n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var berachain_testnet_bepolia_default2 = network442;
-var network443 = {
-  chainId: "97",
-  chainSelector: {
-    name: "binance_smart_chain-testnet",
-    selector: 13264668187771770619n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var binance_smart_chain_testnet_default2 = network443;
-var network444 = {
-  chainId: "5611",
-  chainSelector: {
-    name: "binance_smart_chain-testnet-opbnb-1",
-    selector: 13274425992935471758n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var binance_smart_chain_testnet_opbnb_1_default2 = network444;
-var network445 = {
-  chainId: "1908",
-  chainSelector: {
-    name: "bitcichain-testnet",
-    selector: 4888058894222120000n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var bitcichain_testnet_default2 = network445;
-var network446 = {
-  chainId: "200810",
-  chainSelector: {
-    name: "bitcoin-testnet-bitlayer-1",
-    selector: 3789623672476206327n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var bitcoin_testnet_bitlayer_1_default2 = network446;
-var network447 = {
-  chainId: "3636",
-  chainSelector: {
-    name: "bitcoin-testnet-botanix",
-    selector: 1467223411771711614n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var bitcoin_testnet_botanix_default2 = network447;
-var network448 = {
-  chainId: "1123",
-  chainSelector: {
-    name: "bitcoin-testnet-bsquared-1",
-    selector: 1948510578179542068n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var bitcoin_testnet_bsquared_1_default2 = network448;
-var network449 = {
-  chainId: "686868",
-  chainSelector: {
-    name: "bitcoin-testnet-merlin",
-    selector: 5269261765892944301n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var bitcoin_testnet_merlin_default2 = network449;
-var network450 = {
-  chainId: "31",
-  chainSelector: {
-    name: "bitcoin-testnet-rootstock",
-    selector: 8953668971247136127n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var bitcoin_testnet_rootstock_default2 = network450;
-var network451 = {
-  chainId: "808813",
-  chainSelector: {
-    name: "bitcoin-testnet-sepolia-bob-1",
-    selector: 5535534526963509396n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var bitcoin_testnet_sepolia_bob_1_default2 = network451;
-var network452 = {
-  chainId: "945",
-  chainSelector: {
-    name: "bittensor-testnet",
-    selector: 2177900824115119161n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var bittensor_testnet_default2 = network452;
-var network453 = {
-  chainId: "1029",
-  chainSelector: {
-    name: "bittorrent_chain-testnet",
-    selector: 4459371029167934217n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var bittorrent_chain_testnet_default2 = network453;
-var network454 = {
-  chainId: "11142220",
-  chainSelector: {
-    name: "celo-sepolia",
-    selector: 3761762704474186180n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var celo_sepolia_default2 = network454;
-var network455 = {
-  chainId: "44787",
-  chainSelector: {
-    name: "celo-testnet-alfajores",
-    selector: 3552045678561919002n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var celo_testnet_alfajores_default2 = network455;
-var network456 = {
-  chainId: "812242",
-  chainSelector: {
-    name: "codex-testnet",
-    selector: 7225665875429174318n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var codex_testnet_default2 = network456;
-var network457 = {
-  chainId: "53",
-  chainSelector: {
-    name: "coinex_smart_chain-testnet",
-    selector: 8955032871639343000n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var coinex_smart_chain_testnet_default2 = network457;
-var network458 = {
-  chainId: "1114",
-  chainSelector: {
-    name: "core-testnet",
-    selector: 4264732132125536123n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var core_testnet_default2 = network458;
-var network459 = {
-  chainId: "102031",
-  chainSelector: {
-    name: "creditcoin-testnet",
-    selector: 16960985330067274105n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var creditcoin_testnet_default2 = network459;
-var network460 = {
-  chainId: "338",
-  chainSelector: {
-    name: "cronos-testnet",
-    selector: 2995292832068775165n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var cronos_testnet_default2 = network460;
-var network461 = {
-  chainId: "282",
-  chainSelector: {
-    name: "cronos-testnet-zkevm-1",
-    selector: 3842103497652714138n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var cronos_testnet_zkevm_1_default2 = network461;
-var network462 = {
-  chainId: "240",
-  chainSelector: {
-    name: "cronos-zkevm-testnet-sepolia",
-    selector: 16487132492576884721n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var cronos_zkevm_testnet_sepolia_default2 = network462;
-var network463 = {
-  chainId: "6281971",
-  chainSelector: {
-    name: "dogeos-testnet-chikyu",
-    selector: 7254999290874773717n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var dogeos_testnet_chikyu_default2 = network463;
-var network464 = {
-  chainId: "2025",
-  chainSelector: {
-    name: "dtcc-testnet-andesite",
-    selector: 15513093881969820114n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var dtcc_testnet_andesite_default2 = network464;
-var network465 = {
-  chainId: "33431",
-  chainSelector: {
-    name: "edge-testnet",
-    selector: 13222148116102326311n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var edge_testnet_default2 = network465;
-var network466 = {
-  chainId: "421613",
-  chainSelector: {
-    name: "ethereum-testnet-goerli-arbitrum-1",
-    selector: 6101244977088475029n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var ethereum_testnet_goerli_arbitrum_1_default2 = network466;
-var network467 = {
-  chainId: "84531",
-  chainSelector: {
-    name: "ethereum-testnet-goerli-base-1",
-    selector: 5790810961207155433n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var ethereum_testnet_goerli_base_1_default2 = network467;
-var network468 = {
-  chainId: "59140",
-  chainSelector: {
-    name: "ethereum-testnet-goerli-linea-1",
-    selector: 1355246678561316402n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var ethereum_testnet_goerli_linea_1_default2 = network468;
-var network469 = {
-  chainId: "5001",
-  chainSelector: {
-    name: "ethereum-testnet-goerli-mantle-1",
-    selector: 4168263376276232250n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var ethereum_testnet_goerli_mantle_1_default2 = network469;
-var network470 = {
-  chainId: "420",
-  chainSelector: {
-    name: "ethereum-testnet-goerli-optimism-1",
-    selector: 2664363617261496610n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var ethereum_testnet_goerli_optimism_1_default2 = network470;
-var network471 = {
-  chainId: "1442",
-  chainSelector: {
-    name: "ethereum-testnet-goerli-polygon-zkevm-1",
-    selector: 11059667695644972511n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var ethereum_testnet_goerli_polygon_zkevm_1_default2 = network471;
-var network472 = {
-  chainId: "280",
-  chainSelector: {
-    name: "ethereum-testnet-goerli-zksync-1",
-    selector: 6802309497652714138n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var ethereum_testnet_goerli_zksync_1_default2 = network472;
-var network473 = {
-  chainId: "17000",
-  chainSelector: {
-    name: "ethereum-testnet-holesky",
-    selector: 7717148896336251131n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var ethereum_testnet_holesky_default2 = network473;
-var network474 = {
-  chainId: "2522",
-  chainSelector: {
-    name: "ethereum-testnet-holesky-fraxtal-1",
-    selector: 8901520481741771655n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var ethereum_testnet_holesky_fraxtal_1_default2 = network474;
-var network475 = {
-  chainId: "2810",
-  chainSelector: {
-    name: "ethereum-testnet-holesky-morph-1",
-    selector: 8304510386741731151n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var ethereum_testnet_holesky_morph_1_default2 = network475;
-var network476 = {
-  chainId: "167009",
-  chainSelector: {
-    name: "ethereum-testnet-holesky-taiko-1",
-    selector: 7248756420937879088n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var ethereum_testnet_holesky_taiko_1_default2 = network476;
-var network477 = {
-  chainId: "560048",
-  chainSelector: {
-    name: "ethereum-testnet-hoodi",
-    selector: 10380998176179737091n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var ethereum_testnet_hoodi_default2 = network477;
-var network478 = {
-  chainId: "2910",
-  chainSelector: {
-    name: "ethereum-testnet-hoodi-morph",
-    selector: 1064004874793747259n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var ethereum_testnet_hoodi_morph_default2 = network478;
-var network479 = {
-  chainId: "167012",
-  chainSelector: {
-    name: "ethereum-testnet-hoodi-taiko",
-    selector: 9873759436596923887n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var ethereum_testnet_hoodi_taiko_default2 = network479;
-var network480 = {
-  chainId: "167013",
-  chainSelector: {
-    name: "ethereum-testnet-hoodi-taiko-1",
-    selector: 15858691699034549072n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var ethereum_testnet_hoodi_taiko_1_default2 = network480;
-var network481 = {
-  chainId: "7091047534",
-  chainSelector: {
-    name: "ethereum-testnet-plataberget",
-    selector: 12540949017250913122n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var ethereum_testnet_plataberget_default2 = network481;
-var network482 = {
-  chainId: "11155111",
-  chainSelector: {
-    name: "ethereum-testnet-sepolia",
-    selector: 16015286601757825753n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var ethereum_testnet_sepolia_default2 = network482;
-var network483 = {
-  chainId: "421614",
-  chainSelector: {
-    name: "ethereum-testnet-sepolia-arbitrum-1",
-    selector: 3478487238524512106n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var ethereum_testnet_sepolia_arbitrum_1_default2 = network483;
-var network484 = {
-  chainId: "12325",
-  chainSelector: {
-    name: "ethereum-testnet-sepolia-arbitrum-1-l3x-1",
-    selector: 3486622437121596122n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var ethereum_testnet_sepolia_arbitrum_1_l3x_1_default2 = network484;
-var network485 = {
-  chainId: "978657",
-  chainSelector: {
-    name: "ethereum-testnet-sepolia-arbitrum-1-treasure-1",
-    selector: 10443705513486043421n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var ethereum_testnet_sepolia_arbitrum_1_treasure_1_default2 = network485;
-var network486 = {
-  chainId: "84532",
-  chainSelector: {
-    name: "ethereum-testnet-sepolia-base-1",
-    selector: 10344971235874465080n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var ethereum_testnet_sepolia_base_1_default2 = network486;
-var network487 = {
-  chainId: "168587773",
-  chainSelector: {
-    name: "ethereum-testnet-sepolia-blast-1",
-    selector: 2027362563942762617n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var ethereum_testnet_sepolia_blast_1_default2 = network487;
-var network488 = {
-  chainId: "21000001",
-  chainSelector: {
-    name: "ethereum-testnet-sepolia-corn-1",
-    selector: 1467427327723633929n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var ethereum_testnet_sepolia_corn_1_default2 = network488;
-var network489 = {
-  chainId: "133",
-  chainSelector: {
-    name: "ethereum-testnet-sepolia-hashkey-1",
-    selector: 4356164186791070119n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var ethereum_testnet_sepolia_hashkey_1_default2 = network489;
-var network490 = {
-  chainId: "13473",
-  chainSelector: {
-    name: "ethereum-testnet-sepolia-immutable-zkevm-1",
-    selector: 4526165231216331901n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var ethereum_testnet_sepolia_immutable_zkevm_1_default2 = network490;
-var network491 = {
-  chainId: "2358",
-  chainSelector: {
-    name: "ethereum-testnet-sepolia-kroma-1",
-    selector: 5990477251245693094n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var ethereum_testnet_sepolia_kroma_1_default2 = network491;
-var network492 = {
-  chainId: "37111",
-  chainSelector: {
-    name: "ethereum-testnet-sepolia-lens-1",
-    selector: 6827576821754315911n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var ethereum_testnet_sepolia_lens_1_default2 = network492;
-var network493 = {
-  chainId: "59141",
-  chainSelector: {
-    name: "ethereum-testnet-sepolia-linea-1",
-    selector: 5719461335882077547n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var ethereum_testnet_sepolia_linea_1_default2 = network493;
-var network494 = {
-  chainId: "4202",
-  chainSelector: {
-    name: "ethereum-testnet-sepolia-lisk-1",
-    selector: 5298399861320400553n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var ethereum_testnet_sepolia_lisk_1_default2 = network494;
-var network495 = {
-  chainId: "5003",
-  chainSelector: {
-    name: "ethereum-testnet-sepolia-mantle-1",
-    selector: 8236463271206331221n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var ethereum_testnet_sepolia_mantle_1_default2 = network495;
-var network496 = {
-  chainId: "59902",
-  chainSelector: {
-    name: "ethereum-testnet-sepolia-metis-1",
-    selector: 3777822886988675105n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var ethereum_testnet_sepolia_metis_1_default2 = network496;
-var network497 = {
-  chainId: "919",
-  chainSelector: {
-    name: "ethereum-testnet-sepolia-mode-1",
-    selector: 829525985033418733n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var ethereum_testnet_sepolia_mode_1_default2 = network497;
-var network498 = {
-  chainId: "11155420",
-  chainSelector: {
-    name: "ethereum-testnet-sepolia-optimism-1",
-    selector: 5224473277236331295n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var ethereum_testnet_sepolia_optimism_1_default2 = network498;
-var network499 = {
-  chainId: "717160",
-  chainSelector: {
-    name: "ethereum-testnet-sepolia-polygon-validium-1",
-    selector: 4418231248214522936n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var ethereum_testnet_sepolia_polygon_validium_1_default2 = network499;
-var network500 = {
-  chainId: "2442",
-  chainSelector: {
-    name: "ethereum-testnet-sepolia-polygon-zkevm-1",
-    selector: 1654667687261492630n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var ethereum_testnet_sepolia_polygon_zkevm_1_default2 = network500;
-var network501 = {
-  chainId: "202601",
-  chainSelector: {
-    name: "ethereum-testnet-sepolia-ronin-1",
-    selector: 1091131740251125869n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var ethereum_testnet_sepolia_ronin_1_default2 = network501;
-var network502 = {
-  chainId: "534351",
-  chainSelector: {
-    name: "ethereum-testnet-sepolia-scroll-1",
-    selector: 2279865765895943307n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var ethereum_testnet_sepolia_scroll_1_default2 = network502;
-var network503 = {
-  chainId: "1946",
-  chainSelector: {
-    name: "ethereum-testnet-sepolia-soneium-1",
-    selector: 686603546605904534n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var ethereum_testnet_sepolia_soneium_1_default2 = network503;
-var network504 = {
-  chainId: "1301",
-  chainSelector: {
-    name: "ethereum-testnet-sepolia-unichain-1",
-    selector: 14135854469784514356n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var ethereum_testnet_sepolia_unichain_1_default2 = network504;
-var network505 = {
-  chainId: "4801",
-  chainSelector: {
-    name: "ethereum-testnet-sepolia-worldchain-1",
-    selector: 5299555114858065850n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var ethereum_testnet_sepolia_worldchain_1_default2 = network505;
-var network506 = {
-  chainId: "195",
-  chainSelector: {
-    name: "ethereum-testnet-sepolia-xlayer-1",
-    selector: 2066098519157881736n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var ethereum_testnet_sepolia_xlayer_1_default2 = network506;
-var network507 = {
-  chainId: "48899",
-  chainSelector: {
-    name: "ethereum-testnet-sepolia-zircuit-1",
-    selector: 4562743618362911021n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var ethereum_testnet_sepolia_zircuit_1_default2 = network507;
-var network508 = {
-  chainId: "300",
-  chainSelector: {
-    name: "ethereum-testnet-sepolia-zksync-1",
-    selector: 6898391096552792247n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var ethereum_testnet_sepolia_zksync_1_default2 = network508;
-var network509 = {
-  chainId: "128123",
-  chainSelector: {
-    name: "etherlink-testnet",
-    selector: 1910019406958449359n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var etherlink_testnet_default2 = network509;
-var network510 = {
-  chainId: "6398",
-  chainSelector: {
-    name: "everclear-testnet-sepolia",
-    selector: 379340054879810246n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var everclear_testnet_sepolia_default2 = network510;
-var network511 = {
-  chainId: "4002",
-  chainSelector: {
-    name: "fantom-testnet",
-    selector: 4905564228793744293n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var fantom_testnet_default2 = network511;
-var network512 = {
-  chainId: "31415926",
-  chainSelector: {
-    name: "filecoin-testnet",
-    selector: 7060342227814389000n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var filecoin_testnet_default2 = network512;
-var network513 = {
-  chainId: "85",
-  chainSelector: {
-    name: "gate-chain-testnet-meteora",
-    selector: 3558960680482140165n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var gate_chain_testnet_meteora_default2 = network513;
-var network514 = {
-  chainId: "10087",
-  chainSelector: {
-    name: "gate-layer-testnet",
-    selector: 3667207123485082040n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var gate_layer_testnet_default2 = network514;
-var network515 = {
-  chainId: "1337",
-  chainSelector: {
-    name: "geth-testnet",
-    selector: 3379446385462418246n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var geth_testnet_default2 = network515;
-var network516 = {
-  chainId: "7095321190",
-  chainSelector: {
-    name: "glamsterdam-devnet-5",
-    selector: 10073034426865795585n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var glamsterdam_devnet_5_default2 = network516;
-var network517 = {
-  chainId: "7052886157",
-  chainSelector: {
-    name: "glamsterdam-devnet-6",
-    selector: 410896468069059699n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var glamsterdam_devnet_6_default2 = network517;
-var network518 = {
-  chainId: "10200",
-  chainSelector: {
-    name: "gnosis_chain-testnet-chiado",
-    selector: 8871595565390010547n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var gnosis_chain_testnet_chiado_default2 = network518;
-var network519 = {
-  chainId: "7771625",
-  chainSelector: {
-    name: "gravity-testnet-longevity",
-    selector: 9181335567442030426n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var gravity_testnet_longevity_default2 = network519;
-var network520 = {
-  chainId: "296",
-  chainSelector: {
-    name: "hedera-testnet",
-    selector: 222782988166878823n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var hedera_testnet_default2 = network520;
-var network521 = {
-  chainId: "743111",
-  chainSelector: {
-    name: "hemi-testnet-sepolia",
-    selector: 16126893759944359622n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var hemi_testnet_sepolia_default2 = network521;
-var network522 = {
-  chainId: "998",
-  chainSelector: {
-    name: "hyperliquid-testnet",
-    selector: 4286062357653186312n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var hyperliquid_testnet_default2 = network522;
-var network523 = {
-  chainId: "763373",
-  chainSelector: {
-    name: "ink-testnet-sepolia",
-    selector: 9763904284804119144n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var ink_testnet_sepolia_default2 = network523;
-var network524 = {
-  chainId: "679",
-  chainSelector: {
-    name: "janction-testnet-sepolia",
-    selector: 5059197667603797935n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var janction_testnet_sepolia_default2 = network524;
-var network525 = {
-  chainId: "2019775",
-  chainSelector: {
-    name: "jovay-testnet",
-    selector: 945045181441419236n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var jovay_testnet_default2 = network525;
-var network526 = {
-  chainId: "1001",
-  chainSelector: {
-    name: "kaia-testnet-kairos",
-    selector: 2624132734533621656n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var kaia_testnet_kairos_default2 = network526;
-var network527 = {
-  chainId: "2221",
-  chainSelector: {
-    name: "kava-testnet",
-    selector: 2110537777356199208n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var kava_testnet_default2 = network527;
-var network528 = {
-  chainId: "6342",
-  chainSelector: {
-    name: "megaeth-testnet",
-    selector: 2443239559770384419n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var megaeth_testnet_default2 = network528;
-var network529 = {
-  chainId: "6343",
-  chainSelector: {
-    name: "megaeth-testnet-2",
-    selector: 18241817625092392675n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var megaeth_testnet_2_default2 = network529;
-var network530 = {
-  chainId: "2129",
-  chainSelector: {
-    name: "memento-testnet",
-    selector: 12168171414969487009n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var memento_testnet_default2 = network530;
-var network531 = {
-  chainId: "1740",
-  chainSelector: {
-    name: "metal-testnet",
-    selector: 6286293440461807648n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var metal_testnet_default2 = network531;
-var network532 = {
-  chainId: "192940",
-  chainSelector: {
-    name: "mind-testnet",
-    selector: 7189150270347329685n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var mind_testnet_default2 = network532;
-var network533 = {
-  chainId: "1687",
-  chainSelector: {
-    name: "mint-testnet",
-    selector: 10749384167430721561n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var mint_testnet_default2 = network533;
-var network534 = {
-  chainId: "10143",
-  chainSelector: {
-    name: "monad-testnet",
-    selector: 2183018362218727504n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var monad_testnet_default2 = network534;
-var network535 = {
-  chainId: "10323",
-  chainSelector: {
-    name: "mova-testnet",
-    selector: 9211758560309513668n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var mova_testnet_default2 = network535;
-var network536 = {
-  chainId: "398",
-  chainSelector: {
-    name: "near-testnet",
-    selector: 5061593697262339000n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var near_testnet_default2 = network536;
-var network537 = {
-  chainId: "9559",
-  chainSelector: {
-    name: "neonlink-testnet",
-    selector: 1113014352258747600n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var neonlink_testnet_default2 = network537;
-var network538 = {
-  chainId: "12227332",
-  chainSelector: {
-    name: "neox-testnet-t4",
-    selector: 2217764097022649312n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var neox_testnet_t4_default2 = network538;
-var network539 = {
-  chainId: "5668",
-  chainSelector: {
-    name: "nexon-dev",
-    selector: 8911150974185440581n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var nexon_dev_default2 = network539;
-var network540 = {
-  chainId: "6930",
-  chainSelector: {
-    name: "nibiru-testnet",
-    selector: 305104239123120457n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var nibiru_testnet_default2 = network540;
-var network541 = {
-  chainId: "9000",
-  chainSelector: {
-    name: "ondo-testnet",
-    selector: 344208382356656551n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var ondo_testnet_default2 = network541;
-var network542 = {
-  chainId: "688689",
-  chainSelector: {
-    name: "pharos-atlantic-testnet",
-    selector: 16098325658947243212n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var pharos_atlantic_testnet_default2 = network542;
-var network543 = {
-  chainId: "688688",
-  chainSelector: {
-    name: "pharos-testnet",
-    selector: 4012524741200567430n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var pharos_testnet_default2 = network543;
-var network544 = {
-  chainId: "9746",
-  chainSelector: {
-    name: "plasma-testnet",
-    selector: 3967220077692964309n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var plasma_testnet_default2 = network544;
-var network545 = {
-  chainId: "98864",
-  chainSelector: {
-    name: "plume-devnet",
-    selector: 3743020999916460931n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var plume_devnet_default2 = network545;
-var network546 = {
-  chainId: "161221135",
-  chainSelector: {
-    name: "plume-testnet",
-    selector: 14684575664602284776n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var plume_testnet_default2 = network546;
-var network547 = {
-  chainId: "98867",
-  chainSelector: {
-    name: "plume-testnet-sepolia",
-    selector: 13874588925447303949n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var plume_testnet_sepolia_default2 = network547;
-var network548 = {
-  chainId: "81",
-  chainSelector: {
-    name: "polkadot-testnet-astar-shibuya",
-    selector: 6955638871347136141n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var polkadot_testnet_astar_shibuya_default2 = network548;
-var network549 = {
-  chainId: "2088",
-  chainSelector: {
-    name: "polkadot-testnet-centrifuge-altair",
-    selector: 2333097300889804761n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var polkadot_testnet_centrifuge_altair_default2 = network549;
-var network550 = {
-  chainId: "45",
-  chainSelector: {
-    name: "polkadot-testnet-darwinia-pangoro",
-    selector: 4340886533089894000n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var polkadot_testnet_darwinia_pangoro_default2 = network550;
-var network551 = {
-  chainId: "1287",
-  chainSelector: {
-    name: "polkadot-testnet-moonbeam-moonbase",
-    selector: 5361632739113536121n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var polkadot_testnet_moonbeam_moonbase_default2 = network551;
-var network552 = {
-  chainId: "80002",
-  chainSelector: {
-    name: "polygon-testnet-amoy",
-    selector: 16281711391670634445n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var polygon_testnet_amoy_default2 = network552;
-var network553 = {
-  chainId: "80001",
-  chainSelector: {
-    name: "polygon-testnet-mumbai",
-    selector: 12532609583862916517n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var polygon_testnet_mumbai_default2 = network553;
-var network554 = {
-  chainId: "129399",
-  chainSelector: {
-    name: "polygon-testnet-tatara",
-    selector: 9090863410735740267n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var polygon_testnet_tatara_default2 = network554;
-var network555 = {
-  chainId: "2024",
-  chainSelector: {
-    name: "private-testnet-andesite",
-    selector: 6915682381028791124n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var private_testnet_andesite_default2 = network555;
-var network556 = {
-  chainId: "4103882950",
-  chainSelector: {
-    name: "private-testnet-basalt",
-    selector: 18362000170840307455n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var private_testnet_basalt_default2 = network556;
-var network557 = {
-  chainId: "2023",
-  chainSelector: {
-    name: "private-testnet-granite",
-    selector: 3260900564719373474n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var private_testnet_granite_default2 = network557;
-var network558 = {
-  chainId: "424242",
-  chainSelector: {
-    name: "private-testnet-mica",
-    selector: 4489326297382772450n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var private_testnet_mica_default2 = network558;
-var network559 = {
-  chainId: "682",
-  chainSelector: {
-    name: "private-testnet-obsidian",
-    selector: 6260932437388305511n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var private_testnet_obsidian_default2 = network559;
-var network560 = {
-  chainId: "45439",
-  chainSelector: {
-    name: "private-testnet-opala",
-    selector: 8446413392851542429n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var private_testnet_opala_default2 = network560;
-var network561 = {
-  chainId: "2026041004",
-  chainSelector: {
-    name: "private-testnet-pumice",
-    selector: 1564738277398880633n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var private_testnet_pumice_default2 = network561;
-var network562 = {
-  chainId: "2026041002",
-  chainSelector: {
-    name: "private-testnet-quartzite",
-    selector: 4175996748267305081n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var private_testnet_quartzite_default2 = network562;
-var network563 = {
-  chainId: "2026041003",
-  chainSelector: {
-    name: "private-testnet-rhyolite",
-    selector: 604447335222770945n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var private_testnet_rhyolite_default2 = network563;
-var network564 = {
-  chainId: "46630",
-  chainSelector: {
-    name: "robinhood-testnet",
-    selector: 2032988798112970440n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var robinhood_testnet_default2 = network564;
-var network565 = {
-  chainId: "2021",
-  chainSelector: {
-    name: "ronin-testnet-saigon",
-    selector: 13116810400804392105n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var ronin_testnet_saigon_default2 = network565;
-var network566 = {
-  chainId: "1328",
-  chainSelector: {
-    name: "sei-testnet-atlantic",
-    selector: 1216300075444106652n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var sei_testnet_atlantic_default2 = network566;
-var network567 = {
-  chainId: "157",
-  chainSelector: {
-    name: "shibarium-testnet-puppynet",
-    selector: 17833296867764334567n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var shibarium_testnet_puppynet_default2 = network567;
-var network568 = {
-  chainId: "14601",
-  chainSelector: {
-    name: "sonic-testnet",
-    selector: 1763698235108410440n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var sonic_testnet_default2 = network568;
-var network569 = {
-  chainId: "57054",
-  chainSelector: {
-    name: "sonic-testnet-blaze",
-    selector: 3676871237479449268n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var sonic_testnet_blaze_default2 = network569;
-var network570 = {
-  chainId: "2201",
-  chainSelector: {
-    name: "stable-testnet",
-    selector: 11793402411494852765n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var stable_testnet_default2 = network570;
-var network571 = {
-  chainId: "1513",
-  chainSelector: {
-    name: "story-testnet",
-    selector: 4237030917318060427n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var story_testnet_default2 = network571;
-var network572 = {
-  chainId: "53302",
-  chainSelector: {
-    name: "superseed-testnet",
-    selector: 13694007683517087973n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var superseed_testnet_default2 = network572;
-var network573 = {
-  chainId: "364301",
-  chainSelector: {
-    name: "t-rex-testnet",
-    selector: 17611928792452358269n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var t_rex_testnet_default2 = network573;
-var network574 = {
-  chainId: "2391",
-  chainSelector: {
-    name: "tac-testnet",
-    selector: 9488606126177218005n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var tac_testnet_default2 = network574;
-var network575 = {
-  chainId: "41",
-  chainSelector: {
-    name: "telos-evm-testnet",
-    selector: 729797994450396300n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var telos_evm_testnet_default2 = network575;
-var network576 = {
-  chainId: "42429",
-  chainSelector: {
-    name: "tempo-testnet",
-    selector: 3963528237232804922n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var tempo_testnet_default2 = network576;
-var network577 = {
-  chainId: "42431",
-  chainSelector: {
-    name: "tempo-testnet-moderato",
-    selector: 8457817439310187923n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var tempo_testnet_moderato_default2 = network577;
-var network578 = {
-  chainId: "978658",
-  chainSelector: {
-    name: "treasure-testnet-topaz",
-    selector: 3676916124122457866n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var treasure_testnet_topaz_default2 = network578;
-var network579 = {
-  chainId: "3360022319",
-  chainSelector: {
-    name: "tron-devnet-evm",
-    selector: 13231703482326770600n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var tron_devnet_evm_default2 = network579;
-var network580 = {
-  chainId: "3448148188",
-  chainSelector: {
-    name: "tron-testnet-nile-evm",
-    selector: 2052925811360307749n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var tron_testnet_nile_evm_default2 = network580;
-var network581 = {
-  chainId: "2494104990",
-  chainSelector: {
-    name: "tron-testnet-shasta-evm",
-    selector: 13231703482326770598n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var tron_testnet_shasta_evm_default2 = network581;
-var network582 = {
-  chainId: "111",
-  chainSelector: {
-    name: "velas-testnet",
-    selector: 572210378683744374n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var velas_testnet_default2 = network582;
-var network583 = {
-  chainId: "1112",
-  chainSelector: {
-    name: "wemix-testnet",
-    selector: 9284632837123596123n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var wemix_testnet_default2 = network583;
-var network584 = {
-  chainId: "51",
-  chainSelector: {
-    name: "xdc-testnet",
-    selector: 3017758115101368649n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var xdc_testnet_default2 = network584;
-var network585 = {
-  chainId: "1952",
-  chainSelector: {
-    name: "xlayer-testnet",
-    selector: 10212741611335999305n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var xlayer_testnet_default2 = network585;
-var network586 = {
-  chainId: "80087",
-  chainSelector: {
-    name: "zero-g-testnet-galileo",
-    selector: 2285225387454015855n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var zero_g_testnet_galileo_default2 = network586;
-var network587 = {
-  chainId: "48898",
-  chainSelector: {
-    name: "zircuit-testnet-garfield",
-    selector: 13781831279385219069n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var zircuit_testnet_garfield_default2 = network587;
-var network588 = {
-  chainId: "810181",
-  chainSelector: {
-    name: "zklink_nova-testnet",
-    selector: 5837261596322416298n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var zklink_nova_testnet_default2 = network588;
-var network589 = {
-  chainId: "999999999",
-  chainSelector: {
-    name: "zora-testnet",
-    selector: 16244020411108056671n
-  },
-  chainFamily: "evm",
-  networkType: "testnet"
-};
-var zora_testnet_default2 = network589;
-var network590 = {
-  chainId: "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG",
-  chainSelector: {
-    name: "solana-devnet",
-    selector: 16423721717087811551n
-  },
-  chainFamily: "solana",
-  networkType: "testnet"
-};
-var solana_devnet_default2 = network590;
-var network591 = {
-  chainId: "4uhcVJyU9pJkvQyS88uRDiswHXSCkY3zQawwpjk2NsNY",
-  chainSelector: {
-    name: "solana-testnet",
-    selector: 6302590918974934319n
-  },
-  chainFamily: "solana",
-  networkType: "testnet"
-};
-var solana_testnet_default2 = network591;
-var network592 = {
-  chainId: "4",
-  chainSelector: {
-    name: "sui-localnet",
-    selector: 18395503381733958356n
-  },
-  chainFamily: "sui",
-  networkType: "testnet"
-};
-var sui_localnet_default2 = network592;
-var network593 = {
-  chainId: "2",
-  chainSelector: {
-    name: "sui-testnet",
-    selector: 9762610643973837292n
-  },
-  chainFamily: "sui",
-  networkType: "testnet"
-};
-var sui_testnet_default2 = network593;
-var network594 = {
-  chainId: "-217",
-  chainSelector: {
-    name: "ton-localnet",
-    selector: 13879075125137744094n
-  },
-  chainFamily: "ton",
-  networkType: "testnet"
-};
-var ton_localnet_default2 = network594;
-var network595 = {
-  chainId: "-3",
-  chainSelector: {
-    name: "ton-testnet",
-    selector: 1399300952838017768n
-  },
-  chainFamily: "ton",
-  networkType: "testnet"
-};
-var ton_testnet_default2 = network595;
-var network596 = {
-  chainId: "3360022319",
-  chainSelector: {
-    name: "tron-devnet",
-    selector: 13231703482326770599n
-  },
-  chainFamily: "tron",
-  networkType: "testnet"
-};
-var tron_devnet_default2 = network596;
-var network597 = {
-  chainId: "3448148188",
-  chainSelector: {
-    name: "tron-testnet-nile",
-    selector: 2052925811360307740n
-  },
-  chainFamily: "tron",
-  networkType: "testnet"
-};
-var tron_testnet_nile_default2 = network597;
-var network598 = {
-  chainId: "2494104990",
-  chainSelector: {
-    name: "tron-testnet-shasta",
-    selector: 13231703482326770597n
-  },
-  chainFamily: "tron",
-  networkType: "testnet"
-};
-var tron_testnet_shasta_default2 = network598;
-var mainnetBySelector2 = new Map([
-  [5009297550715157269n, ethereum_mainnet_default2],
-  [3734403246176062136n, ethereum_mainnet_optimism_1_default2],
-  [1456215246176062136n, cronos_mainnet_default2],
-  [11964252391146578476n, rootstock_mainnet_default2],
-  [1477345371608778000n, telos_evm_mainnet_default2],
-  [8866418665544333000n, polkadot_mainnet_darwinia_default2],
-  [17673274061779414707n, xdc_mainnet_default2],
-  [1761333065194157300n, coinex_smart_chain_mainnet_default2],
-  [11344663589394136015n, binance_smart_chain_mainnet_default2],
-  [9688382747979139404n, gate_chain_mainnet_default2],
-  [465200170687744372n, gnosis_chain_mainnet_default2],
-  [374210358663784372n, velas_mainnet_default2],
-  [3993510008929295315n, shibarium_mainnet_default2],
-  [1923510103922296319n, ethereum_mainnet_unichain_1_default2],
-  [4051577828743386545n, polygon_mainnet_default2],
-  [8481857512324358265n, monad_mainnet_default2],
-  [1673871237479749969n, sonic_mainnet_default2],
-  [7613811247471741961n, ethereum_mainnet_hashkey_1_default2],
-  [17164792800244661392n, mint_mainnet_default2],
-  [3016212468291539606n, ethereum_mainnet_xlayer_1_default2],
-  [3776006016387883143n, bittorrent_chain_mainnet_default2],
-  [465944652040885897n, binance_smart_chain_mainnet_opbnb_1_default2],
-  [5406759801798337480n, bitcoin_mainnet_bsquared_1_default2],
-  [11690709103138290329n, mind_mainnet_default2],
-  [5608378062013572713n, lens_mainnet_default2],
-  [5936861837188149645n, tac_mainnet_default2],
-  [3768048213127883732n, fantom_mainnet_default2],
-  [1462016016387883143n, fraxtal_mainnet_default2],
-  [3719320017875267166n, ethereum_mainnet_kroma_1_default2],
-  [8239338020728974000n, neonlink_mainnet_default2],
-  [3229138320728879060n, hedera_mainnet_default2],
-  [4561443241176882990n, filecoin_mainnet_default2],
-  [1562403441176082196n, ethereum_mainnet_zksync_1_default2],
-  [8788096068760390840n, cronos_zkevm_mainnet_default2],
-  [2039744413822257700n, near_mainnet_default2],
-  [1939936305787790600n, areon_mainnet_default2],
-  [2049429975587534727n, ethereum_mainnet_worldchain_1_default2],
-  [6422105447186081193n, polkadot_mainnet_astar_default2],
-  [9107126442626377432n, janction_mainnet_default2],
-  [2135107236357186872n, bittensor_mainnet_default2],
-  [16978377838628290997n, stable_mainnet_default2],
-  [2442541497099098535n, hyperliquid_mainnet_default2],
-  [3358365939762719202n, conflux_mainnet_default2],
-  [8805746078405598895n, ethereum_mainnet_metis_1_default2],
-  [4348158687435793198n, ethereum_mainnet_polygon_zkevm_1_default2],
-  [5142893604156789321n, wemix_mainnet_default2],
-  [1224752112135636129n, core_mainnet_default2],
-  [15293031020466096408n, lisk_mainnet_default2],
-  [1252863800116739621n, polkadot_mainnet_moonbeam_default2],
-  [1355020143337428062n, kusama_mainnet_moonriver_default2],
-  [9027416829622342829n, sei_mainnet_default2],
-  [7801139999541420232n, pharos_mainnet_default2],
-  [13447077090413146373n, metal_mainnet_default2],
-  [12505351618335765396n, soneium_mainnet_default2],
-  [4874388048629246000n, bitcichain_mainnet_default2],
-  [6916147374840168594n, ronin_mainnet_default2],
-  [8175830712062617656n, polkadot_mainnet_centrifuge_default2],
-  [7550000543357438061n, kava_mainnet_default2],
-  [3577778157919314504n, abstract_mainnet_default2],
-  [18164309074156128038n, morph_mainnet_default2],
-  [6325494908023253251n, edge_mainnet_default2],
-  [4560701533377838164n, bitcoin_mainnet_botanix_default2],
-  [1540201334317828111n, ethereum_mainnet_astar_zkevm_1_default2],
-  [241851231317828981n, bitcoin_merlin_mainnet_default2],
-  [7281642695469137430n, tempo_mainnet_default2],
-  [6093540873831549674n, megaeth_mainnet_default2],
-  [6180753054346818345n, robinhood_mainnet_default2],
-  [1556008542357238666n, ethereum_mainnet_mantle_1_default2],
-  [6370580034781731079n, arc_mainnet_default2],
-  [470401360549526817n, superseed_mainnet_default2],
-  [17349189558768828726n, nibiru_mainnet_default2],
-  [10817664450262215148n, zetachain_mainnet_default2],
-  [9813823125703490621n, kaia_mainnet_default2],
-  [15971525489660198786n, ethereum_mainnet_base_1_default2],
-  [9335212494177455608n, plasma_mainnet_default2],
-  [9373518659714509671n, gate_layer_mainnet_default2],
-  [3162193654116181371n, ethereum_mainnet_arbitrum_1_l3x_1_default2],
-  [1237925231416731909n, ethereum_mainnet_immutable_zkevm_1_default2],
-  [4426351306075016396n, _0g_mainnet_default2],
-  [9723842205701363942n, everclear_mainnet_default2],
-  [14894068710063348487n, apechain_mainnet_default2],
-  [7264351850409363825n, ethereum_mainnet_mode_1_default2],
-  [4829375610284793157n, ab_mainnet_default2],
-  [4059281736450291836n, adi_mainnet_default2],
-  [4949039107694359620n, ethereum_mainnet_arbitrum_1_default2],
-  [1346049177634351622n, celo_mainnet_default2],
-  [13624601974233774587n, etherlink_mainnet_default2],
-  [1804312132722180201n, hemi_mainnet_default2],
-  [6433500567565415381n, avalanche_mainnet_default2],
-  [7222032299962346917n, neox_mainnet_default2],
-  [17198166215261833993n, ethereum_mainnet_zircuit_1_default2],
-  [6473245816409426016n, memento_mainnet_default2],
-  [3461204551265785888n, ethereum_mainnet_ink_1_default2],
-  [4627098889531055414n, ethereum_mainnet_linea_1_default2],
-  [15758750456714168963n, nexon_mainnet_lith_default2],
-  [3849287863852499584n, bitcoin_mainnet_bob_1_default2],
-  [5214452172935136222n, treasure_mainnet_default2],
-  [3314641565992046393n, mova_mainnet_default2],
-  [4215185756725900654n, mova_mainnet_2_default2],
-  [12657445206920369324n, nexon_mainnet_henesys_default2],
-  [1294465214383781161n, berachain_mainnet_default2],
-  [9478124434908827753n, codex_mainnet_default2],
-  [4411394078118774322n, ethereum_mainnet_blast_1_default2],
-  [17912061998839310979n, plume_mainnet_default2],
-  [18240105181246962294n, creditcoin_mainnet_default2],
-  [2988178761202034333n, gravity_mainnet_default2],
-  [16468599424800719238n, ethereum_mainnet_taiko_1_default2],
-  [7937294810946806131n, bitcoin_mainnet_bitlayer_1_default2],
-  [5463201557265485081n, avalanche_subnet_dexalot_mainnet_default2],
-  [13204309965629103672n, ethereum_mainnet_scroll_1_default2],
-  [2459028469735686113n, polygon_mainnet_katana_default2],
-  [14632960069656270105n, nexon_qa_default2],
-  [4350319965322101699n, zklink_nova_mainnet_default2],
-  [5556806327594153475n, nexon_stage_default2],
-  [1010349088906777999n, ethereum_mainnet_arbitrum_1_treasure_1_default2],
-  [1523760397290643893n, jovay_mainnet_default2],
-  [3555797439612589184n, zora_mainnet_default2],
-  [9043146809313071210n, corn_mainnet_default2],
-  [1546563616611573946n, tron_mainnet_evm_default2],
-  [13879014182901017172n, dtcc_mainnet_appchain_default2],
-  [124615329519749607n, solana_mainnet_default2],
-  [4741433654826277614n, aptos_mainnet_default2],
-  [17529533435026248318n, sui_mainnet_default2],
-  [16448340667252469081n, ton_mainnet_default2],
-  [1546563616611573945n, tron_mainnet_default2]
-]);
-var testnetBySelector2 = new Map([
-  [8953668971247136127n, bitcoin_testnet_rootstock_default2],
-  [729797994450396300n, telos_evm_testnet_default2],
-  [4340886533089894000n, polkadot_testnet_darwinia_pangoro_default2],
-  [3017758115101368649n, xdc_testnet_default2],
-  [8955032871639343000n, coinex_smart_chain_testnet_default2],
-  [6955638871347136141n, polkadot_testnet_astar_shibuya_default2],
-  [3558960680482140165n, gate_chain_testnet_meteora_default2],
-  [13264668187771770619n, binance_smart_chain_testnet_default2],
-  [572210378683744374n, velas_testnet_default2],
-  [4356164186791070119n, ethereum_testnet_sepolia_hashkey_1_default2],
-  [17833296867764334567n, shibarium_testnet_puppynet_default2],
-  [2066098519157881736n, ethereum_testnet_sepolia_xlayer_1_default2],
-  [16487132492576884721n, cronos_zkevm_testnet_sepolia_default2],
-  [6802309497652714138n, ethereum_testnet_goerli_zksync_1_default2],
-  [3842103497652714138n, cronos_testnet_zkevm_1_default2],
-  [222782988166878823n, hedera_testnet_default2],
-  [6898391096552792247n, ethereum_testnet_sepolia_zksync_1_default2],
-  [2995292832068775165n, cronos_testnet_default2],
-  [5061593697262339000n, near_testnet_default2],
-  [2664363617261496610n, ethereum_testnet_goerli_optimism_1_default2],
-  [7317911323415911000n, areon_testnet_default2],
-  [5059197667603797935n, janction_testnet_sepolia_default2],
-  [6260932437388305511n, private_testnet_obsidian_default2],
-  [829525985033418733n, ethereum_testnet_sepolia_mode_1_default2],
-  [2177900824115119161n, bittensor_testnet_default2],
-  [4286062357653186312n, hyperliquid_testnet_default2],
-  [2624132734533621656n, kaia_testnet_kairos_default2],
-  [4459371029167934217n, bittorrent_chain_testnet_default2],
-  [9284632837123596123n, wemix_testnet_default2],
-  [4264732132125536123n, core_testnet_default2],
-  [1948510578179542068n, bitcoin_testnet_bsquared_1_default2],
-  [5361632739113536121n, polkadot_testnet_moonbeam_moonbase_default2],
-  [14135854469784514356n, ethereum_testnet_sepolia_unichain_1_default2],
-  [1216300075444106652n, sei_testnet_atlantic_default2],
-  [3379446385462418246n, geth_testnet_default2],
-  [11059667695644972511n, ethereum_testnet_goerli_polygon_zkevm_1_default2],
-  [4237030917318060427n, story_testnet_default2],
-  [10749384167430721561n, mint_testnet_default2],
-  [6286293440461807648n, metal_testnet_default2],
-  [4888058894222120000n, bitcichain_testnet_default2],
-  [686603546605904534n, ethereum_testnet_sepolia_soneium_1_default2],
-  [10212741611335999305n, xlayer_testnet_default2],
-  [13116810400804392105n, ronin_testnet_saigon_default2],
-  [3260900564719373474n, private_testnet_granite_default2],
-  [6915682381028791124n, private_testnet_andesite_default2],
-  [15513093881969820114n, dtcc_testnet_andesite_default2],
-  [2333097300889804761n, polkadot_testnet_centrifuge_altair_default2],
-  [12168171414969487009n, memento_testnet_default2],
-  [11793402411494852765n, stable_testnet_default2],
-  [2110537777356199208n, kava_testnet_default2],
-  [5990477251245693094n, ethereum_testnet_sepolia_kroma_1_default2],
-  [9488606126177218005n, tac_testnet_default2],
-  [1654667687261492630n, ethereum_testnet_sepolia_polygon_zkevm_1_default2],
-  [8901520481741771655n, ethereum_testnet_holesky_fraxtal_1_default2],
-  [8304510386741731151n, ethereum_testnet_holesky_morph_1_default2],
-  [1064004874793747259n, ethereum_testnet_hoodi_morph_default2],
-  [1467223411771711614n, bitcoin_testnet_botanix_default2],
-  [4905564228793744293n, fantom_testnet_default2],
-  [5298399861320400553n, ethereum_testnet_sepolia_lisk_1_default2],
-  [5299555114858065850n, ethereum_testnet_sepolia_worldchain_1_default2],
-  [4168263376276232250n, ethereum_testnet_goerli_mantle_1_default2],
-  [8236463271206331221n, ethereum_testnet_sepolia_mantle_1_default2],
-  [13274425992935471758n, binance_smart_chain_testnet_opbnb_1_default2],
-  [8911150974185440581n, nexon_dev_default2],
-  [2443239559770384419n, megaeth_testnet_default2],
-  [18241817625092392675n, megaeth_testnet_2_default2],
-  [379340054879810246n, everclear_testnet_sepolia_default2],
-  [305104239123120457n, nibiru_testnet_default2],
-  [344208382356656551n, ondo_testnet_default2],
-  [1113014352258747600n, neonlink_testnet_default2],
-  [3967220077692964309n, plasma_testnet_default2],
-  [3667207123485082040n, gate_layer_testnet_default2],
-  [2183018362218727504n, monad_testnet_default2],
-  [8871595565390010547n, gnosis_chain_testnet_chiado_default2],
-  [9211758560309513668n, mova_testnet_default2],
-  [16235373811196386733n, abstract_testnet_default2],
-  [3486622437121596122n, ethereum_testnet_sepolia_arbitrum_1_l3x_1_default2],
-  [4526165231216331901n, ethereum_testnet_sepolia_immutable_zkevm_1_default2],
-  [1763698235108410440n, sonic_testnet_default2],
-  [16088006396410204581n, _0g_testnet_newton_default2],
-  [2131427466778448014n, _0g_testnet_galileo_default2],
-  [6892437333620424805n, _0g_testnet_galileo_1_default2],
-  [7717148896336251131n, ethereum_testnet_holesky_default2],
-  [7051849327615092843n, ab_testnet_default2],
-  [7759470850252068959n, anvil_devnet_default2],
-  [9900119385908781505n, apechain_testnet_curtis_default2],
-  [13222148116102326311n, edge_testnet_default2],
-  [6827576821754315911n, ethereum_testnet_sepolia_lens_1_default2],
-  [3963528237232804922n, tempo_testnet_default2],
-  [8457817439310187923n, tempo_testnet_moderato_default2],
-  [14767482510784806043n, avalanche_testnet_fuji_default2],
-  [3552045678561919002n, celo_testnet_alfajores_default2],
-  [8446413392851542429n, private_testnet_opala_default2],
-  [2032988798112970440n, robinhood_testnet_default2],
-  [13781831279385219069n, zircuit_testnet_garfield_default2],
-  [4562743618362911021n, ethereum_testnet_sepolia_zircuit_1_default2],
-  [13694007683517087973n, superseed_testnet_default2],
-  [3676871237479449268n, sonic_testnet_blaze_default2],
-  [1355246678561316402n, ethereum_testnet_goerli_linea_1_default2],
-  [5719461335882077547n, ethereum_testnet_sepolia_linea_1_default2],
-  [3777822886988675105n, ethereum_testnet_sepolia_metis_1_default2],
-  [12532609583862916517n, polygon_testnet_mumbai_default2],
-  [16281711391670634445n, polygon_testnet_amoy_default2],
-  [7728255861635209484n, berachain_testnet_bepolia_default2],
-  [8999465244383784164n, berachain_testnet_bartio_default2],
-  [12336603543561911511n, berachain_testnet_artio_default2],
-  [2285225387454015855n, zero_g_testnet_galileo_default2],
-  [5790810961207155433n, ethereum_testnet_goerli_base_1_default2],
-  [10344971235874465080n, ethereum_testnet_sepolia_base_1_default2],
-  [3743020999916460931n, plume_devnet_default2],
-  [13874588925447303949n, plume_testnet_sepolia_default2],
-  [9418205736192840573n, adi_testnet_default2],
-  [16960985330067274105n, creditcoin_testnet_default2],
-  [1910019406958449359n, etherlink_testnet_default2],
-  [9090863410735740267n, polygon_testnet_tatara_default2],
-  [7248756420937879088n, ethereum_testnet_holesky_taiko_1_default2],
-  [9873759436596923887n, ethereum_testnet_hoodi_taiko_default2],
-  [15858691699034549072n, ethereum_testnet_hoodi_taiko_1_default2],
-  [7189150270347329685n, mind_testnet_default2],
-  [3789623672476206327n, bitcoin_testnet_bitlayer_1_default2],
-  [1091131740251125869n, ethereum_testnet_sepolia_ronin_1_default2],
-  [17611928792452358269n, t_rex_testnet_default2],
-  [6101244977088475029n, ethereum_testnet_goerli_arbitrum_1_default2],
-  [3478487238524512106n, ethereum_testnet_sepolia_arbitrum_1_default2],
-  [4489326297382772450n, private_testnet_mica_default2],
-  [1458281248224512906n, avalanche_subnet_dexalot_testnet_default2],
-  [2279865765895943307n, ethereum_testnet_sepolia_scroll_1_default2],
-  [10380998176179737091n, ethereum_testnet_hoodi_default2],
-  [7837562506228496256n, avalanche_testnet_nexon_default2],
-  [5269261765892944301n, bitcoin_testnet_merlin_default2],
-  [4012524741200567430n, pharos_testnet_default2],
-  [16098325658947243212n, pharos_atlantic_testnet_default2],
-  [4418231248214522936n, ethereum_testnet_sepolia_polygon_validium_1_default2],
-  [16126893759944359622n, hemi_testnet_sepolia_default2],
-  [9763904284804119144n, ink_testnet_sepolia_default2],
-  [5535534526963509396n, bitcoin_testnet_sepolia_bob_1_default2],
-  [5837261596322416298n, zklink_nova_testnet_default2],
-  [7225665875429174318n, codex_testnet_default2],
-  [10443705513486043421n, ethereum_testnet_sepolia_arbitrum_1_treasure_1_default2],
-  [3676916124122457866n, treasure_testnet_topaz_default2],
-  [945045181441419236n, jovay_testnet_default2],
-  [3034092155422581607n, arc_testnet_default2],
-  [7254999290874773717n, dogeos_testnet_chikyu_default2],
-  [9181335567442030426n, gravity_testnet_longevity_default2],
-  [3761762704474186180n, celo_sepolia_default2],
-  [16015286601757825753n, ethereum_testnet_sepolia_default2],
-  [5224473277236331295n, ethereum_testnet_sepolia_optimism_1_default2],
-  [2217764097022649312n, neox_testnet_t4_default2],
-  [1467427327723633929n, ethereum_testnet_sepolia_corn_1_default2],
-  [7060342227814389000n, filecoin_testnet_default2],
-  [14684575664602284776n, plume_testnet_default2],
-  [2027362563942762617n, ethereum_testnet_sepolia_blast_1_default2],
-  [16244020411108056671n, zora_testnet_default2],
-  [4175996748267305081n, private_testnet_quartzite_default2],
-  [604447335222770945n, private_testnet_rhyolite_default2],
-  [1564738277398880633n, private_testnet_pumice_default2],
-  [13231703482326770598n, tron_testnet_shasta_evm_default2],
-  [13231703482326770600n, tron_devnet_evm_default2],
-  [2052925811360307749n, tron_testnet_nile_evm_default2],
-  [18362000170840307455n, private_testnet_basalt_default2],
-  [410896468069059699n, glamsterdam_devnet_6_default2],
-  [10073034426865795585n, glamsterdam_devnet_5_default2],
-  [12540949017250913122n, ethereum_testnet_plataberget_default2],
-  [6302590918974934319n, solana_testnet_default2],
-  [16423721717087811551n, solana_devnet_default2],
-  [743186221051783445n, aptos_testnet_default2],
-  [4457093679053095497n, aptos_localnet_default2],
-  [9762610643973837292n, sui_testnet_default2],
-  [18395503381733958356n, sui_localnet_default2],
-  [1399300952838017768n, ton_testnet_default2],
-  [13879075125137744094n, ton_localnet_default2],
-  [13231703482326770597n, tron_testnet_shasta_default2],
-  [13231703482326770599n, tron_devnet_default2],
-  [2052925811360307740n, tron_testnet_nile_default2]
-]);
-var mainnetByName2 = new Map([
-  ["ethereum-mainnet", ethereum_mainnet_default2],
-  ["ethereum-mainnet-optimism-1", ethereum_mainnet_optimism_1_default2],
-  ["cronos-mainnet", cronos_mainnet_default2],
-  ["rootstock-mainnet", rootstock_mainnet_default2],
-  ["telos-evm-mainnet", telos_evm_mainnet_default2],
-  ["polkadot-mainnet-darwinia", polkadot_mainnet_darwinia_default2],
-  ["xdc-mainnet", xdc_mainnet_default2],
-  ["coinex_smart_chain-mainnet", coinex_smart_chain_mainnet_default2],
-  ["binance_smart_chain-mainnet", binance_smart_chain_mainnet_default2],
-  ["gate-chain-mainnet", gate_chain_mainnet_default2],
-  ["gnosis_chain-mainnet", gnosis_chain_mainnet_default2],
-  ["velas-mainnet", velas_mainnet_default2],
-  ["shibarium-mainnet", shibarium_mainnet_default2],
-  ["ethereum-mainnet-unichain-1", ethereum_mainnet_unichain_1_default2],
-  ["polygon-mainnet", polygon_mainnet_default2],
-  ["monad-mainnet", monad_mainnet_default2],
-  ["sonic-mainnet", sonic_mainnet_default2],
-  ["ethereum-mainnet-hashkey-1", ethereum_mainnet_hashkey_1_default2],
-  ["mint-mainnet", mint_mainnet_default2],
-  ["ethereum-mainnet-xlayer-1", ethereum_mainnet_xlayer_1_default2],
-  ["bittorrent_chain-mainnet", bittorrent_chain_mainnet_default2],
-  ["binance_smart_chain-mainnet-opbnb-1", binance_smart_chain_mainnet_opbnb_1_default2],
-  ["bitcoin-mainnet-bsquared-1", bitcoin_mainnet_bsquared_1_default2],
-  ["mind-mainnet", mind_mainnet_default2],
-  ["lens-mainnet", lens_mainnet_default2],
-  ["tac-mainnet", tac_mainnet_default2],
-  ["fantom-mainnet", fantom_mainnet_default2],
-  ["fraxtal-mainnet", fraxtal_mainnet_default2],
-  ["ethereum-mainnet-kroma-1", ethereum_mainnet_kroma_1_default2],
-  ["neonlink-mainnet", neonlink_mainnet_default2],
-  ["hedera-mainnet", hedera_mainnet_default2],
-  ["filecoin-mainnet", filecoin_mainnet_default2],
-  ["ethereum-mainnet-zksync-1", ethereum_mainnet_zksync_1_default2],
-  ["cronos-zkevm-mainnet", cronos_zkevm_mainnet_default2],
-  ["near-mainnet", near_mainnet_default2],
-  ["areon-mainnet", areon_mainnet_default2],
-  ["ethereum-mainnet-worldchain-1", ethereum_mainnet_worldchain_1_default2],
-  ["polkadot-mainnet-astar", polkadot_mainnet_astar_default2],
-  ["janction-mainnet", janction_mainnet_default2],
-  ["bittensor-mainnet", bittensor_mainnet_default2],
-  ["stable-mainnet", stable_mainnet_default2],
-  ["hyperliquid-mainnet", hyperliquid_mainnet_default2],
-  ["conflux-mainnet", conflux_mainnet_default2],
-  ["ethereum-mainnet-metis-1", ethereum_mainnet_metis_1_default2],
-  ["ethereum-mainnet-polygon-zkevm-1", ethereum_mainnet_polygon_zkevm_1_default2],
-  ["wemix-mainnet", wemix_mainnet_default2],
-  ["core-mainnet", core_mainnet_default2],
-  ["lisk-mainnet", lisk_mainnet_default2],
-  ["polkadot-mainnet-moonbeam", polkadot_mainnet_moonbeam_default2],
-  ["kusama-mainnet-moonriver", kusama_mainnet_moonriver_default2],
-  ["sei-mainnet", sei_mainnet_default2],
-  ["pharos-mainnet", pharos_mainnet_default2],
-  ["metal-mainnet", metal_mainnet_default2],
-  ["soneium-mainnet", soneium_mainnet_default2],
-  ["bitcichain-mainnet", bitcichain_mainnet_default2],
-  ["ronin-mainnet", ronin_mainnet_default2],
-  ["polkadot-mainnet-centrifuge", polkadot_mainnet_centrifuge_default2],
-  ["kava-mainnet", kava_mainnet_default2],
-  ["abstract-mainnet", abstract_mainnet_default2],
-  ["morph-mainnet", morph_mainnet_default2],
-  ["edge-mainnet", edge_mainnet_default2],
-  ["bitcoin-mainnet-botanix", bitcoin_mainnet_botanix_default2],
-  ["ethereum-mainnet-astar-zkevm-1", ethereum_mainnet_astar_zkevm_1_default2],
-  ["bitcoin-merlin-mainnet", bitcoin_merlin_mainnet_default2],
-  ["tempo-mainnet", tempo_mainnet_default2],
-  ["megaeth-mainnet", megaeth_mainnet_default2],
-  ["robinhood-mainnet", robinhood_mainnet_default2],
-  ["ethereum-mainnet-mantle-1", ethereum_mainnet_mantle_1_default2],
-  ["arc-mainnet", arc_mainnet_default2],
-  ["superseed-mainnet", superseed_mainnet_default2],
-  ["nibiru-mainnet", nibiru_mainnet_default2],
-  ["zetachain-mainnet", zetachain_mainnet_default2],
-  ["kaia-mainnet", kaia_mainnet_default2],
-  ["ethereum-mainnet-base-1", ethereum_mainnet_base_1_default2],
-  ["plasma-mainnet", plasma_mainnet_default2],
-  ["gate-layer-mainnet", gate_layer_mainnet_default2],
-  ["ethereum-mainnet-arbitrum-1-l3x-1", ethereum_mainnet_arbitrum_1_l3x_1_default2],
-  ["ethereum-mainnet-immutable-zkevm-1", ethereum_mainnet_immutable_zkevm_1_default2],
-  ["0g-mainnet", _0g_mainnet_default2],
-  ["everclear-mainnet", everclear_mainnet_default2],
-  ["apechain-mainnet", apechain_mainnet_default2],
-  ["ethereum-mainnet-mode-1", ethereum_mainnet_mode_1_default2],
-  ["ab-mainnet", ab_mainnet_default2],
-  ["adi-mainnet", adi_mainnet_default2],
-  ["ethereum-mainnet-arbitrum-1", ethereum_mainnet_arbitrum_1_default2],
-  ["celo-mainnet", celo_mainnet_default2],
-  ["etherlink-mainnet", etherlink_mainnet_default2],
-  ["hemi-mainnet", hemi_mainnet_default2],
-  ["avalanche-mainnet", avalanche_mainnet_default2],
-  ["neox-mainnet", neox_mainnet_default2],
-  ["ethereum-mainnet-zircuit-1", ethereum_mainnet_zircuit_1_default2],
-  ["memento-mainnet", memento_mainnet_default2],
-  ["ethereum-mainnet-ink-1", ethereum_mainnet_ink_1_default2],
-  ["ethereum-mainnet-linea-1", ethereum_mainnet_linea_1_default2],
-  ["nexon-mainnet-lith", nexon_mainnet_lith_default2],
-  ["bitcoin-mainnet-bob-1", bitcoin_mainnet_bob_1_default2],
-  ["treasure-mainnet", treasure_mainnet_default2],
-  ["mova-mainnet", mova_mainnet_default2],
-  ["mova-mainnet-2", mova_mainnet_2_default2],
-  ["nexon-mainnet-henesys", nexon_mainnet_henesys_default2],
-  ["berachain-mainnet", berachain_mainnet_default2],
-  ["codex-mainnet", codex_mainnet_default2],
-  ["ethereum-mainnet-blast-1", ethereum_mainnet_blast_1_default2],
-  ["plume-mainnet", plume_mainnet_default2],
-  ["creditcoin-mainnet", creditcoin_mainnet_default2],
-  ["gravity-mainnet", gravity_mainnet_default2],
-  ["ethereum-mainnet-taiko-1", ethereum_mainnet_taiko_1_default2],
-  ["bitcoin-mainnet-bitlayer-1", bitcoin_mainnet_bitlayer_1_default2],
-  ["avalanche-subnet-dexalot-mainnet", avalanche_subnet_dexalot_mainnet_default2],
-  ["ethereum-mainnet-scroll-1", ethereum_mainnet_scroll_1_default2],
-  ["polygon-mainnet-katana", polygon_mainnet_katana_default2],
-  ["nexon-qa", nexon_qa_default2],
-  ["zklink_nova-mainnet", zklink_nova_mainnet_default2],
-  ["nexon-stage", nexon_stage_default2],
-  ["ethereum-mainnet-arbitrum-1-treasure-1", ethereum_mainnet_arbitrum_1_treasure_1_default2],
-  ["jovay-mainnet", jovay_mainnet_default2],
-  ["zora-mainnet", zora_mainnet_default2],
-  ["corn-mainnet", corn_mainnet_default2],
-  ["tron-mainnet-evm", tron_mainnet_evm_default2],
-  ["dtcc-mainnet-appchain", dtcc_mainnet_appchain_default2],
-  ["solana-mainnet", solana_mainnet_default2],
-  ["aptos-mainnet", aptos_mainnet_default2],
-  ["sui-mainnet", sui_mainnet_default2],
-  ["ton-mainnet", ton_mainnet_default2],
-  ["tron-mainnet", tron_mainnet_default2]
-]);
-var testnetByName2 = new Map([
-  ["bitcoin-testnet-rootstock", bitcoin_testnet_rootstock_default2],
-  ["telos-evm-testnet", telos_evm_testnet_default2],
-  ["polkadot-testnet-darwinia-pangoro", polkadot_testnet_darwinia_pangoro_default2],
-  ["xdc-testnet", xdc_testnet_default2],
-  ["coinex_smart_chain-testnet", coinex_smart_chain_testnet_default2],
-  ["polkadot-testnet-astar-shibuya", polkadot_testnet_astar_shibuya_default2],
-  ["gate-chain-testnet-meteora", gate_chain_testnet_meteora_default2],
-  ["binance_smart_chain-testnet", binance_smart_chain_testnet_default2],
-  ["velas-testnet", velas_testnet_default2],
-  ["ethereum-testnet-sepolia-hashkey-1", ethereum_testnet_sepolia_hashkey_1_default2],
-  ["shibarium-testnet-puppynet", shibarium_testnet_puppynet_default2],
-  ["ethereum-testnet-sepolia-xlayer-1", ethereum_testnet_sepolia_xlayer_1_default2],
-  ["cronos-zkevm-testnet-sepolia", cronos_zkevm_testnet_sepolia_default2],
-  ["ethereum-testnet-goerli-zksync-1", ethereum_testnet_goerli_zksync_1_default2],
-  ["cronos-testnet-zkevm-1", cronos_testnet_zkevm_1_default2],
-  ["hedera-testnet", hedera_testnet_default2],
-  ["ethereum-testnet-sepolia-zksync-1", ethereum_testnet_sepolia_zksync_1_default2],
-  ["cronos-testnet", cronos_testnet_default2],
-  ["near-testnet", near_testnet_default2],
-  ["ethereum-testnet-goerli-optimism-1", ethereum_testnet_goerli_optimism_1_default2],
-  ["areon-testnet", areon_testnet_default2],
-  ["janction-testnet-sepolia", janction_testnet_sepolia_default2],
-  ["private-testnet-obsidian", private_testnet_obsidian_default2],
-  ["ethereum-testnet-sepolia-mode-1", ethereum_testnet_sepolia_mode_1_default2],
-  ["bittensor-testnet", bittensor_testnet_default2],
-  ["hyperliquid-testnet", hyperliquid_testnet_default2],
-  ["kaia-testnet-kairos", kaia_testnet_kairos_default2],
-  ["bittorrent_chain-testnet", bittorrent_chain_testnet_default2],
-  ["wemix-testnet", wemix_testnet_default2],
-  ["core-testnet", core_testnet_default2],
-  ["bitcoin-testnet-bsquared-1", bitcoin_testnet_bsquared_1_default2],
-  ["polkadot-testnet-moonbeam-moonbase", polkadot_testnet_moonbeam_moonbase_default2],
-  ["ethereum-testnet-sepolia-unichain-1", ethereum_testnet_sepolia_unichain_1_default2],
-  ["sei-testnet-atlantic", sei_testnet_atlantic_default2],
-  ["geth-testnet", geth_testnet_default2],
-  ["ethereum-testnet-goerli-polygon-zkevm-1", ethereum_testnet_goerli_polygon_zkevm_1_default2],
-  ["story-testnet", story_testnet_default2],
-  ["mint-testnet", mint_testnet_default2],
-  ["metal-testnet", metal_testnet_default2],
-  ["bitcichain-testnet", bitcichain_testnet_default2],
-  ["ethereum-testnet-sepolia-soneium-1", ethereum_testnet_sepolia_soneium_1_default2],
-  ["xlayer-testnet", xlayer_testnet_default2],
-  ["ronin-testnet-saigon", ronin_testnet_saigon_default2],
-  ["private-testnet-granite", private_testnet_granite_default2],
-  ["private-testnet-andesite", private_testnet_andesite_default2],
-  ["dtcc-testnet-andesite", dtcc_testnet_andesite_default2],
-  ["polkadot-testnet-centrifuge-altair", polkadot_testnet_centrifuge_altair_default2],
-  ["memento-testnet", memento_testnet_default2],
-  ["stable-testnet", stable_testnet_default2],
-  ["kava-testnet", kava_testnet_default2],
-  ["ethereum-testnet-sepolia-kroma-1", ethereum_testnet_sepolia_kroma_1_default2],
-  ["tac-testnet", tac_testnet_default2],
-  [
-    "ethereum-testnet-sepolia-polygon-zkevm-1",
-    ethereum_testnet_sepolia_polygon_zkevm_1_default2
-  ],
-  ["ethereum-testnet-holesky-fraxtal-1", ethereum_testnet_holesky_fraxtal_1_default2],
-  ["ethereum-testnet-holesky-morph-1", ethereum_testnet_holesky_morph_1_default2],
-  ["ethereum-testnet-hoodi-morph", ethereum_testnet_hoodi_morph_default2],
-  ["bitcoin-testnet-botanix", bitcoin_testnet_botanix_default2],
-  ["fantom-testnet", fantom_testnet_default2],
-  ["ethereum-testnet-sepolia-lisk-1", ethereum_testnet_sepolia_lisk_1_default2],
-  ["ethereum-testnet-sepolia-worldchain-1", ethereum_testnet_sepolia_worldchain_1_default2],
-  ["ethereum-testnet-goerli-mantle-1", ethereum_testnet_goerli_mantle_1_default2],
-  ["ethereum-testnet-sepolia-mantle-1", ethereum_testnet_sepolia_mantle_1_default2],
-  ["binance_smart_chain-testnet-opbnb-1", binance_smart_chain_testnet_opbnb_1_default2],
-  ["nexon-dev", nexon_dev_default2],
-  ["megaeth-testnet", megaeth_testnet_default2],
-  ["megaeth-testnet-2", megaeth_testnet_2_default2],
-  ["everclear-testnet-sepolia", everclear_testnet_sepolia_default2],
-  ["nibiru-testnet", nibiru_testnet_default2],
-  ["ondo-testnet", ondo_testnet_default2],
-  ["neonlink-testnet", neonlink_testnet_default2],
-  ["plasma-testnet", plasma_testnet_default2],
-  ["gate-layer-testnet", gate_layer_testnet_default2],
-  ["monad-testnet", monad_testnet_default2],
-  ["gnosis_chain-testnet-chiado", gnosis_chain_testnet_chiado_default2],
-  ["mova-testnet", mova_testnet_default2],
-  ["abstract-testnet", abstract_testnet_default2],
-  [
-    "ethereum-testnet-sepolia-arbitrum-1-l3x-1",
-    ethereum_testnet_sepolia_arbitrum_1_l3x_1_default2
-  ],
-  [
-    "ethereum-testnet-sepolia-immutable-zkevm-1",
-    ethereum_testnet_sepolia_immutable_zkevm_1_default2
-  ],
-  ["sonic-testnet", sonic_testnet_default2],
-  ["0g-testnet-newton", _0g_testnet_newton_default2],
-  ["0g-testnet-galileo", _0g_testnet_galileo_default2],
-  ["0g-testnet-galileo-1", _0g_testnet_galileo_1_default2],
-  ["ethereum-testnet-holesky", ethereum_testnet_holesky_default2],
-  ["ab-testnet", ab_testnet_default2],
-  ["anvil-devnet", anvil_devnet_default2],
-  ["apechain-testnet-curtis", apechain_testnet_curtis_default2],
-  ["edge-testnet", edge_testnet_default2],
-  ["ethereum-testnet-sepolia-lens-1", ethereum_testnet_sepolia_lens_1_default2],
-  ["tempo-testnet", tempo_testnet_default2],
-  ["tempo-testnet-moderato", tempo_testnet_moderato_default2],
-  ["avalanche-testnet-fuji", avalanche_testnet_fuji_default2],
-  ["celo-testnet-alfajores", celo_testnet_alfajores_default2],
-  ["private-testnet-opala", private_testnet_opala_default2],
-  ["robinhood-testnet", robinhood_testnet_default2],
-  ["zircuit-testnet-garfield", zircuit_testnet_garfield_default2],
-  ["ethereum-testnet-sepolia-zircuit-1", ethereum_testnet_sepolia_zircuit_1_default2],
-  ["superseed-testnet", superseed_testnet_default2],
-  ["sonic-testnet-blaze", sonic_testnet_blaze_default2],
-  ["ethereum-testnet-goerli-linea-1", ethereum_testnet_goerli_linea_1_default2],
-  ["ethereum-testnet-sepolia-linea-1", ethereum_testnet_sepolia_linea_1_default2],
-  ["ethereum-testnet-sepolia-metis-1", ethereum_testnet_sepolia_metis_1_default2],
-  ["polygon-testnet-mumbai", polygon_testnet_mumbai_default2],
-  ["polygon-testnet-amoy", polygon_testnet_amoy_default2],
-  ["berachain-testnet-bepolia", berachain_testnet_bepolia_default2],
-  ["berachain-testnet-bartio", berachain_testnet_bartio_default2],
-  ["berachain-testnet-artio", berachain_testnet_artio_default2],
-  ["zero-g-testnet-galileo", zero_g_testnet_galileo_default2],
-  ["ethereum-testnet-goerli-base-1", ethereum_testnet_goerli_base_1_default2],
-  ["ethereum-testnet-sepolia-base-1", ethereum_testnet_sepolia_base_1_default2],
-  ["plume-devnet", plume_devnet_default2],
-  ["plume-testnet-sepolia", plume_testnet_sepolia_default2],
-  ["adi-testnet", adi_testnet_default2],
-  ["creditcoin-testnet", creditcoin_testnet_default2],
-  ["etherlink-testnet", etherlink_testnet_default2],
-  ["polygon-testnet-tatara", polygon_testnet_tatara_default2],
-  ["ethereum-testnet-holesky-taiko-1", ethereum_testnet_holesky_taiko_1_default2],
-  ["ethereum-testnet-hoodi-taiko", ethereum_testnet_hoodi_taiko_default2],
-  ["ethereum-testnet-hoodi-taiko-1", ethereum_testnet_hoodi_taiko_1_default2],
-  ["mind-testnet", mind_testnet_default2],
-  ["bitcoin-testnet-bitlayer-1", bitcoin_testnet_bitlayer_1_default2],
-  ["ethereum-testnet-sepolia-ronin-1", ethereum_testnet_sepolia_ronin_1_default2],
-  ["t-rex-testnet", t_rex_testnet_default2],
-  ["ethereum-testnet-goerli-arbitrum-1", ethereum_testnet_goerli_arbitrum_1_default2],
-  ["ethereum-testnet-sepolia-arbitrum-1", ethereum_testnet_sepolia_arbitrum_1_default2],
-  ["private-testnet-mica", private_testnet_mica_default2],
-  ["avalanche-subnet-dexalot-testnet", avalanche_subnet_dexalot_testnet_default2],
-  ["ethereum-testnet-sepolia-scroll-1", ethereum_testnet_sepolia_scroll_1_default2],
-  ["ethereum-testnet-hoodi", ethereum_testnet_hoodi_default2],
-  ["avalanche-testnet-nexon", avalanche_testnet_nexon_default2],
-  ["bitcoin-testnet-merlin", bitcoin_testnet_merlin_default2],
-  ["pharos-testnet", pharos_testnet_default2],
-  ["pharos-atlantic-testnet", pharos_atlantic_testnet_default2],
-  [
-    "ethereum-testnet-sepolia-polygon-validium-1",
-    ethereum_testnet_sepolia_polygon_validium_1_default2
-  ],
-  ["hemi-testnet-sepolia", hemi_testnet_sepolia_default2],
-  ["ink-testnet-sepolia", ink_testnet_sepolia_default2],
-  ["bitcoin-testnet-sepolia-bob-1", bitcoin_testnet_sepolia_bob_1_default2],
-  ["zklink_nova-testnet", zklink_nova_testnet_default2],
-  ["codex-testnet", codex_testnet_default2],
-  [
-    "ethereum-testnet-sepolia-arbitrum-1-treasure-1",
-    ethereum_testnet_sepolia_arbitrum_1_treasure_1_default2
-  ],
-  ["treasure-testnet-topaz", treasure_testnet_topaz_default2],
-  ["jovay-testnet", jovay_testnet_default2],
-  ["arc-testnet", arc_testnet_default2],
-  ["dogeos-testnet-chikyu", dogeos_testnet_chikyu_default2],
-  ["gravity-testnet-longevity", gravity_testnet_longevity_default2],
-  ["celo-sepolia", celo_sepolia_default2],
-  ["ethereum-testnet-sepolia", ethereum_testnet_sepolia_default2],
-  ["ethereum-testnet-sepolia-optimism-1", ethereum_testnet_sepolia_optimism_1_default2],
-  ["neox-testnet-t4", neox_testnet_t4_default2],
-  ["ethereum-testnet-sepolia-corn-1", ethereum_testnet_sepolia_corn_1_default2],
-  ["filecoin-testnet", filecoin_testnet_default2],
-  ["plume-testnet", plume_testnet_default2],
-  ["ethereum-testnet-sepolia-blast-1", ethereum_testnet_sepolia_blast_1_default2],
-  ["zora-testnet", zora_testnet_default2],
-  ["private-testnet-quartzite", private_testnet_quartzite_default2],
-  ["private-testnet-rhyolite", private_testnet_rhyolite_default2],
-  ["private-testnet-pumice", private_testnet_pumice_default2],
-  ["tron-testnet-shasta-evm", tron_testnet_shasta_evm_default2],
-  ["tron-devnet-evm", tron_devnet_evm_default2],
-  ["tron-testnet-nile-evm", tron_testnet_nile_evm_default2],
-  ["private-testnet-basalt", private_testnet_basalt_default2],
-  ["glamsterdam-devnet-6", glamsterdam_devnet_6_default2],
-  ["glamsterdam-devnet-5", glamsterdam_devnet_5_default2],
-  ["ethereum-testnet-plataberget", ethereum_testnet_plataberget_default2],
-  ["solana-testnet", solana_testnet_default2],
-  ["solana-devnet", solana_devnet_default2],
-  ["aptos-testnet", aptos_testnet_default2],
-  ["aptos-localnet", aptos_localnet_default2],
-  ["sui-testnet", sui_testnet_default2],
-  ["sui-localnet", sui_localnet_default2],
-  ["ton-testnet", ton_testnet_default2],
-  ["ton-localnet", ton_localnet_default2],
-  ["tron-testnet-shasta", tron_testnet_shasta_default2],
-  ["tron-devnet", tron_devnet_default2],
-  ["tron-testnet-nile", tron_testnet_nile_default2]
-]);
-var mainnetBySelectorByFamily2 = {
-  evm: new Map([
-    [5009297550715157269n, ethereum_mainnet_default2],
-    [3734403246176062136n, ethereum_mainnet_optimism_1_default2],
-    [1456215246176062136n, cronos_mainnet_default2],
-    [11964252391146578476n, rootstock_mainnet_default2],
-    [1477345371608778000n, telos_evm_mainnet_default2],
-    [8866418665544333000n, polkadot_mainnet_darwinia_default2],
-    [17673274061779414707n, xdc_mainnet_default2],
-    [1761333065194157300n, coinex_smart_chain_mainnet_default2],
-    [11344663589394136015n, binance_smart_chain_mainnet_default2],
-    [9688382747979139404n, gate_chain_mainnet_default2],
-    [465200170687744372n, gnosis_chain_mainnet_default2],
-    [374210358663784372n, velas_mainnet_default2],
-    [3993510008929295315n, shibarium_mainnet_default2],
-    [1923510103922296319n, ethereum_mainnet_unichain_1_default2],
-    [4051577828743386545n, polygon_mainnet_default2],
-    [8481857512324358265n, monad_mainnet_default2],
-    [1673871237479749969n, sonic_mainnet_default2],
-    [7613811247471741961n, ethereum_mainnet_hashkey_1_default2],
-    [17164792800244661392n, mint_mainnet_default2],
-    [3016212468291539606n, ethereum_mainnet_xlayer_1_default2],
-    [3776006016387883143n, bittorrent_chain_mainnet_default2],
-    [465944652040885897n, binance_smart_chain_mainnet_opbnb_1_default2],
-    [5406759801798337480n, bitcoin_mainnet_bsquared_1_default2],
-    [11690709103138290329n, mind_mainnet_default2],
-    [5608378062013572713n, lens_mainnet_default2],
-    [5936861837188149645n, tac_mainnet_default2],
-    [3768048213127883732n, fantom_mainnet_default2],
-    [1462016016387883143n, fraxtal_mainnet_default2],
-    [3719320017875267166n, ethereum_mainnet_kroma_1_default2],
-    [8239338020728974000n, neonlink_mainnet_default2],
-    [3229138320728879060n, hedera_mainnet_default2],
-    [4561443241176882990n, filecoin_mainnet_default2],
-    [1562403441176082196n, ethereum_mainnet_zksync_1_default2],
-    [8788096068760390840n, cronos_zkevm_mainnet_default2],
-    [2039744413822257700n, near_mainnet_default2],
-    [1939936305787790600n, areon_mainnet_default2],
-    [2049429975587534727n, ethereum_mainnet_worldchain_1_default2],
-    [6422105447186081193n, polkadot_mainnet_astar_default2],
-    [9107126442626377432n, janction_mainnet_default2],
-    [2135107236357186872n, bittensor_mainnet_default2],
-    [16978377838628290997n, stable_mainnet_default2],
-    [2442541497099098535n, hyperliquid_mainnet_default2],
-    [3358365939762719202n, conflux_mainnet_default2],
-    [8805746078405598895n, ethereum_mainnet_metis_1_default2],
-    [4348158687435793198n, ethereum_mainnet_polygon_zkevm_1_default2],
-    [5142893604156789321n, wemix_mainnet_default2],
-    [1224752112135636129n, core_mainnet_default2],
-    [15293031020466096408n, lisk_mainnet_default2],
-    [1252863800116739621n, polkadot_mainnet_moonbeam_default2],
-    [1355020143337428062n, kusama_mainnet_moonriver_default2],
-    [9027416829622342829n, sei_mainnet_default2],
-    [7801139999541420232n, pharos_mainnet_default2],
-    [13447077090413146373n, metal_mainnet_default2],
-    [12505351618335765396n, soneium_mainnet_default2],
-    [4874388048629246000n, bitcichain_mainnet_default2],
-    [6916147374840168594n, ronin_mainnet_default2],
-    [8175830712062617656n, polkadot_mainnet_centrifuge_default2],
-    [7550000543357438061n, kava_mainnet_default2],
-    [3577778157919314504n, abstract_mainnet_default2],
-    [18164309074156128038n, morph_mainnet_default2],
-    [6325494908023253251n, edge_mainnet_default2],
-    [4560701533377838164n, bitcoin_mainnet_botanix_default2],
-    [1540201334317828111n, ethereum_mainnet_astar_zkevm_1_default2],
-    [241851231317828981n, bitcoin_merlin_mainnet_default2],
-    [7281642695469137430n, tempo_mainnet_default2],
-    [6093540873831549674n, megaeth_mainnet_default2],
-    [6180753054346818345n, robinhood_mainnet_default2],
-    [1556008542357238666n, ethereum_mainnet_mantle_1_default2],
-    [6370580034781731079n, arc_mainnet_default2],
-    [470401360549526817n, superseed_mainnet_default2],
-    [17349189558768828726n, nibiru_mainnet_default2],
-    [10817664450262215148n, zetachain_mainnet_default2],
-    [9813823125703490621n, kaia_mainnet_default2],
-    [15971525489660198786n, ethereum_mainnet_base_1_default2],
-    [9335212494177455608n, plasma_mainnet_default2],
-    [9373518659714509671n, gate_layer_mainnet_default2],
-    [3162193654116181371n, ethereum_mainnet_arbitrum_1_l3x_1_default2],
-    [1237925231416731909n, ethereum_mainnet_immutable_zkevm_1_default2],
-    [4426351306075016396n, _0g_mainnet_default2],
-    [9723842205701363942n, everclear_mainnet_default2],
-    [14894068710063348487n, apechain_mainnet_default2],
-    [7264351850409363825n, ethereum_mainnet_mode_1_default2],
-    [4829375610284793157n, ab_mainnet_default2],
-    [4059281736450291836n, adi_mainnet_default2],
-    [4949039107694359620n, ethereum_mainnet_arbitrum_1_default2],
-    [1346049177634351622n, celo_mainnet_default2],
-    [13624601974233774587n, etherlink_mainnet_default2],
-    [1804312132722180201n, hemi_mainnet_default2],
-    [6433500567565415381n, avalanche_mainnet_default2],
-    [7222032299962346917n, neox_mainnet_default2],
-    [17198166215261833993n, ethereum_mainnet_zircuit_1_default2],
-    [6473245816409426016n, memento_mainnet_default2],
-    [3461204551265785888n, ethereum_mainnet_ink_1_default2],
-    [4627098889531055414n, ethereum_mainnet_linea_1_default2],
-    [15758750456714168963n, nexon_mainnet_lith_default2],
-    [3849287863852499584n, bitcoin_mainnet_bob_1_default2],
-    [5214452172935136222n, treasure_mainnet_default2],
-    [3314641565992046393n, mova_mainnet_default2],
-    [4215185756725900654n, mova_mainnet_2_default2],
-    [12657445206920369324n, nexon_mainnet_henesys_default2],
-    [1294465214383781161n, berachain_mainnet_default2],
-    [9478124434908827753n, codex_mainnet_default2],
-    [4411394078118774322n, ethereum_mainnet_blast_1_default2],
-    [17912061998839310979n, plume_mainnet_default2],
-    [18240105181246962294n, creditcoin_mainnet_default2],
-    [2988178761202034333n, gravity_mainnet_default2],
-    [16468599424800719238n, ethereum_mainnet_taiko_1_default2],
-    [7937294810946806131n, bitcoin_mainnet_bitlayer_1_default2],
-    [5463201557265485081n, avalanche_subnet_dexalot_mainnet_default2],
-    [13204309965629103672n, ethereum_mainnet_scroll_1_default2],
-    [2459028469735686113n, polygon_mainnet_katana_default2],
-    [14632960069656270105n, nexon_qa_default2],
-    [4350319965322101699n, zklink_nova_mainnet_default2],
-    [5556806327594153475n, nexon_stage_default2],
-    [1010349088906777999n, ethereum_mainnet_arbitrum_1_treasure_1_default2],
-    [1523760397290643893n, jovay_mainnet_default2],
-    [3555797439612589184n, zora_mainnet_default2],
-    [9043146809313071210n, corn_mainnet_default2],
-    [1546563616611573946n, tron_mainnet_evm_default2],
-    [13879014182901017172n, dtcc_mainnet_appchain_default2]
-  ]),
-  solana: new Map([[124615329519749607n, solana_mainnet_default2]]),
-  aptos: new Map([[4741433654826277614n, aptos_mainnet_default2]]),
-  sui: new Map([[17529533435026248318n, sui_mainnet_default2]]),
-  ton: new Map([[16448340667252469081n, ton_mainnet_default2]]),
-  tron: new Map([[1546563616611573945n, tron_mainnet_default2]])
-};
-var testnetBySelectorByFamily2 = {
-  evm: new Map([
-    [8953668971247136127n, bitcoin_testnet_rootstock_default2],
-    [729797994450396300n, telos_evm_testnet_default2],
-    [4340886533089894000n, polkadot_testnet_darwinia_pangoro_default2],
-    [3017758115101368649n, xdc_testnet_default2],
-    [8955032871639343000n, coinex_smart_chain_testnet_default2],
-    [6955638871347136141n, polkadot_testnet_astar_shibuya_default2],
-    [3558960680482140165n, gate_chain_testnet_meteora_default2],
-    [13264668187771770619n, binance_smart_chain_testnet_default2],
-    [572210378683744374n, velas_testnet_default2],
-    [4356164186791070119n, ethereum_testnet_sepolia_hashkey_1_default2],
-    [17833296867764334567n, shibarium_testnet_puppynet_default2],
-    [2066098519157881736n, ethereum_testnet_sepolia_xlayer_1_default2],
-    [16487132492576884721n, cronos_zkevm_testnet_sepolia_default2],
-    [6802309497652714138n, ethereum_testnet_goerli_zksync_1_default2],
-    [3842103497652714138n, cronos_testnet_zkevm_1_default2],
-    [222782988166878823n, hedera_testnet_default2],
-    [6898391096552792247n, ethereum_testnet_sepolia_zksync_1_default2],
-    [2995292832068775165n, cronos_testnet_default2],
-    [5061593697262339000n, near_testnet_default2],
-    [2664363617261496610n, ethereum_testnet_goerli_optimism_1_default2],
-    [7317911323415911000n, areon_testnet_default2],
-    [5059197667603797935n, janction_testnet_sepolia_default2],
-    [6260932437388305511n, private_testnet_obsidian_default2],
-    [829525985033418733n, ethereum_testnet_sepolia_mode_1_default2],
-    [2177900824115119161n, bittensor_testnet_default2],
-    [4286062357653186312n, hyperliquid_testnet_default2],
-    [2624132734533621656n, kaia_testnet_kairos_default2],
-    [4459371029167934217n, bittorrent_chain_testnet_default2],
-    [9284632837123596123n, wemix_testnet_default2],
-    [4264732132125536123n, core_testnet_default2],
-    [1948510578179542068n, bitcoin_testnet_bsquared_1_default2],
-    [5361632739113536121n, polkadot_testnet_moonbeam_moonbase_default2],
-    [14135854469784514356n, ethereum_testnet_sepolia_unichain_1_default2],
-    [1216300075444106652n, sei_testnet_atlantic_default2],
-    [3379446385462418246n, geth_testnet_default2],
-    [11059667695644972511n, ethereum_testnet_goerli_polygon_zkevm_1_default2],
-    [4237030917318060427n, story_testnet_default2],
-    [10749384167430721561n, mint_testnet_default2],
-    [6286293440461807648n, metal_testnet_default2],
-    [4888058894222120000n, bitcichain_testnet_default2],
-    [686603546605904534n, ethereum_testnet_sepolia_soneium_1_default2],
-    [10212741611335999305n, xlayer_testnet_default2],
-    [13116810400804392105n, ronin_testnet_saigon_default2],
-    [3260900564719373474n, private_testnet_granite_default2],
-    [6915682381028791124n, private_testnet_andesite_default2],
-    [15513093881969820114n, dtcc_testnet_andesite_default2],
-    [2333097300889804761n, polkadot_testnet_centrifuge_altair_default2],
-    [12168171414969487009n, memento_testnet_default2],
-    [11793402411494852765n, stable_testnet_default2],
-    [2110537777356199208n, kava_testnet_default2],
-    [5990477251245693094n, ethereum_testnet_sepolia_kroma_1_default2],
-    [9488606126177218005n, tac_testnet_default2],
-    [1654667687261492630n, ethereum_testnet_sepolia_polygon_zkevm_1_default2],
-    [8901520481741771655n, ethereum_testnet_holesky_fraxtal_1_default2],
-    [8304510386741731151n, ethereum_testnet_holesky_morph_1_default2],
-    [1064004874793747259n, ethereum_testnet_hoodi_morph_default2],
-    [1467223411771711614n, bitcoin_testnet_botanix_default2],
-    [4905564228793744293n, fantom_testnet_default2],
-    [5298399861320400553n, ethereum_testnet_sepolia_lisk_1_default2],
-    [5299555114858065850n, ethereum_testnet_sepolia_worldchain_1_default2],
-    [4168263376276232250n, ethereum_testnet_goerli_mantle_1_default2],
-    [8236463271206331221n, ethereum_testnet_sepolia_mantle_1_default2],
-    [13274425992935471758n, binance_smart_chain_testnet_opbnb_1_default2],
-    [8911150974185440581n, nexon_dev_default2],
-    [2443239559770384419n, megaeth_testnet_default2],
-    [18241817625092392675n, megaeth_testnet_2_default2],
-    [379340054879810246n, everclear_testnet_sepolia_default2],
-    [305104239123120457n, nibiru_testnet_default2],
-    [344208382356656551n, ondo_testnet_default2],
-    [1113014352258747600n, neonlink_testnet_default2],
-    [3967220077692964309n, plasma_testnet_default2],
-    [3667207123485082040n, gate_layer_testnet_default2],
-    [2183018362218727504n, monad_testnet_default2],
-    [8871595565390010547n, gnosis_chain_testnet_chiado_default2],
-    [9211758560309513668n, mova_testnet_default2],
-    [16235373811196386733n, abstract_testnet_default2],
-    [3486622437121596122n, ethereum_testnet_sepolia_arbitrum_1_l3x_1_default2],
-    [4526165231216331901n, ethereum_testnet_sepolia_immutable_zkevm_1_default2],
-    [1763698235108410440n, sonic_testnet_default2],
-    [16088006396410204581n, _0g_testnet_newton_default2],
-    [2131427466778448014n, _0g_testnet_galileo_default2],
-    [6892437333620424805n, _0g_testnet_galileo_1_default2],
-    [7717148896336251131n, ethereum_testnet_holesky_default2],
-    [7051849327615092843n, ab_testnet_default2],
-    [7759470850252068959n, anvil_devnet_default2],
-    [9900119385908781505n, apechain_testnet_curtis_default2],
-    [13222148116102326311n, edge_testnet_default2],
-    [6827576821754315911n, ethereum_testnet_sepolia_lens_1_default2],
-    [3963528237232804922n, tempo_testnet_default2],
-    [8457817439310187923n, tempo_testnet_moderato_default2],
-    [14767482510784806043n, avalanche_testnet_fuji_default2],
-    [3552045678561919002n, celo_testnet_alfajores_default2],
-    [8446413392851542429n, private_testnet_opala_default2],
-    [2032988798112970440n, robinhood_testnet_default2],
-    [13781831279385219069n, zircuit_testnet_garfield_default2],
-    [4562743618362911021n, ethereum_testnet_sepolia_zircuit_1_default2],
-    [13694007683517087973n, superseed_testnet_default2],
-    [3676871237479449268n, sonic_testnet_blaze_default2],
-    [1355246678561316402n, ethereum_testnet_goerli_linea_1_default2],
-    [5719461335882077547n, ethereum_testnet_sepolia_linea_1_default2],
-    [3777822886988675105n, ethereum_testnet_sepolia_metis_1_default2],
-    [12532609583862916517n, polygon_testnet_mumbai_default2],
-    [16281711391670634445n, polygon_testnet_amoy_default2],
-    [7728255861635209484n, berachain_testnet_bepolia_default2],
-    [8999465244383784164n, berachain_testnet_bartio_default2],
-    [12336603543561911511n, berachain_testnet_artio_default2],
-    [2285225387454015855n, zero_g_testnet_galileo_default2],
-    [5790810961207155433n, ethereum_testnet_goerli_base_1_default2],
-    [10344971235874465080n, ethereum_testnet_sepolia_base_1_default2],
-    [3743020999916460931n, plume_devnet_default2],
-    [13874588925447303949n, plume_testnet_sepolia_default2],
-    [9418205736192840573n, adi_testnet_default2],
-    [16960985330067274105n, creditcoin_testnet_default2],
-    [1910019406958449359n, etherlink_testnet_default2],
-    [9090863410735740267n, polygon_testnet_tatara_default2],
-    [7248756420937879088n, ethereum_testnet_holesky_taiko_1_default2],
-    [9873759436596923887n, ethereum_testnet_hoodi_taiko_default2],
-    [15858691699034549072n, ethereum_testnet_hoodi_taiko_1_default2],
-    [7189150270347329685n, mind_testnet_default2],
-    [3789623672476206327n, bitcoin_testnet_bitlayer_1_default2],
-    [1091131740251125869n, ethereum_testnet_sepolia_ronin_1_default2],
-    [17611928792452358269n, t_rex_testnet_default2],
-    [6101244977088475029n, ethereum_testnet_goerli_arbitrum_1_default2],
-    [3478487238524512106n, ethereum_testnet_sepolia_arbitrum_1_default2],
-    [4489326297382772450n, private_testnet_mica_default2],
-    [1458281248224512906n, avalanche_subnet_dexalot_testnet_default2],
-    [2279865765895943307n, ethereum_testnet_sepolia_scroll_1_default2],
-    [10380998176179737091n, ethereum_testnet_hoodi_default2],
-    [7837562506228496256n, avalanche_testnet_nexon_default2],
-    [5269261765892944301n, bitcoin_testnet_merlin_default2],
-    [4012524741200567430n, pharos_testnet_default2],
-    [16098325658947243212n, pharos_atlantic_testnet_default2],
-    [4418231248214522936n, ethereum_testnet_sepolia_polygon_validium_1_default2],
-    [16126893759944359622n, hemi_testnet_sepolia_default2],
-    [9763904284804119144n, ink_testnet_sepolia_default2],
-    [5535534526963509396n, bitcoin_testnet_sepolia_bob_1_default2],
-    [5837261596322416298n, zklink_nova_testnet_default2],
-    [7225665875429174318n, codex_testnet_default2],
-    [10443705513486043421n, ethereum_testnet_sepolia_arbitrum_1_treasure_1_default2],
-    [3676916124122457866n, treasure_testnet_topaz_default2],
-    [945045181441419236n, jovay_testnet_default2],
-    [3034092155422581607n, arc_testnet_default2],
-    [7254999290874773717n, dogeos_testnet_chikyu_default2],
-    [9181335567442030426n, gravity_testnet_longevity_default2],
-    [3761762704474186180n, celo_sepolia_default2],
-    [16015286601757825753n, ethereum_testnet_sepolia_default2],
-    [5224473277236331295n, ethereum_testnet_sepolia_optimism_1_default2],
-    [2217764097022649312n, neox_testnet_t4_default2],
-    [1467427327723633929n, ethereum_testnet_sepolia_corn_1_default2],
-    [7060342227814389000n, filecoin_testnet_default2],
-    [14684575664602284776n, plume_testnet_default2],
-    [2027362563942762617n, ethereum_testnet_sepolia_blast_1_default2],
-    [16244020411108056671n, zora_testnet_default2],
-    [4175996748267305081n, private_testnet_quartzite_default2],
-    [604447335222770945n, private_testnet_rhyolite_default2],
-    [1564738277398880633n, private_testnet_pumice_default2],
-    [13231703482326770598n, tron_testnet_shasta_evm_default2],
-    [13231703482326770600n, tron_devnet_evm_default2],
-    [2052925811360307749n, tron_testnet_nile_evm_default2],
-    [18362000170840307455n, private_testnet_basalt_default2],
-    [410896468069059699n, glamsterdam_devnet_6_default2],
-    [10073034426865795585n, glamsterdam_devnet_5_default2],
-    [12540949017250913122n, ethereum_testnet_plataberget_default2]
-  ]),
-  solana: new Map([
-    [6302590918974934319n, solana_testnet_default2],
-    [16423721717087811551n, solana_devnet_default2]
-  ]),
-  aptos: new Map([
-    [743186221051783445n, aptos_testnet_default2],
-    [4457093679053095497n, aptos_localnet_default2]
-  ]),
-  sui: new Map([
-    [9762610643973837292n, sui_testnet_default2],
-    [18395503381733958356n, sui_localnet_default2]
-  ]),
-  ton: new Map([
-    [1399300952838017768n, ton_testnet_default2],
-    [13879075125137744094n, ton_localnet_default2]
-  ]),
-  tron: new Map([
-    [13231703482326770597n, tron_testnet_shasta_default2],
-    [13231703482326770599n, tron_devnet_default2],
-    [2052925811360307740n, tron_testnet_nile_default2]
-  ])
-};
-var mainnetByNameByFamily2 = {
-  evm: new Map([
-    ["ethereum-mainnet", ethereum_mainnet_default2],
-    ["ethereum-mainnet-optimism-1", ethereum_mainnet_optimism_1_default2],
-    ["cronos-mainnet", cronos_mainnet_default2],
-    ["rootstock-mainnet", rootstock_mainnet_default2],
-    ["telos-evm-mainnet", telos_evm_mainnet_default2],
-    ["polkadot-mainnet-darwinia", polkadot_mainnet_darwinia_default2],
-    ["xdc-mainnet", xdc_mainnet_default2],
-    ["coinex_smart_chain-mainnet", coinex_smart_chain_mainnet_default2],
-    ["binance_smart_chain-mainnet", binance_smart_chain_mainnet_default2],
-    ["gate-chain-mainnet", gate_chain_mainnet_default2],
-    ["gnosis_chain-mainnet", gnosis_chain_mainnet_default2],
-    ["velas-mainnet", velas_mainnet_default2],
-    ["shibarium-mainnet", shibarium_mainnet_default2],
-    ["ethereum-mainnet-unichain-1", ethereum_mainnet_unichain_1_default2],
-    ["polygon-mainnet", polygon_mainnet_default2],
-    ["monad-mainnet", monad_mainnet_default2],
-    ["sonic-mainnet", sonic_mainnet_default2],
-    ["ethereum-mainnet-hashkey-1", ethereum_mainnet_hashkey_1_default2],
-    ["mint-mainnet", mint_mainnet_default2],
-    ["ethereum-mainnet-xlayer-1", ethereum_mainnet_xlayer_1_default2],
-    ["bittorrent_chain-mainnet", bittorrent_chain_mainnet_default2],
-    ["binance_smart_chain-mainnet-opbnb-1", binance_smart_chain_mainnet_opbnb_1_default2],
-    ["bitcoin-mainnet-bsquared-1", bitcoin_mainnet_bsquared_1_default2],
-    ["mind-mainnet", mind_mainnet_default2],
-    ["lens-mainnet", lens_mainnet_default2],
-    ["tac-mainnet", tac_mainnet_default2],
-    ["fantom-mainnet", fantom_mainnet_default2],
-    ["fraxtal-mainnet", fraxtal_mainnet_default2],
-    ["ethereum-mainnet-kroma-1", ethereum_mainnet_kroma_1_default2],
-    ["neonlink-mainnet", neonlink_mainnet_default2],
-    ["hedera-mainnet", hedera_mainnet_default2],
-    ["filecoin-mainnet", filecoin_mainnet_default2],
-    ["ethereum-mainnet-zksync-1", ethereum_mainnet_zksync_1_default2],
-    ["cronos-zkevm-mainnet", cronos_zkevm_mainnet_default2],
-    ["near-mainnet", near_mainnet_default2],
-    ["areon-mainnet", areon_mainnet_default2],
-    ["ethereum-mainnet-worldchain-1", ethereum_mainnet_worldchain_1_default2],
-    ["polkadot-mainnet-astar", polkadot_mainnet_astar_default2],
-    ["janction-mainnet", janction_mainnet_default2],
-    ["bittensor-mainnet", bittensor_mainnet_default2],
-    ["stable-mainnet", stable_mainnet_default2],
-    ["hyperliquid-mainnet", hyperliquid_mainnet_default2],
-    ["conflux-mainnet", conflux_mainnet_default2],
-    ["ethereum-mainnet-metis-1", ethereum_mainnet_metis_1_default2],
-    ["ethereum-mainnet-polygon-zkevm-1", ethereum_mainnet_polygon_zkevm_1_default2],
-    ["wemix-mainnet", wemix_mainnet_default2],
-    ["core-mainnet", core_mainnet_default2],
-    ["lisk-mainnet", lisk_mainnet_default2],
-    ["polkadot-mainnet-moonbeam", polkadot_mainnet_moonbeam_default2],
-    ["kusama-mainnet-moonriver", kusama_mainnet_moonriver_default2],
-    ["sei-mainnet", sei_mainnet_default2],
-    ["pharos-mainnet", pharos_mainnet_default2],
-    ["metal-mainnet", metal_mainnet_default2],
-    ["soneium-mainnet", soneium_mainnet_default2],
-    ["bitcichain-mainnet", bitcichain_mainnet_default2],
-    ["ronin-mainnet", ronin_mainnet_default2],
-    ["polkadot-mainnet-centrifuge", polkadot_mainnet_centrifuge_default2],
-    ["kava-mainnet", kava_mainnet_default2],
-    ["abstract-mainnet", abstract_mainnet_default2],
-    ["morph-mainnet", morph_mainnet_default2],
-    ["edge-mainnet", edge_mainnet_default2],
-    ["bitcoin-mainnet-botanix", bitcoin_mainnet_botanix_default2],
-    ["ethereum-mainnet-astar-zkevm-1", ethereum_mainnet_astar_zkevm_1_default2],
-    ["bitcoin-merlin-mainnet", bitcoin_merlin_mainnet_default2],
-    ["tempo-mainnet", tempo_mainnet_default2],
-    ["megaeth-mainnet", megaeth_mainnet_default2],
-    ["robinhood-mainnet", robinhood_mainnet_default2],
-    ["ethereum-mainnet-mantle-1", ethereum_mainnet_mantle_1_default2],
-    ["arc-mainnet", arc_mainnet_default2],
-    ["superseed-mainnet", superseed_mainnet_default2],
-    ["nibiru-mainnet", nibiru_mainnet_default2],
-    ["zetachain-mainnet", zetachain_mainnet_default2],
-    ["kaia-mainnet", kaia_mainnet_default2],
-    ["ethereum-mainnet-base-1", ethereum_mainnet_base_1_default2],
-    ["plasma-mainnet", plasma_mainnet_default2],
-    ["gate-layer-mainnet", gate_layer_mainnet_default2],
-    ["ethereum-mainnet-arbitrum-1-l3x-1", ethereum_mainnet_arbitrum_1_l3x_1_default2],
-    ["ethereum-mainnet-immutable-zkevm-1", ethereum_mainnet_immutable_zkevm_1_default2],
-    ["0g-mainnet", _0g_mainnet_default2],
-    ["everclear-mainnet", everclear_mainnet_default2],
-    ["apechain-mainnet", apechain_mainnet_default2],
-    ["ethereum-mainnet-mode-1", ethereum_mainnet_mode_1_default2],
-    ["ab-mainnet", ab_mainnet_default2],
-    ["adi-mainnet", adi_mainnet_default2],
-    ["ethereum-mainnet-arbitrum-1", ethereum_mainnet_arbitrum_1_default2],
-    ["celo-mainnet", celo_mainnet_default2],
-    ["etherlink-mainnet", etherlink_mainnet_default2],
-    ["hemi-mainnet", hemi_mainnet_default2],
-    ["avalanche-mainnet", avalanche_mainnet_default2],
-    ["neox-mainnet", neox_mainnet_default2],
-    ["ethereum-mainnet-zircuit-1", ethereum_mainnet_zircuit_1_default2],
-    ["memento-mainnet", memento_mainnet_default2],
-    ["ethereum-mainnet-ink-1", ethereum_mainnet_ink_1_default2],
-    ["ethereum-mainnet-linea-1", ethereum_mainnet_linea_1_default2],
-    ["nexon-mainnet-lith", nexon_mainnet_lith_default2],
-    ["bitcoin-mainnet-bob-1", bitcoin_mainnet_bob_1_default2],
-    ["treasure-mainnet", treasure_mainnet_default2],
-    ["mova-mainnet", mova_mainnet_default2],
-    ["mova-mainnet-2", mova_mainnet_2_default2],
-    ["nexon-mainnet-henesys", nexon_mainnet_henesys_default2],
-    ["berachain-mainnet", berachain_mainnet_default2],
-    ["codex-mainnet", codex_mainnet_default2],
-    ["ethereum-mainnet-blast-1", ethereum_mainnet_blast_1_default2],
-    ["plume-mainnet", plume_mainnet_default2],
-    ["creditcoin-mainnet", creditcoin_mainnet_default2],
-    ["gravity-mainnet", gravity_mainnet_default2],
-    ["ethereum-mainnet-taiko-1", ethereum_mainnet_taiko_1_default2],
-    ["bitcoin-mainnet-bitlayer-1", bitcoin_mainnet_bitlayer_1_default2],
-    ["avalanche-subnet-dexalot-mainnet", avalanche_subnet_dexalot_mainnet_default2],
-    ["ethereum-mainnet-scroll-1", ethereum_mainnet_scroll_1_default2],
-    ["polygon-mainnet-katana", polygon_mainnet_katana_default2],
-    ["nexon-qa", nexon_qa_default2],
-    ["zklink_nova-mainnet", zklink_nova_mainnet_default2],
-    ["nexon-stage", nexon_stage_default2],
-    ["ethereum-mainnet-arbitrum-1-treasure-1", ethereum_mainnet_arbitrum_1_treasure_1_default2],
-    ["jovay-mainnet", jovay_mainnet_default2],
-    ["zora-mainnet", zora_mainnet_default2],
-    ["corn-mainnet", corn_mainnet_default2],
-    ["tron-mainnet-evm", tron_mainnet_evm_default2],
-    ["dtcc-mainnet-appchain", dtcc_mainnet_appchain_default2]
-  ]),
-  solana: new Map([["solana-mainnet", solana_mainnet_default2]]),
-  aptos: new Map([["aptos-mainnet", aptos_mainnet_default2]]),
-  sui: new Map([["sui-mainnet", sui_mainnet_default2]]),
-  ton: new Map([["ton-mainnet", ton_mainnet_default2]]),
-  tron: new Map([["tron-mainnet", tron_mainnet_default2]])
-};
-var testnetByNameByFamily2 = {
-  evm: new Map([
-    ["bitcoin-testnet-rootstock", bitcoin_testnet_rootstock_default2],
-    ["telos-evm-testnet", telos_evm_testnet_default2],
-    ["polkadot-testnet-darwinia-pangoro", polkadot_testnet_darwinia_pangoro_default2],
-    ["xdc-testnet", xdc_testnet_default2],
-    ["coinex_smart_chain-testnet", coinex_smart_chain_testnet_default2],
-    ["polkadot-testnet-astar-shibuya", polkadot_testnet_astar_shibuya_default2],
-    ["gate-chain-testnet-meteora", gate_chain_testnet_meteora_default2],
-    ["binance_smart_chain-testnet", binance_smart_chain_testnet_default2],
-    ["velas-testnet", velas_testnet_default2],
-    ["ethereum-testnet-sepolia-hashkey-1", ethereum_testnet_sepolia_hashkey_1_default2],
-    ["shibarium-testnet-puppynet", shibarium_testnet_puppynet_default2],
-    ["ethereum-testnet-sepolia-xlayer-1", ethereum_testnet_sepolia_xlayer_1_default2],
-    ["cronos-zkevm-testnet-sepolia", cronos_zkevm_testnet_sepolia_default2],
-    ["ethereum-testnet-goerli-zksync-1", ethereum_testnet_goerli_zksync_1_default2],
-    ["cronos-testnet-zkevm-1", cronos_testnet_zkevm_1_default2],
-    ["hedera-testnet", hedera_testnet_default2],
-    ["ethereum-testnet-sepolia-zksync-1", ethereum_testnet_sepolia_zksync_1_default2],
-    ["cronos-testnet", cronos_testnet_default2],
-    ["near-testnet", near_testnet_default2],
-    ["ethereum-testnet-goerli-optimism-1", ethereum_testnet_goerli_optimism_1_default2],
-    ["areon-testnet", areon_testnet_default2],
-    ["janction-testnet-sepolia", janction_testnet_sepolia_default2],
-    ["private-testnet-obsidian", private_testnet_obsidian_default2],
-    ["ethereum-testnet-sepolia-mode-1", ethereum_testnet_sepolia_mode_1_default2],
-    ["bittensor-testnet", bittensor_testnet_default2],
-    ["hyperliquid-testnet", hyperliquid_testnet_default2],
-    ["kaia-testnet-kairos", kaia_testnet_kairos_default2],
-    ["bittorrent_chain-testnet", bittorrent_chain_testnet_default2],
-    ["wemix-testnet", wemix_testnet_default2],
-    ["core-testnet", core_testnet_default2],
-    ["bitcoin-testnet-bsquared-1", bitcoin_testnet_bsquared_1_default2],
-    ["polkadot-testnet-moonbeam-moonbase", polkadot_testnet_moonbeam_moonbase_default2],
-    ["ethereum-testnet-sepolia-unichain-1", ethereum_testnet_sepolia_unichain_1_default2],
-    ["sei-testnet-atlantic", sei_testnet_atlantic_default2],
-    ["geth-testnet", geth_testnet_default2],
-    [
-      "ethereum-testnet-goerli-polygon-zkevm-1",
-      ethereum_testnet_goerli_polygon_zkevm_1_default2
-    ],
-    ["story-testnet", story_testnet_default2],
-    ["mint-testnet", mint_testnet_default2],
-    ["metal-testnet", metal_testnet_default2],
-    ["bitcichain-testnet", bitcichain_testnet_default2],
-    ["ethereum-testnet-sepolia-soneium-1", ethereum_testnet_sepolia_soneium_1_default2],
-    ["xlayer-testnet", xlayer_testnet_default2],
-    ["ronin-testnet-saigon", ronin_testnet_saigon_default2],
-    ["private-testnet-granite", private_testnet_granite_default2],
-    ["private-testnet-andesite", private_testnet_andesite_default2],
-    ["dtcc-testnet-andesite", dtcc_testnet_andesite_default2],
-    ["polkadot-testnet-centrifuge-altair", polkadot_testnet_centrifuge_altair_default2],
-    ["memento-testnet", memento_testnet_default2],
-    ["stable-testnet", stable_testnet_default2],
-    ["kava-testnet", kava_testnet_default2],
-    ["ethereum-testnet-sepolia-kroma-1", ethereum_testnet_sepolia_kroma_1_default2],
-    ["tac-testnet", tac_testnet_default2],
-    [
-      "ethereum-testnet-sepolia-polygon-zkevm-1",
-      ethereum_testnet_sepolia_polygon_zkevm_1_default2
-    ],
-    ["ethereum-testnet-holesky-fraxtal-1", ethereum_testnet_holesky_fraxtal_1_default2],
-    ["ethereum-testnet-holesky-morph-1", ethereum_testnet_holesky_morph_1_default2],
-    ["ethereum-testnet-hoodi-morph", ethereum_testnet_hoodi_morph_default2],
-    ["bitcoin-testnet-botanix", bitcoin_testnet_botanix_default2],
-    ["fantom-testnet", fantom_testnet_default2],
-    ["ethereum-testnet-sepolia-lisk-1", ethereum_testnet_sepolia_lisk_1_default2],
-    ["ethereum-testnet-sepolia-worldchain-1", ethereum_testnet_sepolia_worldchain_1_default2],
-    ["ethereum-testnet-goerli-mantle-1", ethereum_testnet_goerli_mantle_1_default2],
-    ["ethereum-testnet-sepolia-mantle-1", ethereum_testnet_sepolia_mantle_1_default2],
-    ["binance_smart_chain-testnet-opbnb-1", binance_smart_chain_testnet_opbnb_1_default2],
-    ["nexon-dev", nexon_dev_default2],
-    ["megaeth-testnet", megaeth_testnet_default2],
-    ["megaeth-testnet-2", megaeth_testnet_2_default2],
-    ["everclear-testnet-sepolia", everclear_testnet_sepolia_default2],
-    ["nibiru-testnet", nibiru_testnet_default2],
-    ["ondo-testnet", ondo_testnet_default2],
-    ["neonlink-testnet", neonlink_testnet_default2],
-    ["plasma-testnet", plasma_testnet_default2],
-    ["gate-layer-testnet", gate_layer_testnet_default2],
-    ["monad-testnet", monad_testnet_default2],
-    ["gnosis_chain-testnet-chiado", gnosis_chain_testnet_chiado_default2],
-    ["mova-testnet", mova_testnet_default2],
-    ["abstract-testnet", abstract_testnet_default2],
-    [
-      "ethereum-testnet-sepolia-arbitrum-1-l3x-1",
-      ethereum_testnet_sepolia_arbitrum_1_l3x_1_default2
-    ],
-    [
-      "ethereum-testnet-sepolia-immutable-zkevm-1",
-      ethereum_testnet_sepolia_immutable_zkevm_1_default2
-    ],
-    ["sonic-testnet", sonic_testnet_default2],
-    ["0g-testnet-newton", _0g_testnet_newton_default2],
-    ["0g-testnet-galileo", _0g_testnet_galileo_default2],
-    ["0g-testnet-galileo-1", _0g_testnet_galileo_1_default2],
-    ["ethereum-testnet-holesky", ethereum_testnet_holesky_default2],
-    ["ab-testnet", ab_testnet_default2],
-    ["anvil-devnet", anvil_devnet_default2],
-    ["apechain-testnet-curtis", apechain_testnet_curtis_default2],
-    ["edge-testnet", edge_testnet_default2],
-    ["ethereum-testnet-sepolia-lens-1", ethereum_testnet_sepolia_lens_1_default2],
-    ["tempo-testnet", tempo_testnet_default2],
-    ["tempo-testnet-moderato", tempo_testnet_moderato_default2],
-    ["avalanche-testnet-fuji", avalanche_testnet_fuji_default2],
-    ["celo-testnet-alfajores", celo_testnet_alfajores_default2],
-    ["private-testnet-opala", private_testnet_opala_default2],
-    ["robinhood-testnet", robinhood_testnet_default2],
-    ["zircuit-testnet-garfield", zircuit_testnet_garfield_default2],
-    ["ethereum-testnet-sepolia-zircuit-1", ethereum_testnet_sepolia_zircuit_1_default2],
-    ["superseed-testnet", superseed_testnet_default2],
-    ["sonic-testnet-blaze", sonic_testnet_blaze_default2],
-    ["ethereum-testnet-goerli-linea-1", ethereum_testnet_goerli_linea_1_default2],
-    ["ethereum-testnet-sepolia-linea-1", ethereum_testnet_sepolia_linea_1_default2],
-    ["ethereum-testnet-sepolia-metis-1", ethereum_testnet_sepolia_metis_1_default2],
-    ["polygon-testnet-mumbai", polygon_testnet_mumbai_default2],
-    ["polygon-testnet-amoy", polygon_testnet_amoy_default2],
-    ["berachain-testnet-bepolia", berachain_testnet_bepolia_default2],
-    ["berachain-testnet-bartio", berachain_testnet_bartio_default2],
-    ["berachain-testnet-artio", berachain_testnet_artio_default2],
-    ["zero-g-testnet-galileo", zero_g_testnet_galileo_default2],
-    ["ethereum-testnet-goerli-base-1", ethereum_testnet_goerli_base_1_default2],
-    ["ethereum-testnet-sepolia-base-1", ethereum_testnet_sepolia_base_1_default2],
-    ["plume-devnet", plume_devnet_default2],
-    ["plume-testnet-sepolia", plume_testnet_sepolia_default2],
-    ["adi-testnet", adi_testnet_default2],
-    ["creditcoin-testnet", creditcoin_testnet_default2],
-    ["etherlink-testnet", etherlink_testnet_default2],
-    ["polygon-testnet-tatara", polygon_testnet_tatara_default2],
-    ["ethereum-testnet-holesky-taiko-1", ethereum_testnet_holesky_taiko_1_default2],
-    ["ethereum-testnet-hoodi-taiko", ethereum_testnet_hoodi_taiko_default2],
-    ["ethereum-testnet-hoodi-taiko-1", ethereum_testnet_hoodi_taiko_1_default2],
-    ["mind-testnet", mind_testnet_default2],
-    ["bitcoin-testnet-bitlayer-1", bitcoin_testnet_bitlayer_1_default2],
-    ["ethereum-testnet-sepolia-ronin-1", ethereum_testnet_sepolia_ronin_1_default2],
-    ["t-rex-testnet", t_rex_testnet_default2],
-    ["ethereum-testnet-goerli-arbitrum-1", ethereum_testnet_goerli_arbitrum_1_default2],
-    ["ethereum-testnet-sepolia-arbitrum-1", ethereum_testnet_sepolia_arbitrum_1_default2],
-    ["private-testnet-mica", private_testnet_mica_default2],
-    ["avalanche-subnet-dexalot-testnet", avalanche_subnet_dexalot_testnet_default2],
-    ["ethereum-testnet-sepolia-scroll-1", ethereum_testnet_sepolia_scroll_1_default2],
-    ["ethereum-testnet-hoodi", ethereum_testnet_hoodi_default2],
-    ["avalanche-testnet-nexon", avalanche_testnet_nexon_default2],
-    ["bitcoin-testnet-merlin", bitcoin_testnet_merlin_default2],
-    ["pharos-testnet", pharos_testnet_default2],
-    ["pharos-atlantic-testnet", pharos_atlantic_testnet_default2],
-    [
-      "ethereum-testnet-sepolia-polygon-validium-1",
-      ethereum_testnet_sepolia_polygon_validium_1_default2
-    ],
-    ["hemi-testnet-sepolia", hemi_testnet_sepolia_default2],
-    ["ink-testnet-sepolia", ink_testnet_sepolia_default2],
-    ["bitcoin-testnet-sepolia-bob-1", bitcoin_testnet_sepolia_bob_1_default2],
-    ["zklink_nova-testnet", zklink_nova_testnet_default2],
-    ["codex-testnet", codex_testnet_default2],
-    [
-      "ethereum-testnet-sepolia-arbitrum-1-treasure-1",
-      ethereum_testnet_sepolia_arbitrum_1_treasure_1_default2
-    ],
-    ["treasure-testnet-topaz", treasure_testnet_topaz_default2],
-    ["jovay-testnet", jovay_testnet_default2],
-    ["arc-testnet", arc_testnet_default2],
-    ["dogeos-testnet-chikyu", dogeos_testnet_chikyu_default2],
-    ["gravity-testnet-longevity", gravity_testnet_longevity_default2],
-    ["celo-sepolia", celo_sepolia_default2],
-    ["ethereum-testnet-sepolia", ethereum_testnet_sepolia_default2],
-    ["ethereum-testnet-sepolia-optimism-1", ethereum_testnet_sepolia_optimism_1_default2],
-    ["neox-testnet-t4", neox_testnet_t4_default2],
-    ["ethereum-testnet-sepolia-corn-1", ethereum_testnet_sepolia_corn_1_default2],
-    ["filecoin-testnet", filecoin_testnet_default2],
-    ["plume-testnet", plume_testnet_default2],
-    ["ethereum-testnet-sepolia-blast-1", ethereum_testnet_sepolia_blast_1_default2],
-    ["zora-testnet", zora_testnet_default2],
-    ["private-testnet-quartzite", private_testnet_quartzite_default2],
-    ["private-testnet-rhyolite", private_testnet_rhyolite_default2],
-    ["private-testnet-pumice", private_testnet_pumice_default2],
-    ["tron-testnet-shasta-evm", tron_testnet_shasta_evm_default2],
-    ["tron-devnet-evm", tron_devnet_evm_default2],
-    ["tron-testnet-nile-evm", tron_testnet_nile_evm_default2],
-    ["private-testnet-basalt", private_testnet_basalt_default2],
-    ["glamsterdam-devnet-6", glamsterdam_devnet_6_default2],
-    ["glamsterdam-devnet-5", glamsterdam_devnet_5_default2],
-    ["ethereum-testnet-plataberget", ethereum_testnet_plataberget_default2]
-  ]),
-  solana: new Map([
-    ["solana-testnet", solana_testnet_default2],
-    ["solana-devnet", solana_devnet_default2]
-  ]),
-  aptos: new Map([
-    ["aptos-testnet", aptos_testnet_default2],
-    ["aptos-localnet", aptos_localnet_default2]
-  ]),
-  sui: new Map([
-    ["sui-testnet", sui_testnet_default2],
-    ["sui-localnet", sui_localnet_default2]
-  ]),
-  ton: new Map([
-    ["ton-testnet", ton_testnet_default2],
-    ["ton-localnet", ton_localnet_default2]
-  ]),
-  tron: new Map([
-    ["tron-testnet-shasta", tron_testnet_shasta_default2],
-    ["tron-devnet", tron_devnet_default2],
-    ["tron-testnet-nile", tron_testnet_nile_default2]
-  ])
-};
-
-class NetworkLookup2 {
-  maps;
-  constructor(maps) {
-    this.maps = maps;
-  }
-  find(options) {
-    const { chainSelector, chainSelectorName, isTestnet, chainFamily } = options;
-    const getBySelector = (map) => {
-      if (chainSelector === undefined)
-        return;
-      return map.get(chainSelector);
-    };
-    if (chainSelector === undefined && !chainSelectorName) {
-      return;
-    }
-    if (chainFamily && chainSelector !== undefined) {
-      if (isTestnet === false) {
-        return getBySelector(this.maps.mainnetBySelectorByFamily[chainFamily]);
-      }
-      if (isTestnet === true) {
-        return getBySelector(this.maps.testnetBySelectorByFamily[chainFamily]);
-      }
-      let network = getBySelector(this.maps.testnetBySelectorByFamily[chainFamily]);
-      if (!network) {
-        network = getBySelector(this.maps.mainnetBySelectorByFamily[chainFamily]);
-      }
-      return network;
-    }
-    if (chainFamily && chainSelectorName) {
-      if (isTestnet === false) {
-        return this.maps.mainnetByNameByFamily[chainFamily].get(chainSelectorName);
-      }
-      if (isTestnet === true) {
-        return this.maps.testnetByNameByFamily[chainFamily].get(chainSelectorName);
-      }
-      let network = this.maps.testnetByNameByFamily[chainFamily].get(chainSelectorName);
-      if (!network) {
-        network = this.maps.mainnetByNameByFamily[chainFamily].get(chainSelectorName);
-      }
-      return network;
-    }
-    if (chainSelector !== undefined) {
-      if (isTestnet === false) {
-        return getBySelector(this.maps.mainnetBySelector);
-      }
-      if (isTestnet === true) {
-        return getBySelector(this.maps.testnetBySelector);
-      }
-      let network = getBySelector(this.maps.testnetBySelector);
-      if (!network) {
-        network = getBySelector(this.maps.mainnetBySelector);
-      }
-      return network;
-    }
-    if (chainSelectorName) {
-      if (isTestnet === false) {
-        return this.maps.mainnetByName.get(chainSelectorName);
-      }
-      if (isTestnet === true) {
-        return this.maps.testnetByName.get(chainSelectorName);
-      }
-      let network = this.maps.testnetByName.get(chainSelectorName);
-      if (!network) {
-        network = this.maps.mainnetByName.get(chainSelectorName);
-      }
-      return network;
-    }
-    return;
-  }
-}
-var defaultLookup2 = new NetworkLookup2({
-  mainnetByName: mainnetByName2,
-  mainnetByNameByFamily: mainnetByNameByFamily2,
-  mainnetBySelector: mainnetBySelector2,
-  mainnetBySelectorByFamily: mainnetBySelectorByFamily2,
-  testnetByName: testnetByName2,
-  testnetByNameByFamily: testnetByNameByFamily2,
-  testnetBySelector: testnetBySelector2,
-  testnetBySelectorByFamily: testnetBySelectorByFamily2
-});
-
-class Int642 {
-  static INT64_MIN = -(2n ** 63n);
-  static INT64_MAX = 2n ** 63n - 1n;
-  value;
-  static toInt64Bigint(v) {
-    if (typeof v === "string") {
-      const bi = BigInt(v);
-      return Int642.toInt64Bigint(bi);
-    }
-    if (typeof v === "bigint") {
-      if (v > Int642.INT64_MAX)
-        throw new Error("int64 overflow");
-      else if (v < Int642.INT64_MIN)
-        throw new Error("int64 underflow");
-      return v;
-    }
-    assertSafeIntegerNumber2(v, "int64");
-    const bi = BigInt(v);
-    if (bi > Int642.INT64_MAX)
-      throw new Error("int64 overflow");
-    else if (bi < Int642.INT64_MIN)
-      throw new Error("int64 underflow");
-    return bi;
-  }
-  constructor(v) {
-    this.value = Int642.toInt64Bigint(v);
-  }
-  add(i, safe = true) {
-    return safe ? new Int642(this.value + i.value) : new Int642(BigInt.asIntN(64, this.value + i.value));
-  }
-  sub(i, safe = true) {
-    return safe ? new Int642(this.value - i.value) : new Int642(BigInt.asIntN(64, this.value - i.value));
-  }
-  mul(i, safe = true) {
-    return safe ? new Int642(this.value * i.value) : new Int642(BigInt.asIntN(64, this.value * i.value));
-  }
-  div(i, safe = true) {
-    return safe ? new Int642(this.value / i.value) : new Int642(BigInt.asIntN(64, this.value / i.value));
-  }
-}
-
-class UInt642 {
-  static UINT64_MAX = 2n ** 64n - 1n;
-  value;
-  static toUint64Bigint(v) {
-    if (typeof v === "string") {
-      const bi = BigInt(v);
-      return UInt642.toUint64Bigint(bi);
-    }
-    if (typeof v === "bigint") {
-      if (v > UInt642.UINT64_MAX)
-        throw new Error("uint64 overflow");
-      else if (v < 0n)
-        throw new Error("uint64 underflow");
-      return v;
-    }
-    assertSafeIntegerNumber2(v, "uint64");
-    const bi = BigInt(v);
-    if (bi > UInt642.UINT64_MAX)
-      throw new Error("uint64 overflow");
-    else if (bi < 0n)
-      throw new Error("uint64 underflow");
-    return bi;
-  }
-  constructor(v) {
-    this.value = UInt642.toUint64Bigint(v);
-  }
-  add(i, safe = true) {
-    return safe ? new UInt642(this.value + i.value) : new UInt642(BigInt.asUintN(64, this.value + i.value));
-  }
-  sub(i, safe = true) {
-    return safe ? new UInt642(this.value - i.value) : new UInt642(BigInt.asUintN(64, this.value - i.value));
-  }
-  mul(i, safe = true) {
-    return safe ? new UInt642(this.value * i.value) : new UInt642(BigInt.asUintN(64, this.value * i.value));
-  }
-  div(i, safe = true) {
-    return safe ? new UInt642(this.value / i.value) : new UInt642(BigInt.asUintN(64, this.value / i.value));
-  }
-}
-var globalHostBindingsSchema2 = objectType2({
-  switchModes: functionType2().args(nativeEnumType2(Mode2)).returns(voidType2()),
-  log: functionType2().args(stringType2()).returns(voidType2()),
-  sendResponse: functionType2().args(unionType2([instanceOfType2(Uint8Array), custom5()])).returns(numberType2()),
-  versionV2: functionType2().args().returns(voidType2()),
-  callCapability: functionType2().args(unionType2([instanceOfType2(Uint8Array), custom5()])).returns(numberType2()),
-  awaitCapabilities: functionType2().args(unionType2([instanceOfType2(Uint8Array), custom5()]), numberType2()).returns(unionType2([instanceOfType2(Uint8Array), custom5()])),
-  getSecrets: functionType2().args(unionType2([instanceOfType2(Uint8Array), custom5()]), numberType2()).returns(anyType2()),
-  awaitSecrets: functionType2().args(unionType2([instanceOfType2(Uint8Array), custom5()]), numberType2()).returns(unionType2([instanceOfType2(Uint8Array), custom5()])),
-  getWasiArgs: functionType2().args().returns(stringType2()),
-  now: functionType2().args().returns(numberType2()),
-  sleep: functionType2().args(numberType2()).returns(voidType2())
-});
-var validateGlobalHostBindings2 = () => {
-  const globalFunctions = globalThis;
-  try {
-    return globalHostBindingsSchema2.parse(globalFunctions);
-  } catch (error) {
-    const missingFunctions = Object.keys(globalHostBindingsSchema2.shape).filter((key) => !(key in globalFunctions));
-    throw new Error(`Missing required global host functions: ${missingFunctions.join(", ")}. ` + `The CRE WASM runtime must provide these functions on globalThis. ` + `This usually means the workflow is being executed outside the CRE WASM environment, ` + `or the host runtime version is incompatible with this SDK version.`);
-  }
-};
-var _hostBindings2 = null;
-var hostBindings2 = new Proxy({}, {
-  get(target, prop) {
-    if (!_hostBindings2) {
-      _hostBindings2 = validateGlobalHostBindings2();
-    }
-    return _hostBindings2[prop];
-  }
-});
-var BalanceReaderABI = [{ inputs: [{ internalType: "address[]", name: "addresses", type: "address[]" }], name: "getNativeBalances", outputs: [{ internalType: "uint256[]", name: "", type: "uint256[]" }], stateMutability: "view", type: "function" }, { inputs: [], name: "typeAndVersion", outputs: [{ internalType: "string", name: "", type: "string" }], stateMutability: "view", type: "function" }];
-
-class BalanceReader {
-  client;
-  address;
-  constructor(client, address) {
-    this.client = client;
-    this.address = address;
-  }
-  getNativeBalances(runtime, addresses) {
-    const callData = encodeFunctionData3({
-      abi: BalanceReaderABI,
-      functionName: "getNativeBalances",
-      args: [addresses]
-    });
-    const result = this.client.callContract(runtime, {
-      call: encodeCallMsg({ from: zeroAddress3, to: this.address, data: callData }),
-      blockNumber: LAST_FINALIZED_BLOCK_NUMBER2
-    }).result();
-    return decodeFunctionResult3({
-      abi: BalanceReaderABI,
-      functionName: "getNativeBalances",
-      data: bytesToHex7(result.data)
-    });
-  }
-  typeAndVersion(runtime) {
-    const callData = encodeFunctionData3({
-      abi: BalanceReaderABI,
-      functionName: "typeAndVersion"
-    });
-    const result = this.client.callContract(runtime, {
-      call: encodeCallMsg({ from: zeroAddress3, to: this.address, data: callData }),
-      blockNumber: LAST_FINALIZED_BLOCK_NUMBER2
-    }).result();
-    return decodeFunctionResult3({
-      abi: BalanceReaderABI,
-      functionName: "typeAndVersion",
-      data: bytesToHex7(result.data)
-    });
-  }
-  writeReport(runtime, callData, gasConfig) {
-    const reportResponse = runtime.report(prepareReportRequest(callData)).result();
-    return this.client.writeReport(runtime, {
-      receiver: this.address,
-      report: reportResponse,
-      gasConfig
-    }).result();
-  }
-}
-var encodeTopicValue = (t) => {
-  if (t == null)
-    return [];
-  if (Array.isArray(t))
-    return t.map(hexToBase642);
-  return [hexToBase642(t)];
-};
-var IERC20ABI = [{ anonymous: false, inputs: [{ indexed: true, internalType: "address", name: "owner", type: "address" }, { indexed: true, internalType: "address", name: "spender", type: "address" }, { indexed: false, internalType: "uint256", name: "value", type: "uint256" }], name: "Approval", type: "event" }, { anonymous: false, inputs: [{ indexed: true, internalType: "address", name: "from", type: "address" }, { indexed: true, internalType: "address", name: "to", type: "address" }, { indexed: false, internalType: "uint256", name: "value", type: "uint256" }], name: "Transfer", type: "event" }, { inputs: [{ internalType: "address", name: "owner", type: "address" }, { internalType: "address", name: "spender", type: "address" }], name: "allowance", outputs: [{ internalType: "uint256", name: "", type: "uint256" }], stateMutability: "view", type: "function" }, { inputs: [{ internalType: "address", name: "spender", type: "address" }, { internalType: "uint256", name: "amount", type: "uint256" }], name: "approve", outputs: [{ internalType: "bool", name: "", type: "bool" }], stateMutability: "nonpayable", type: "function" }, { inputs: [{ internalType: "address", name: "account", type: "address" }], name: "balanceOf", outputs: [{ internalType: "uint256", name: "", type: "uint256" }], stateMutability: "view", type: "function" }, { inputs: [], name: "totalSupply", outputs: [{ internalType: "uint256", name: "", type: "uint256" }], stateMutability: "view", type: "function" }, { inputs: [{ internalType: "address", name: "recipient", type: "address" }, { internalType: "uint256", name: "amount", type: "uint256" }], name: "transfer", outputs: [{ internalType: "bool", name: "", type: "bool" }], stateMutability: "nonpayable", type: "function" }, { inputs: [{ internalType: "address", name: "sender", type: "address" }, { internalType: "address", name: "recipient", type: "address" }, { internalType: "uint256", name: "amount", type: "uint256" }], name: "transferFrom", outputs: [{ internalType: "bool", name: "", type: "bool" }], stateMutability: "nonpayable", type: "function" }];
-
-class IERC20 {
-  client;
-  address;
-  constructor(client, address) {
-    this.client = client;
-    this.address = address;
-  }
-  allowance(runtime, owner, spender) {
-    const callData = encodeFunctionData3({
-      abi: IERC20ABI,
-      functionName: "allowance",
-      args: [owner, spender]
-    });
-    const result = this.client.callContract(runtime, {
-      call: encodeCallMsg({ from: zeroAddress3, to: this.address, data: callData }),
-      blockNumber: LAST_FINALIZED_BLOCK_NUMBER2
-    }).result();
-    return decodeFunctionResult3({
-      abi: IERC20ABI,
-      functionName: "allowance",
-      data: bytesToHex7(result.data)
-    });
-  }
-  balanceOf(runtime, account) {
-    const callData = encodeFunctionData3({
-      abi: IERC20ABI,
-      functionName: "balanceOf",
-      args: [account]
-    });
-    const result = this.client.callContract(runtime, {
-      call: encodeCallMsg({ from: zeroAddress3, to: this.address, data: callData }),
-      blockNumber: LAST_FINALIZED_BLOCK_NUMBER2
-    }).result();
-    return decodeFunctionResult3({
-      abi: IERC20ABI,
-      functionName: "balanceOf",
-      data: bytesToHex7(result.data)
-    });
-  }
-  totalSupply(runtime) {
-    const callData = encodeFunctionData3({
-      abi: IERC20ABI,
-      functionName: "totalSupply"
-    });
-    const result = this.client.callContract(runtime, {
-      call: encodeCallMsg({ from: zeroAddress3, to: this.address, data: callData }),
-      blockNumber: LAST_FINALIZED_BLOCK_NUMBER2
-    }).result();
-    return decodeFunctionResult3({
-      abi: IERC20ABI,
-      functionName: "totalSupply",
-      data: bytesToHex7(result.data)
-    });
-  }
-  writeReportFromApprove(runtime, spender, amount, gasConfig) {
-    const callData = encodeFunctionData3({
-      abi: IERC20ABI,
-      functionName: "approve",
-      args: [spender, amount]
-    });
-    const reportResponse = runtime.report(prepareReportRequest(callData)).result();
-    return this.client.writeReport(runtime, {
-      receiver: this.address,
-      report: reportResponse,
-      gasConfig
-    }).result();
-  }
-  writeReportFromTransfer(runtime, recipient, amount, gasConfig) {
-    const callData = encodeFunctionData3({
-      abi: IERC20ABI,
-      functionName: "transfer",
-      args: [recipient, amount]
-    });
-    const reportResponse = runtime.report(prepareReportRequest(callData)).result();
-    return this.client.writeReport(runtime, {
-      receiver: this.address,
-      report: reportResponse,
-      gasConfig
-    }).result();
-  }
-  writeReportFromTransferFrom(runtime, sender, recipient, amount, gasConfig) {
-    const callData = encodeFunctionData3({
-      abi: IERC20ABI,
-      functionName: "transferFrom",
-      args: [sender, recipient, amount]
-    });
-    const reportResponse = runtime.report(prepareReportRequest(callData)).result();
-    return this.client.writeReport(runtime, {
-      receiver: this.address,
-      report: reportResponse,
-      gasConfig
-    }).result();
-  }
-  writeReport(runtime, callData, gasConfig) {
-    const reportResponse = runtime.report(prepareReportRequest(callData)).result();
-    return this.client.writeReport(runtime, {
-      receiver: this.address,
-      report: reportResponse,
-      gasConfig
-    }).result();
-  }
-  logTriggerApproval(filters) {
-    let topics;
-    if (!filters || filters.length === 0) {
-      const encoded = encodeEventTopics3({
-        abi: IERC20ABI,
-        eventName: "Approval"
-      });
-      topics = encoded.map((t) => ({ values: encodeTopicValue(t) }));
-    } else if (filters.length === 1) {
-      const f = filters[0];
-      const args = {
-        owner: f.owner,
-        spender: f.spender
-      };
-      const encoded = encodeEventTopics3({
-        abi: IERC20ABI,
-        eventName: "Approval",
-        args
-      });
-      topics = encoded.map((t) => ({ values: encodeTopicValue(t) }));
-    } else {
-      const allEncoded = filters.map((f) => {
-        const args = {
-          owner: f.owner,
-          spender: f.spender
-        };
-        return encodeEventTopics3({
-          abi: IERC20ABI,
-          eventName: "Approval",
-          args
-        });
-      });
-      topics = allEncoded[0].map((_, i) => ({
-        values: [...new Set(allEncoded.flatMap((row) => encodeTopicValue(row[i])))]
-      }));
-    }
-    const baseTrigger = this.client.logTrigger({
-      addresses: [hexToBase642(this.address)],
-      topics
-    });
-    const contract = this;
-    return {
-      capabilityId: () => baseTrigger.capabilityId(),
-      method: () => baseTrigger.method(),
-      outputSchema: () => baseTrigger.outputSchema(),
-      configAsAny: () => baseTrigger.configAsAny(),
-      adapt: (rawOutput) => contract.decodeApproval(rawOutput)
-    };
-  }
-  decodeApproval(log) {
-    const decoded = decodeEventLog3({
-      abi: IERC20ABI,
-      data: bytesToHex7(log.data),
-      topics: log.topics.map((t) => bytesToHex7(t))
-    });
-    const { data: _, ...rest } = log;
-    return { ...rest, data: decoded.args };
-  }
-  logTriggerTransfer(filters) {
-    let topics;
-    if (!filters || filters.length === 0) {
-      const encoded = encodeEventTopics3({
-        abi: IERC20ABI,
-        eventName: "Transfer"
-      });
-      topics = encoded.map((t) => ({ values: encodeTopicValue(t) }));
-    } else if (filters.length === 1) {
-      const f = filters[0];
-      const args = {
-        from: f.from,
-        to: f.to
-      };
-      const encoded = encodeEventTopics3({
-        abi: IERC20ABI,
-        eventName: "Transfer",
-        args
-      });
-      topics = encoded.map((t) => ({ values: encodeTopicValue(t) }));
-    } else {
-      const allEncoded = filters.map((f) => {
-        const args = {
-          from: f.from,
-          to: f.to
-        };
-        return encodeEventTopics3({
-          abi: IERC20ABI,
-          eventName: "Transfer",
-          args
-        });
-      });
-      topics = allEncoded[0].map((_, i) => ({
-        values: [...new Set(allEncoded.flatMap((row) => encodeTopicValue(row[i])))]
-      }));
-    }
-    const baseTrigger = this.client.logTrigger({
-      addresses: [hexToBase642(this.address)],
-      topics
-    });
-    const contract = this;
-    return {
-      capabilityId: () => baseTrigger.capabilityId(),
-      method: () => baseTrigger.method(),
-      outputSchema: () => baseTrigger.outputSchema(),
-      configAsAny: () => baseTrigger.configAsAny(),
-      adapt: (rawOutput) => contract.decodeTransfer(rawOutput)
-    };
-  }
-  decodeTransfer(log) {
-    const decoded = decodeEventLog3({
-      abi: IERC20ABI,
-      data: bytesToHex7(log.data),
-      topics: log.topics.map((t) => bytesToHex7(t))
-    });
-    const { data: _, ...rest } = log;
-    return { ...rest, data: decoded.args };
-  }
-}
-var encodeTopicValue2 = (t) => {
-  if (t == null)
-    return [];
-  if (Array.isArray(t))
-    return t.map(hexToBase642);
-  return [hexToBase642(t)];
-};
-var MessageEmitterABI = [{ anonymous: false, inputs: [{ indexed: true, internalType: "address", name: "emitter", type: "address" }, { indexed: true, internalType: "uint256", name: "timestamp", type: "uint256" }, { indexed: false, internalType: "string", name: "message", type: "string" }], name: "MessageEmitted", type: "event" }, { inputs: [{ internalType: "string", name: "message", type: "string" }], name: "emitMessage", outputs: [], stateMutability: "nonpayable", type: "function" }, { inputs: [{ internalType: "address", name: "emitter", type: "address" }], name: "getLastMessage", outputs: [{ internalType: "string", name: "", type: "string" }], stateMutability: "view", type: "function" }, { inputs: [{ internalType: "address", name: "emitter", type: "address" }, { internalType: "uint256", name: "timestamp", type: "uint256" }], name: "getMessage", outputs: [{ internalType: "string", name: "", type: "string" }], stateMutability: "view", type: "function" }, { inputs: [], name: "typeAndVersion", outputs: [{ internalType: "string", name: "", type: "string" }], stateMutability: "view", type: "function" }];
-
-class MessageEmitter {
-  client;
-  address;
-  constructor(client, address) {
-    this.client = client;
-    this.address = address;
-  }
-  getLastMessage(runtime, emitter) {
-    const callData = encodeFunctionData3({
-      abi: MessageEmitterABI,
-      functionName: "getLastMessage",
-      args: [emitter]
-    });
-    const result = this.client.callContract(runtime, {
-      call: encodeCallMsg({ from: zeroAddress3, to: this.address, data: callData }),
-      blockNumber: LAST_FINALIZED_BLOCK_NUMBER2
-    }).result();
-    return decodeFunctionResult3({
-      abi: MessageEmitterABI,
-      functionName: "getLastMessage",
-      data: bytesToHex7(result.data)
-    });
-  }
-  getMessage(runtime, emitter, timestamp) {
-    const callData = encodeFunctionData3({
-      abi: MessageEmitterABI,
-      functionName: "getMessage",
-      args: [emitter, timestamp]
-    });
-    const result = this.client.callContract(runtime, {
-      call: encodeCallMsg({ from: zeroAddress3, to: this.address, data: callData }),
-      blockNumber: LAST_FINALIZED_BLOCK_NUMBER2
-    }).result();
-    return decodeFunctionResult3({
-      abi: MessageEmitterABI,
-      functionName: "getMessage",
-      data: bytesToHex7(result.data)
-    });
-  }
-  typeAndVersion(runtime) {
-    const callData = encodeFunctionData3({
-      abi: MessageEmitterABI,
-      functionName: "typeAndVersion"
-    });
-    const result = this.client.callContract(runtime, {
-      call: encodeCallMsg({ from: zeroAddress3, to: this.address, data: callData }),
-      blockNumber: LAST_FINALIZED_BLOCK_NUMBER2
-    }).result();
-    return decodeFunctionResult3({
-      abi: MessageEmitterABI,
-      functionName: "typeAndVersion",
-      data: bytesToHex7(result.data)
-    });
-  }
-  writeReportFromEmitMessage(runtime, message, gasConfig) {
-    const callData = encodeFunctionData3({
-      abi: MessageEmitterABI,
-      functionName: "emitMessage",
-      args: [message]
-    });
-    const reportResponse = runtime.report(prepareReportRequest(callData)).result();
-    return this.client.writeReport(runtime, {
-      receiver: this.address,
-      report: reportResponse,
-      gasConfig
-    }).result();
-  }
-  writeReport(runtime, callData, gasConfig) {
-    const reportResponse = runtime.report(prepareReportRequest(callData)).result();
-    return this.client.writeReport(runtime, {
-      receiver: this.address,
-      report: reportResponse,
-      gasConfig
-    }).result();
-  }
-  logTriggerMessageEmitted(filters) {
-    let topics;
-    if (!filters || filters.length === 0) {
-      const encoded = encodeEventTopics3({
-        abi: MessageEmitterABI,
-        eventName: "MessageEmitted"
-      });
-      topics = encoded.map((t) => ({ values: encodeTopicValue2(t) }));
-    } else if (filters.length === 1) {
-      const f = filters[0];
-      const args = {
-        emitter: f.emitter,
-        timestamp: f.timestamp
-      };
-      const encoded = encodeEventTopics3({
-        abi: MessageEmitterABI,
-        eventName: "MessageEmitted",
-        args
-      });
-      topics = encoded.map((t) => ({ values: encodeTopicValue2(t) }));
-    } else {
-      const allEncoded = filters.map((f) => {
-        const args = {
-          emitter: f.emitter,
-          timestamp: f.timestamp
-        };
-        return encodeEventTopics3({
-          abi: MessageEmitterABI,
-          eventName: "MessageEmitted",
-          args
-        });
-      });
-      topics = allEncoded[0].map((_, i) => ({
-        values: [...new Set(allEncoded.flatMap((row) => encodeTopicValue2(row[i])))]
-      }));
-    }
-    const baseTrigger = this.client.logTrigger({
-      addresses: [hexToBase642(this.address)],
-      topics
-    });
-    const contract = this;
-    return {
-      capabilityId: () => baseTrigger.capabilityId(),
-      method: () => baseTrigger.method(),
-      outputSchema: () => baseTrigger.outputSchema(),
-      configAsAny: () => baseTrigger.configAsAny(),
-      adapt: (rawOutput) => contract.decodeMessageEmitted(rawOutput)
-    };
-  }
-  decodeMessageEmitted(log) {
-    const decoded = decodeEventLog3({
-      abi: MessageEmitterABI,
-      data: bytesToHex7(log.data),
-      topics: log.topics.map((t) => bytesToHex7(t))
-    });
-    const { data: _, ...rest } = log;
-    return { ...rest, data: decoded.args };
-  }
-}
-var encodeTopicValue3 = (t) => {
-  if (t == null)
-    return [];
-  if (Array.isArray(t))
-    return t.map(hexToBase642);
-  return [hexToBase642(t)];
-};
-var ReserveManagerABI = [{ anonymous: false, inputs: [{ indexed: false, internalType: "uint256", name: "requestId", type: "uint256" }], name: "RequestReserveUpdate", type: "event" }, { inputs: [], name: "lastTotalMinted", outputs: [{ internalType: "uint256", name: "", type: "uint256" }], stateMutability: "view", type: "function" }, { inputs: [], name: "lastTotalReserve", outputs: [{ internalType: "uint256", name: "", type: "uint256" }], stateMutability: "view", type: "function" }, { inputs: [{ components: [{ internalType: "uint256", name: "totalMinted", type: "uint256" }, { internalType: "uint256", name: "totalReserve", type: "uint256" }], internalType: "structUpdateReserves", name: "updateReserves", type: "tuple" }], name: "updateReserves", outputs: [], stateMutability: "nonpayable", type: "function" }];
-
-class ReserveManager {
-  client;
-  address;
-  constructor(client, address) {
-    this.client = client;
-    this.address = address;
-  }
-  lastTotalMinted(runtime) {
-    const callData = encodeFunctionData3({
-      abi: ReserveManagerABI,
-      functionName: "lastTotalMinted"
-    });
-    const result = this.client.callContract(runtime, {
-      call: encodeCallMsg({ from: zeroAddress3, to: this.address, data: callData }),
-      blockNumber: LAST_FINALIZED_BLOCK_NUMBER2
-    }).result();
-    return decodeFunctionResult3({
-      abi: ReserveManagerABI,
-      functionName: "lastTotalMinted",
-      data: bytesToHex7(result.data)
-    });
-  }
-  lastTotalReserve(runtime) {
-    const callData = encodeFunctionData3({
-      abi: ReserveManagerABI,
-      functionName: "lastTotalReserve"
-    });
-    const result = this.client.callContract(runtime, {
-      call: encodeCallMsg({ from: zeroAddress3, to: this.address, data: callData }),
-      blockNumber: LAST_FINALIZED_BLOCK_NUMBER2
-    }).result();
-    return decodeFunctionResult3({
-      abi: ReserveManagerABI,
-      functionName: "lastTotalReserve",
-      data: bytesToHex7(result.data)
-    });
-  }
-  writeReportFromUpdateReserves(runtime, updateReserves, gasConfig) {
-    const callData = encodeFunctionData3({
-      abi: ReserveManagerABI,
-      functionName: "updateReserves",
-      args: [updateReserves]
-    });
-    const reportResponse = runtime.report(prepareReportRequest(callData)).result();
-    return this.client.writeReport(runtime, {
-      receiver: this.address,
-      report: reportResponse,
-      gasConfig
-    }).result();
-  }
-  writeReport(runtime, callData, gasConfig) {
-    const reportResponse = runtime.report(prepareReportRequest(callData)).result();
-    return this.client.writeReport(runtime, {
-      receiver: this.address,
-      report: reportResponse,
-      gasConfig
-    }).result();
-  }
-  logTriggerRequestReserveUpdate(filters) {
-    let topics;
-    if (!filters || filters.length === 0) {
-      const encoded = encodeEventTopics3({
-        abi: ReserveManagerABI,
-        eventName: "RequestReserveUpdate"
-      });
-      topics = encoded.map((t) => ({ values: encodeTopicValue3(t) }));
-    } else if (filters.length === 1) {
-      const f = filters[0];
-      const args = {};
-      const encoded = encodeEventTopics3({
-        abi: ReserveManagerABI,
-        eventName: "RequestReserveUpdate",
-        args
-      });
-      topics = encoded.map((t) => ({ values: encodeTopicValue3(t) }));
-    } else {
-      const allEncoded = filters.map((f) => {
-        const args = {};
-        return encodeEventTopics3({
-          abi: ReserveManagerABI,
-          eventName: "RequestReserveUpdate",
-          args
-        });
-      });
-      topics = allEncoded[0].map((_, i) => ({
-        values: [...new Set(allEncoded.flatMap((row) => encodeTopicValue3(row[i])))]
-      }));
-    }
-    const baseTrigger = this.client.logTrigger({
-      addresses: [hexToBase642(this.address)],
-      topics
-    });
-    const contract = this;
-    return {
-      capabilityId: () => baseTrigger.capabilityId(),
-      method: () => baseTrigger.method(),
-      outputSchema: () => baseTrigger.outputSchema(),
-      configAsAny: () => baseTrigger.configAsAny(),
-      adapt: (rawOutput) => contract.decodeRequestReserveUpdate(rawOutput)
-    };
-  }
-  decodeRequestReserveUpdate(log) {
-    const decoded = decodeEventLog3({
-      abi: ReserveManagerABI,
-      data: bytesToHex7(log.data),
-      topics: log.topics.map((t) => bytesToHex7(t))
-    });
-    const { data: _, ...rest } = log;
-    return { ...rest, data: decoded.args };
-  }
-}
 var configSchema = objectType({
-  schedule: stringType(),
-  url: stringType(),
-  evms: arrayType(objectType({
-    tokenAddress: stringType(),
-    porAddress: stringType(),
-    proxyAddress: stringType(),
-    balanceReaderAddress: stringType(),
-    messageEmitterAddress: stringType(),
-    chainSelectorName: stringType(),
-    gasLimit: stringType()
-  }))
+  chainSelectorName: stringType(),
+  ledgerAddress: stringType(),
+  gasLimit: stringType()
 });
-var safeJsonStringify = (obj) => JSON.stringify(obj, (_, value) => typeof value === "bigint" ? value.toString() : value, 2);
-var fetchReserveInfo = (sendRequester, config) => {
-  const response = sendRequester.sendRequest({ method: "GET", url: config.url }).result();
-  if (response.statusCode !== 200) {
-    throw new Error(`HTTP request failed with status: ${response.statusCode}`);
-  }
-  const responseText = Buffer.from(response.body).toString("utf-8");
-  const porResp = JSON.parse(responseText);
-  if (porResp.ripcord) {
-    throw new Error("ripcord is true");
-  }
-  return {
-    lastUpdated: new Date(porResp.updatedAt),
-    totalReserve: porResp.totalToken
-  };
+var ledgerAbi = parseAbi2([
+  "function openPositionIds() view returns (bytes32[])",
+  "function getPosition(bytes32 id) view returns (bool exists, bool settled, string token, uint8 side, uint256 sizeBps, uint256 entryPriceE8, bytes32 cardHash, uint8 attestation, uint256 reasonCode, uint256 exitPriceE8, int256 pnlBps, uint256 settledAt)"
+]);
+var openReportParameters = parseAbiParameters2("uint8 reportType, (bytes32 positionId, string token, uint8 side, uint256 sizeBps, uint256 entryPriceE8, bytes32 cardHash, uint8 attestation, uint256 reasonCode) openReport");
+var priceSnapshotSchema = objectType({
+  coingecko: numberType().positive(),
+  coinbase: numberType().positive(),
+  binance: numberType().positive(),
+  marketCapUsd: numberType().nonnegative()
+});
+var tokenMap = {
+  BTC: { gecko: "bitcoin", coinbase: "BTC-USD", binance: "BTCUSDT" },
+  ETH: { gecko: "ethereum", coinbase: "ETH-USD", binance: "ETHUSDT" },
+  SOL: { gecko: "solana", coinbase: "SOL-USD", binance: "SOLUSDT" }
 };
-var fetchNativeTokenBalance = (runtime, evmConfig, tokenHolderAddress) => {
+var parseJson = (body) => JSON.parse(new TextDecoder().decode(body));
+var fetchPrices = (requester, card) => {
+  const symbols = tokenMap[card.token.toUpperCase()];
+  if (!symbols)
+    throw new Error(`Unsupported token: ${card.token}`);
+  const geckoResponse = requester.sendRequest({
+    method: "GET",
+    url: `https://api.coingecko.com/api/v3/coins/${symbols.gecko}?localization=false&tickers=false&market_data=true`
+  }).result();
+  const coinbaseResponse = requester.sendRequest({ method: "GET", url: `https://api.coinbase.com/v2/prices/${symbols.coinbase}/spot` }).result();
+  const binanceResponse = requester.sendRequest({ method: "GET", url: `https://api.binance.com/api/v3/ticker/price?symbol=${symbols.binance}` }).result();
+  if (geckoResponse.statusCode !== 200 || coinbaseResponse.statusCode !== 200 || binanceResponse.statusCode !== 200) {
+    throw new Error("One or more price APIs returned a non-200 response");
+  }
+  const gecko = parseJson(geckoResponse.body);
+  const coinbase = parseJson(coinbaseResponse.body);
+  const binance = parseJson(binanceResponse.body);
+  return priceSnapshotSchema.parse({
+    coingecko: Number(gecko.market_data?.current_price?.usd),
+    coinbase: Number(coinbase.data?.amount),
+    binance: Number(binance.price),
+    marketCapUsd: Number(gecko.market_data?.market_cap?.usd)
+  });
+};
+var getEvmClient = (runtime) => {
   const network = getNetwork({
     chainFamily: "evm",
-    chainSelectorName: evmConfig.chainSelectorName,
+    chainSelectorName: runtime.config.chainSelectorName,
     isTestnet: true
   });
-  if (!network) {
-    throw new Error(`Network not found for chain selector name: ${evmConfig.chainSelectorName}`);
-  }
-  const evmClient = new cre.capabilities.EVMClient(network.chainSelector.selector);
-  const balanceReader = new BalanceReader(evmClient, evmConfig.balanceReaderAddress);
-  const balances = balanceReader.getNativeBalances(runtime, [tokenHolderAddress]);
-  if (!balances || balances.length === 0) {
-    throw new Error("No balances returned from contract");
-  }
-  return balances[0];
+  if (!network)
+    throw new Error(`Network not found: ${runtime.config.chainSelectorName}`);
+  return new cre.capabilities.EVMClient(network.chainSelector.selector);
 };
-var getTotalSupply = (runtime) => {
-  const evms = runtime.config.evms;
-  let totalSupply = 0n;
-  for (const evmConfig of evms) {
-    const network = getNetwork({
-      chainFamily: "evm",
-      chainSelectorName: evmConfig.chainSelectorName,
-      isTestnet: true
-    });
-    if (!network) {
-      throw new Error(`Network not found for chain selector name: ${evmConfig.chainSelectorName}`);
+var readOpenCount = (runtime, client) => {
+  const callData = encodeFunctionData2({ abi: ledgerAbi, functionName: "openPositionIds" });
+  const reply = client.callContract(runtime, {
+    call: encodeCallMsg({
+      from: zeroAddress2,
+      to: runtime.config.ledgerAddress,
+      data: callData
+    }),
+    blockNumber: LAST_FINALIZED_BLOCK_NUMBER
+  }).result();
+  const ids = decodeFunctionResult2({
+    abi: ledgerAbi,
+    functionName: "openPositionIds",
+    data: bytesToHex3(reply.data)
+  });
+  return ids.length;
+};
+var riskGate = (card, price, openCount) => {
+  const sourcePrices = [price.coingecko, price.coinbase, price.binance];
+  const medianPrice = [...sourcePrices].sort((a, b) => a - b)[1];
+  const deviation = Math.max(...sourcePrices.map((value) => Math.abs(value - medianPrice) / medianPrice));
+  const requestedBps = Math.round(card.decision.size_pct * 1e4);
+  const maxBps = Math.round(card.risk_rules.max_position_pct * 1e4);
+  const side = card.decision.side === "long" ? 0 : card.decision.side === "short" ? 1 : 2;
+  if (card.evidence.lead_min < 0) {
+    return { attestation: 2, sizeBps: 0n, side: 2, reasonCode: 1001n, reason: "lead_min_negative" };
+  }
+  if (deviation > 0.01) {
+    return { attestation: 2, sizeBps: 0n, side: 2, reasonCode: 1002n, reason: "price_sources_disagree_gt_1pct" };
+  }
+  if (price.marketCapUsd < card.risk_rules.min_mcap_usd) {
+    return { attestation: 2, sizeBps: 0n, side: 2, reasonCode: 1003n, reason: "market_cap_below_minimum" };
+  }
+  if (openCount >= card.risk_rules.max_open) {
+    return { attestation: 2, sizeBps: 0n, side: 2, reasonCode: 1004n, reason: "max_open_reached" };
+  }
+  if (card.decision.side === "none" || requestedBps === 0) {
+    return { attestation: 2, sizeBps: 0n, side: 2, reasonCode: 1005n, reason: "card_decision_is_none" };
+  }
+  if (requestedBps > maxBps) {
+    return {
+      attestation: 1,
+      sizeBps: BigInt(maxBps),
+      side,
+      reasonCode: 1006n,
+      reason: "size_constrained_to_max_position_pct"
+    };
+  }
+  return { attestation: 0, sizeBps: BigInt(requestedBps), side, reasonCode: 0n, reason: "approved" };
+};
+var writeOpenReport = (runtime, card, suppliedHash, price, gate, client) => {
+  const medianPrice = [price.coingecko, price.coinbase, price.binance].sort((a, b) => a - b)[1];
+  const entryPriceE8 = BigInt(Math.round(medianPrice * 1e8));
+  const positionId = keccak2562(toBytes3(`${card.card_id}:${suppliedHash}`));
+  const callData = encodeAbiParameters2(openReportParameters, [
+    0,
+    {
+      positionId,
+      token: card.token,
+      side: gate.side,
+      sizeBps: gate.sizeBps,
+      entryPriceE8,
+      cardHash: suppliedHash,
+      attestation: gate.attestation,
+      reasonCode: gate.reasonCode
     }
-    const evmClient = new cre.capabilities.EVMClient(network.chainSelector.selector);
-    const token = new IERC20(evmClient, evmConfig.tokenAddress);
-    const supply = token.totalSupply(runtime);
-    totalSupply += supply;
+  ]);
+  const report = runtime.report(prepareReportRequest(callData)).result();
+  const result = client.writeReport(runtime, {
+    receiver: runtime.config.ledgerAddress,
+    report,
+    gasConfig: { gasLimit: runtime.config.gasLimit }
+  }).result();
+  if (result.txStatus !== TxStatus.SUCCESS) {
+    throw new Error(`OPEN report failed: ${result.errorMessage || result.txStatus}`);
   }
-  return totalSupply;
+  const decision = gate.attestation === 0 ? "APPROVE" : gate.attestation === 1 ? "CONSTRAIN" : "REJECT";
+  runtime.log(`OPEN ${decision} reasonCode=${gate.reasonCode.toString()} reason=${gate.reason} priceE8=${entryPriceE8.toString()} tx=${bytesToHex3(result.txHash || new Uint8Array(32))}`);
+  return JSON.stringify({ decision, reasonCode: gate.reasonCode.toString(), reason: gate.reason });
 };
-var updateReserves = (runtime, totalSupply, totalReserveScaled) => {
-  const evmConfig = runtime.config.evms[0];
-  const network = getNetwork({
-    chainFamily: "evm",
-    chainSelectorName: evmConfig.chainSelectorName,
-    isTestnet: true
-  });
-  if (!network) {
-    throw new Error(`Network not found for chain selector name: ${evmConfig.chainSelectorName}`);
+var onHttpTrigger = (runtime, payload) => {
+  const input = JSON.parse(new TextDecoder().decode(payload.input));
+  const card = ReasoningCard.parse(input.card);
+  const expectedHash = keccak2562(toBytes3(canonicalJson(card)));
+  if (typeof input.cardHash !== "string" || input.cardHash.toLowerCase() !== expectedHash.toLowerCase()) {
+    throw new Error("cardHash does not match canonical card JSON");
   }
-  const evmClient = new cre.capabilities.EVMClient(network.chainSelector.selector);
-  const proxy = new ReserveManager(evmClient, evmConfig.proxyAddress);
-  runtime.log(`Updating reserves totalSupply ${totalSupply.toString()} totalReserveScaled ${totalReserveScaled.toString()}`);
-  const resp = proxy.writeReportFromUpdateReserves(runtime, { totalMinted: totalSupply, totalReserve: totalReserveScaled }, { gasLimit: evmConfig.gasLimit });
-  const txStatus = resp.txStatus;
-  if (txStatus !== TxStatus.SUCCESS) {
-    throw new Error(`Failed to write report: ${resp.errorMessage || txStatus}`);
-  }
-  const txHash = resp.txHash || new Uint8Array(32);
-  runtime.log(`Write report transaction succeeded at txHash: ${bytesToHex3(txHash)}`);
-  return txHash.toString();
+  const prices = new cre.capabilities.HTTPClient().sendRequest(runtime, fetchPrices, ConsensusAggregationByFields({
+    coingecko: median,
+    coinbase: median,
+    binance: median,
+    marketCapUsd: median
+  }))(card).result();
+  runtime.log(`Prices coingecko=${prices.coingecko} coinbase=${prices.coinbase} binance=${prices.binance} marketCapUsd=${prices.marketCapUsd}`);
+  const client = getEvmClient(runtime);
+  const openCount = readOpenCount(runtime, client);
+  runtime.log(`EchoLedger open positions=${openCount}`);
+  return writeOpenReport(runtime, card, input.cardHash, prices, riskGate(card, prices, openCount), client);
 };
-var doPOR = (runtime) => {
-  runtime.log(`fetching por url ${runtime.config.url}`);
-  const httpCapability = new cre.capabilities.HTTPClient;
-  const reserveInfo = httpCapability.sendRequest(runtime, fetchReserveInfo, ConsensusAggregationByFields({
-    lastUpdated: median,
-    totalReserve: median
-  }))(runtime.config).result();
-  runtime.log(`ReserveInfo ${safeJsonStringify(reserveInfo)}`);
-  const totalSupply = getTotalSupply(runtime);
-  runtime.log(`TotalSupply ${totalSupply.toString()}`);
-  const totalReserveScaled = parseUnits2(reserveInfo.totalReserve.toString(), 18);
-  runtime.log(`TotalReserveScaled ${totalReserveScaled.toString()}`);
-  const nativeTokenBalance = fetchNativeTokenBalance(runtime, runtime.config.evms[0], runtime.config.evms[0].tokenAddress);
-  runtime.log(`NativeTokenBalance ${nativeTokenBalance.toString()}`);
-  updateReserves(runtime, totalSupply, totalReserveScaled);
-  return reserveInfo.totalReserve.toString();
-};
-var onCronTrigger = (runtime, payload) => {
-  if (!payload.scheduledExecutionTime) {
-    throw new Error("Scheduled execution time is required");
-  }
-  runtime.log("Running CronTrigger");
-  return doPOR(runtime);
-};
-var onLogTrigger = (runtime, payload) => {
-  runtime.log("Running LogTrigger");
-  runtime.log(`Emitter ${payload.data.emitter}`);
-  runtime.log(`Message decoded from log: ${payload.data.message}`);
-  return payload.data.message;
-};
-function initWorkflow(config) {
-  const cronTrigger = new cre.capabilities.CronCapability;
-  const network = getNetwork({
-    chainFamily: "evm",
-    chainSelectorName: config.evms[0].chainSelectorName,
-    isTestnet: true
-  });
-  if (!network) {
-    throw new Error(`Network not found for chain selector name: ${config.evms[0].chainSelectorName}`);
-  }
-  const evmClient = new cre.capabilities.EVMClient(network.chainSelector.selector);
-  const messageEmitter = new MessageEmitter(evmClient, config.evms[0].messageEmitterAddress);
+function initWorkflow(_config) {
   return [
-    cre.handler(cronTrigger.trigger({
-      schedule: config.schedule
-    }), onCronTrigger),
-    cre.handler(messageEmitter.logTriggerMessageEmitted(), onLogTrigger)
+    cre.handler(new cre.capabilities.HTTPCapability().trigger({ authorizedKeys: [] }), onHttpTrigger)
   ];
 }
 async function main() {
