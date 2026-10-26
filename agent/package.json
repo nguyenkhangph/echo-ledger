@@ -6,6 +6,7 @@
   "scripts": {
     "ingest": "bun run src/ingest/cli.ts",
     "extract": "bun run src/extract/cli.ts",
+    "converge": "bun run src/convergence/cli.ts",
     "test": "bun test",
     "typecheck": "tsc --noEmit"
   },
