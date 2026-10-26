@@ -56,3 +56,9 @@ Echoes remain in each candidate for transparency but never contribute to its sco
 Run `bun run debate --date YYYY-MM-DD`, or omit `--date` to use the latest candidate fixture. Only passed convergence candidates are debated. Bull and Bear run in parallel, then Judge receives both arguments plus the raw candidate and A2 timeframe context. Each stage is strictly validated and receives one retry for invalid output. A failed candidate is logged and skipped without stopping the batch. Drafts are written to `../fixtures/drafts/<date>.jsonl` and validated against the shared `ReasoningCard` schema.
 
 The debate and risk status assessment are advisory, off-chain, and PRACTICE-only. They never authorize a position. The draft records configured limits for transparency, but CRE must independently fetch finalized evidence, read current on-chain state, and enforce the authoritative deterministic risk gate. LLM output is never trusted inside CRE.
+
+## Finalize and submit
+
+Run `bun run submit --date YYYY-MM-DD`, or omit `--date` to use the latest draft fixture. Each valid draft receives a final timestamp and deterministic `card-<token>-<verdict>-<sequence>` ID, is validated against the shared schema, and is hashed using the shared canonical Keccak-256 implementation. A replay ledger at `../fixtures/submitted-ledger.json` prevents a successfully sent underlying signal from being submitted again.
+
+When `CRE_RECORD_URL` is unset, submission is safely dry-run only: no HTTP request is attempted and payloads are appended to `../fixtures/dry-run-submissions/<date>.jsonl`. Configure the URL only after the merged CRE HTTP trigger contract is confirmed. The agent posts `{ card, cardHash }`; it never broadcasts a blockchain transaction itself. Per-item outcomes are written to `../fixtures/submitted/<date>.jsonl`.
