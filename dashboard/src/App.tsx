@@ -66,14 +66,6 @@ function formatRelativeTime(date: string) {
   return minutes ? `${hours}h ${minutes}m ago` : `${hours}h ago`;
 }
 
-function SignalIcon() {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M4 17V7m5 13V4m6 13V7m5 13V4" />
-    </svg>
-  );
-}
-
 function RadarIcon() {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -108,7 +100,7 @@ function App() {
     <div className="app-shell">
       <header className="topbar">
         <a className="brand" href="/" aria-label="Echo Ledger home">
-          <span className="brand-mark"><SignalIcon /></span>
+          <span className="brand-mark"><img src="/brand/logo.png" alt="" /></span>
           <span>ECHO<span>LEDGER</span></span>
         </a>
 

@@ -58,8 +58,54 @@ function CopyButton({ value, label }: { value: string; label: string }) {
   );
 }
 
+function CheckIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M20 6 9 17l-5-5" />
+    </svg>
+  );
+}
+
+function AlertIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M12 9v4m0 4h.01M10.3 3.9 2.6 17a2 2 0 0 0 1.7 3h15.4a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z" />
+    </svg>
+  );
+}
+
+function XCircleIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <circle cx="12" cy="12" r="9" />
+      <path d="m15 9-6 6m0-6 6 6" />
+    </svg>
+  );
+}
+
+function ClockDashedIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <circle cx="12" cy="12" r="9" strokeDasharray="2.5 3.5" />
+      <path d="M12 7v5l3 2" />
+    </svg>
+  );
+}
+
+function decisionIcon(tone: string) {
+  if (tone === "approve") return <CheckIcon />;
+  if (tone === "reject") return <XCircleIcon />;
+  return <AlertIcon />;
+}
+
 function Status({ state }: { state: RuleState }) {
-  return <span className={`rule-status ${state}`}>{state === "pending" ? "Pending data" : state}</span>;
+  const icon = state === "pass" ? <CheckIcon /> : state === "fail" ? <XCircleIcon /> : <ClockDashedIcon />;
+  return (
+    <span className={`rule-status ${state}`}>
+      {icon}
+      {state === "pending" ? "Awaiting data" : state}
+    </span>
+  );
 }
 
 export function ReasoningCardDetail({ card }: { card: FixtureCard }) {
@@ -108,7 +154,7 @@ export function ReasoningCardDetail({ card }: { card: FixtureCard }) {
     <div className="app-shell">
       <header className="topbar detail-topbar">
         <a className="brand" href="/" aria-label="Echo Ledger radar">
-          <span className="brand-mark" aria-hidden="true">EL</span>
+          <span className="brand-mark" aria-hidden="true"><img src="/brand/logo.png" alt="" /></span>
           <span>ECHO<span>LEDGER</span></span>
         </a>
         <nav className="detail-nav" aria-label="Primary navigation"><a href="/">Radar</a><a href="/scorecard">Scorecard</a></nav>
@@ -122,7 +168,7 @@ export function ReasoningCardDetail({ card }: { card: FixtureCard }) {
             <div className="card-title-row">
               <span className={`token-icon token-${card.token.toLowerCase()}`}>{card.token.slice(0, 1)}</span>
               <h1>{card.token}</h1>
-              <span className={`decision-badge ${decisionTone}`}>{decisionLabel}</span>
+              <span className={`decision-badge ${decisionTone}`}>{decisionIcon(decisionTone)}{decisionLabel}</span>
             </div>
             <time dateTime={card.created_at}>{formatTimestamp(card.created_at)}</time>
           </div>
@@ -134,6 +180,10 @@ export function ReasoningCardDetail({ card }: { card: FixtureCard }) {
 
         <section className="panel detail-section" aria-labelledby="sources-title">
           <div className="panel-heading"><div><p className="section-kicker">Contributors</p><h2 id="sources-title">Sources</h2></div><span className="count-badge">{card.sources?.length ?? 0}</span></div>
+          <div className="source-summary-strip">
+            <span className="source-summary-chip indep"><i />{independentKols} independent</span>
+            <span className="source-summary-chip echo"><i />{card.convergence?.echo_dropped ?? 0} echo</span>
+          </div>
           <div className="source-list">
             {(card.sources ?? []).map((source) => {
               const isEcho = Boolean(source.echo_of) || source.indep < 1;

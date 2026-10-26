@@ -147,7 +147,7 @@ export function Scorecard({ data }: { data?: ScorecardData }) {
   return (
     <div className="app-shell">
       <header className="topbar">
-        <a className="brand" href="/" aria-label="Echo Ledger radar"><span className="brand-mark"><ScorecardIcon /></span><span>ECHO<span>LEDGER</span></span></a>
+        <a className="brand" href="/" aria-label="Echo Ledger radar"><span className="brand-mark"><img src="/brand/logo.png" alt="" /></span><span>ECHO<span>LEDGER</span></span></a>
         <nav className="desktop-nav" aria-label="Primary navigation"><a href="/"><RadarIcon />Radar</a><a className="active" href="/scorecard"><ScorecardIcon />Scorecard</a></nav>
         <div className="network-status"><span className="live-dot" /><span>Sepolia</span><b>Practice</b></div>
       </header>
