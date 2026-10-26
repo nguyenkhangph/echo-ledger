@@ -50,3 +50,9 @@ The extractor requests JSON mode first and falls back to JSON parsing when the p
 Run `bun run converge` for a rolling 24-hour window ending now, or `bun run converge --date YYYY-MM-DD --window 24` for a UTC date-aligned window. Extracted signals are joined to their source posts by `post_id`, grouped by normalized token, and written to `../fixtures/candidates/<date>.jsonl` whether they pass or fail.
 
 Echoes remain in each candidate for transparency but never contribute to its score. Convergence requires at least two independent signals and a score of at least `0.6`. Sentiment count determines the dominant direction; equal counts are broken by the greater total conviction, then deterministically by `bullish`, `bearish`, `neutral`. Passed candidates request a CoinGecko snapshot with rate limiting and retry. Missing mappings or fetch failures leave `evidence` as `null` without dropping the candidate.
+
+## Bull/Bear/Judge debate
+
+Run `bun run debate --date YYYY-MM-DD`, or omit `--date` to use the latest candidate fixture. Only passed convergence candidates are debated. Bull and Bear run in parallel, then Judge receives both arguments plus the raw candidate and A2 timeframe context. Each stage is strictly validated and receives one retry for invalid output. A failed candidate is logged and skipped without stopping the batch. Drafts are written to `../fixtures/drafts/<date>.jsonl` and validated against the shared `ReasoningCard` schema.
+
+The debate and risk status assessment are advisory, off-chain, and PRACTICE-only. They never authorize a position. The draft records configured limits for transparency, but CRE must independently fetch finalized evidence, read current on-chain state, and enforce the authoritative deterministic risk gate. LLM output is never trusted inside CRE.

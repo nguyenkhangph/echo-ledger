@@ -32,6 +32,16 @@ export interface SignalExtractionClient {
   extract(post: IngestedPost): Promise<ExtractedSignalType>;
 }
 
+export interface ChatMessage {
+  role: "system" | "user";
+  content: string;
+}
+
+export interface StructuredCompletionClient {
+  readonly model: string;
+  completeJson(messages: readonly ChatMessage[]): Promise<string>;
+}
+
 class NonRetryableLlmError extends Error {}
 class UnsupportedResponseFormatError extends Error {}
 
@@ -47,15 +57,19 @@ function completionUrl(baseUrl: string): string {
 }
 
 export function parseExtractedSignal(content: string): ExtractedSignalType {
-  const trimmed = content.trim();
-  const fenced = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
-  return ExtractedSignal.parse(JSON.parse(fenced?.[1] ?? trimmed));
+  return ExtractedSignal.parse(parseJsonContent(content));
 }
 
-export class OpenAiCompatibleLlmClient implements SignalExtractionClient {
+export function parseJsonContent(content: string): unknown {
+  const trimmed = content.trim();
+  const fenced = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
+  return JSON.parse(fenced?.[1] ?? trimmed);
+}
+
+export class OpenAiCompatibleLlmClient implements SignalExtractionClient, StructuredCompletionClient {
   private readonly url: string;
   private readonly apiKey: string;
-  private readonly model: string;
+  readonly model: string;
   private readonly fetcher: Fetcher;
   private readonly limiter: RateLimiter;
   private readonly attempts: number;
@@ -77,15 +91,18 @@ export class OpenAiCompatibleLlmClient implements SignalExtractionClient {
   async extract(post: IngestedPost): Promise<ExtractedSignalType> {
     let parseError: unknown;
     for (let parseAttempt = 1; parseAttempt <= 2; parseAttempt += 1) {
-      const messages = [
+      const messages: ChatMessage[] = [
         { role: "system", content: EXTRACTION_SYSTEM_PROMPT },
         { role: "user", content: extractionUserPrompt(post) },
-        ...(parseAttempt === 2
-          ? [{ role: "system", content: "Your previous response was invalid. Return only a complete JSON object matching every required field and type." }]
-          : []),
       ];
+      if (parseAttempt === 2) {
+        messages.push({
+          role: "system",
+          content: "Your previous response was invalid. Return only a complete JSON object matching every required field and type.",
+        });
+      }
       try {
-        return parseExtractedSignal(await this.complete(messages));
+        return parseExtractedSignal(await this.completeJson(messages));
       } catch (error) {
         if (error instanceof NonRetryableLlmError) throw error;
         parseError = error;
@@ -94,7 +111,7 @@ export class OpenAiCompatibleLlmClient implements SignalExtractionClient {
     throw new Error(`LLM returned an invalid signal for post ${post.id} after one retry`, { cause: parseError });
   }
 
-  private async complete(messages: Array<{ role: string; content: string }>): Promise<string> {
+  async completeJson(messages: readonly ChatMessage[]): Promise<string> {
     try {
       return await this.request(messages, this.supportsJsonMode);
     } catch (error) {
@@ -104,7 +121,7 @@ export class OpenAiCompatibleLlmClient implements SignalExtractionClient {
     }
   }
 
-  private async request(messages: Array<{ role: string; content: string }>, jsonMode: boolean): Promise<string> {
+  private async request(messages: readonly ChatMessage[], jsonMode: boolean): Promise<string> {
     let lastError: unknown;
     for (let attempt = 1; attempt <= this.attempts; attempt += 1) {
       try {
