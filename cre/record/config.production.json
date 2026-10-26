@@ -1,5 +1,5 @@
 {
   "chainSelectorName": "ethereum-testnet-sepolia",
   "ledgerAddress": "0x64EB7352B29B311826c8bbB361c2354675349e05",
-  "gasLimit": "1000000"
+  "gasLimit": "5000000"
 }

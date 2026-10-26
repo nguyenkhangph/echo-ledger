@@ -10,6 +10,7 @@ import {
   type Runtime,
   TxStatus,
 } from '@chainlink/cre-sdk'
+import { EVM_PB } from '@chainlink/cre-sdk/pb'
 import {
   decodeEventLog,
   decodeFunctionResult,
@@ -35,6 +36,26 @@ export const configSchema = z.object({
 
 type Config = z.infer<typeof configSchema>
 type EVMClient = InstanceType<typeof cre.capabilities.EVMClient>
+
+type WriteResult = {
+  txStatus: TxStatus
+  receiverContractExecutionStatus?: EVM_PB.ReceiverContractExecutionStatus
+  errorMessage?: string
+}
+
+export const assertReportDelivered = (label: string, result: WriteResult): void => {
+  if (result.txStatus !== TxStatus.SUCCESS) {
+    throw new Error(`${label} transaction failed: ${result.errorMessage || result.txStatus}`)
+  }
+  if (
+    result.receiverContractExecutionStatus !== undefined &&
+    result.receiverContractExecutionStatus !== EVM_PB.ReceiverContractExecutionStatus.SUCCESS
+  ) {
+    throw new Error(
+      `${label} receiver execution failed: ${EVM_PB.ReceiverContractExecutionStatus[result.receiverContractExecutionStatus] ?? result.receiverContractExecutionStatus}`,
+    )
+  }
+}
 
 const ledgerAbi = parseAbi([
   'event PositionSettled(bytes32 indexed id, int256 pnlBps)',
@@ -135,9 +156,7 @@ const writeTrust = (
       gasConfig: { gasLimit: runtime.config.gasLimit },
     })
     .result()
-  if (result.txStatus !== TxStatus.SUCCESS) {
-    throw new Error(`TRUST_UPDATE failed for ${positionId}: ${result.errorMessage || result.txStatus}`)
-  }
+  assertReportDelivered(`TRUST_UPDATE report for ${positionId}`, result)
   runtime.log(
     `TRUST_UPDATE positionId=${positionId} kols=${kolIds.length} scores=${updates.map((update) => update.score.toString()).join(',')} tx=${bytesToHex(result.txHash || new Uint8Array(32))}`,
   )

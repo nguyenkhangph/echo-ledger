@@ -1,5 +1,7 @@
 import { describe, expect, test } from 'bun:test'
-import { calculatePnlBps, medianPriceE8, settlementReason } from './workflow'
+import { TxStatus } from '@chainlink/cre-sdk'
+import { EVM_PB } from '@chainlink/cre-sdk/pb'
+import { assertReportDelivered, calculatePnlBps, medianPriceE8, settlementReason } from './workflow'
 
 describe('SETTLE calculations', () => {
   test('uses the median consensus price and rejects >1% disagreement', () => {
@@ -20,5 +22,22 @@ describe('SETTLE calculations', () => {
     expect(settlementReason(1_100n, 1_000n, 24, 0.08, -800n)).toBe('STOP_LOSS')
     expect(settlementReason(87_400n, 1_000n, 24, 0.08, 100n)).toBe('HORIZON')
     expect(settlementReason(2_000n, 1_000n, 24, 0.08, 100n)).toBeNull()
+  })
+})
+
+describe('report delivery status', () => {
+  test('rejects a receiver failure even when the outer transaction succeeded', () => {
+    expect(() => assertReportDelivered('SETTLE report', {
+      txStatus: TxStatus.SUCCESS,
+      receiverContractExecutionStatus: EVM_PB.ReceiverContractExecutionStatus.REVERTED,
+    })).toThrow('SETTLE report receiver execution failed: REVERTED')
+  })
+
+  test('accepts successful and dry-run write results', () => {
+    expect(() => assertReportDelivered('SETTLE report', {
+      txStatus: TxStatus.SUCCESS,
+      receiverContractExecutionStatus: EVM_PB.ReceiverContractExecutionStatus.SUCCESS,
+    })).not.toThrow()
+    expect(() => assertReportDelivered('SETTLE report', { txStatus: TxStatus.SUCCESS })).not.toThrow()
   })
 })

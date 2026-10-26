@@ -23,6 +23,7 @@ contract EchoLedgerTest is Test {
     event PositionOpened(bytes32 indexed id, string token, bytes32 indexed cardHash);
     event PositionSettled(bytes32 indexed id, int256 pnlBps);
     event TrustUpdated(bytes32 indexed kolId, uint256 score);
+    event GasMeasured(string reportType, uint256 gasUsed);
 
     function setUp() public {
         ledger = new EchoLedger(FORWARDER);
@@ -193,6 +194,58 @@ contract EchoLedgerTest is Test {
         assertFalse(ledger.supportsInterface(0xffffffff));
     }
 
+    function testGas_OpenReportWithTwentySources() public {
+        (bytes32[] memory kolIds, bool[] memory echoFlags) = _twentySources();
+        bytes memory report = _openPayloadWithSources(POSITION_ID, kolIds, echoFlags);
+
+        uint256 gasBefore = gasleft();
+        _send(report);
+        uint256 gasUsed = gasBefore - gasleft();
+        emit GasMeasured("OPEN_20_SOURCES", gasUsed);
+
+        (bytes32[] memory storedKolIds,) = ledger.getPositionSources(POSITION_ID);
+        assertEq(storedKolIds.length, 20);
+    }
+
+    function testGas_SettleReportWithOpenArrayCompaction() public {
+        bytes32 secondPositionId = keccak256("position-2");
+        _send(_openPayload(POSITION_ID, EchoLedger.Attestation.APPROVE));
+        _send(_openPayload(secondPositionId, EchoLedger.Attestation.APPROVE));
+        EchoLedger.SettleReport memory settlement = EchoLedger.SettleReport({
+            positionId: POSITION_ID, exitPriceE8: 3710e8, pnlBps: 600, settledAt: 1_798_000_000
+        });
+
+        uint256 gasBefore = gasleft();
+        _send(abi.encode(EchoLedger.ReportType.SETTLE, settlement));
+        uint256 gasUsed = gasBefore - gasleft();
+        emit GasMeasured("SETTLE_WITH_COMPACTION", gasUsed);
+
+        assertTrue(ledger.getPosition(POSITION_ID).settled);
+        assertEq(ledger.openPositionIds()[0], secondPositionId);
+    }
+
+    function testGas_TrustUpdateWithTwentySources() public {
+        (bytes32[] memory kolIds, bool[] memory echoFlags) = _twentySources();
+        _send(_openPayloadWithSources(POSITION_ID, kolIds, echoFlags));
+        _settle(POSITION_ID, 600);
+        uint256[] memory scores = new uint256[](20);
+        uint256[] memory trades = new uint256[](20);
+        for (uint256 i = 0; i < 20; ++i) {
+            scores[i] = 5_000 + i;
+            trades[i] = 1;
+        }
+        EchoLedger.TrustUpdateReport memory update = EchoLedger.TrustUpdateReport({
+            positionId: POSITION_ID, kolIds: kolIds, scores: scores, trades: trades
+        });
+
+        uint256 gasBefore = gasleft();
+        _send(abi.encode(EchoLedger.ReportType.TRUST_UPDATE, update));
+        uint256 gasUsed = gasBefore - gasleft();
+        emit GasMeasured("TRUST_UPDATE_20_SOURCES", gasUsed);
+
+        assertEq(ledger.kolTrust(kolIds[19]).score, 5_019);
+    }
+
     function _openPayload(bytes32 positionId, EchoLedger.Attestation attestation) private pure returns (bytes memory) {
         bytes32[] memory kolIds = new bytes32[](2);
         kolIds[0] = KOL_ID;
@@ -233,6 +286,15 @@ contract EchoLedgerTest is Test {
             echoFlags: echoFlags
         });
         return abi.encode(EchoLedger.ReportType.OPEN, report);
+    }
+
+    function _twentySources() private pure returns (bytes32[] memory kolIds, bool[] memory echoFlags) {
+        kolIds = new bytes32[](20);
+        echoFlags = new bool[](20);
+        for (uint256 i = 0; i < 20; ++i) {
+            kolIds[i] = keccak256(abi.encodePacked("kol-", i));
+            echoFlags[i] = i % 2 == 1;
+        }
     }
 
     function _send(bytes memory report) private {

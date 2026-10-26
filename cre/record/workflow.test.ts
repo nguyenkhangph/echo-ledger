@@ -1,5 +1,7 @@
 import { describe, expect, test } from 'bun:test'
-import { positionSources, riskGate, type PriceSnapshot } from './workflow'
+import { TxStatus } from '@chainlink/cre-sdk'
+import { EVM_PB } from '@chainlink/cre-sdk/pb'
+import { assertReportDelivered, positionSources, riskGate, type PriceSnapshot } from './workflow'
 import payload from './payload.example.json'
 
 const approveLongCard = payload.card
@@ -59,5 +61,22 @@ describe('positionSources', () => {
     const sources = positionSources(duplicate)
     expect(sources.kolIds).toHaveLength(2)
     expect(sources.echoFlags).toEqual([true, false])
+  })
+})
+
+describe('report delivery status', () => {
+  test('rejects a receiver failure even when the outer transaction succeeded', () => {
+    expect(() => assertReportDelivered('OPEN report', {
+      txStatus: TxStatus.SUCCESS,
+      receiverContractExecutionStatus: EVM_PB.ReceiverContractExecutionStatus.REVERTED,
+    })).toThrow('OPEN report receiver execution failed: REVERTED')
+  })
+
+  test('accepts successful and dry-run write results', () => {
+    expect(() => assertReportDelivered('OPEN report', {
+      txStatus: TxStatus.SUCCESS,
+      receiverContractExecutionStatus: EVM_PB.ReceiverContractExecutionStatus.SUCCESS,
+    })).not.toThrow()
+    expect(() => assertReportDelivered('OPEN report', { txStatus: TxStatus.SUCCESS })).not.toThrow()
   })
 })

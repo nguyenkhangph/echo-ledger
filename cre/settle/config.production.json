@@ -5,5 +5,5 @@
   "deploymentBlock": "11974596",
   "horizonHours": 24,
   "stopLossPct": 0.08,
-  "gasLimit": "1000000"
+  "gasLimit": "750000"
 }

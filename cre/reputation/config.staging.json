@@ -3,5 +3,5 @@
   "ledgerAddress": "0x88fd1895d9b4BD28Cf641281b9AA1eF787b8DAd0",
   "initialScore": 5000,
   "delta": 250,
-  "gasLimit": "1000000"
+  "gasLimit": "9500000"
 }

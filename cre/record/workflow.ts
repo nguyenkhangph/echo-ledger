@@ -12,6 +12,7 @@ import {
   type Runtime,
   TxStatus,
 } from '@chainlink/cre-sdk'
+import { EVM_PB } from '@chainlink/cre-sdk/pb'
 import {
   decodeFunctionResult,
   encodeAbiParameters,
@@ -132,6 +133,26 @@ export const configSchema = z.object({
 
 type Config = z.infer<typeof configSchema>
 export type Card = z.infer<typeof ReasoningCard>
+
+type WriteResult = {
+  txStatus: TxStatus
+  receiverContractExecutionStatus?: EVM_PB.ReceiverContractExecutionStatus
+  errorMessage?: string
+}
+
+export const assertReportDelivered = (label: string, result: WriteResult): void => {
+  if (result.txStatus !== TxStatus.SUCCESS) {
+    throw new Error(`${label} transaction failed: ${result.errorMessage || result.txStatus}`)
+  }
+  if (
+    result.receiverContractExecutionStatus !== undefined &&
+    result.receiverContractExecutionStatus !== EVM_PB.ReceiverContractExecutionStatus.SUCCESS
+  ) {
+    throw new Error(
+      `${label} receiver execution failed: ${EVM_PB.ReceiverContractExecutionStatus[result.receiverContractExecutionStatus] ?? result.receiverContractExecutionStatus}`,
+    )
+  }
+}
 
 const ledgerAbi = parseAbi([
   'function openPositionIds() view returns (bytes32[])',
@@ -316,9 +337,7 @@ const writeOpenReport = (
       gasConfig: { gasLimit: runtime.config.gasLimit },
     })
     .result()
-  if (result.txStatus !== TxStatus.SUCCESS) {
-    throw new Error(`OPEN report failed: ${result.errorMessage || result.txStatus}`)
-  }
+  assertReportDelivered('OPEN report', result)
   const decision = gate.attestation === 0 ? 'APPROVE' : gate.attestation === 1 ? 'CONSTRAIN' : 'REJECT'
   runtime.log(
     `OPEN ${decision} reasonCode=${gate.reasonCode.toString()} reason=${gate.reason} priceE8=${entryPriceE8.toString()} tx=${bytesToHex(result.txHash || new Uint8Array(32))}`,

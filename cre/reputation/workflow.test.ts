@@ -1,5 +1,7 @@
 import { describe, expect, test } from 'bun:test'
-import { nextTrust } from './workflow'
+import { TxStatus } from '@chainlink/cre-sdk'
+import { EVM_PB } from '@chainlink/cre-sdk/pb'
+import { assertReportDelivered, nextTrust } from './workflow'
 
 describe('nextTrust', () => {
   test('rewards winning independent sources', () => {
@@ -18,5 +20,22 @@ describe('nextTrust', () => {
   test('clamps scores to 0..10000', () => {
     expect(nextTrust(9_900n, 1n, 100n, false, 250n).score).toBe(10_000n)
     expect(nextTrust(100n, 1n, -100n, true, 250n).score).toBe(0n)
+  })
+})
+
+describe('report delivery status', () => {
+  test('rejects a receiver failure even when the outer transaction succeeded', () => {
+    expect(() => assertReportDelivered('TRUST_UPDATE report', {
+      txStatus: TxStatus.SUCCESS,
+      receiverContractExecutionStatus: EVM_PB.ReceiverContractExecutionStatus.REVERTED,
+    })).toThrow('TRUST_UPDATE report receiver execution failed: REVERTED')
+  })
+
+  test('accepts successful and dry-run write results', () => {
+    expect(() => assertReportDelivered('TRUST_UPDATE report', {
+      txStatus: TxStatus.SUCCESS,
+      receiverContractExecutionStatus: EVM_PB.ReceiverContractExecutionStatus.SUCCESS,
+    })).not.toThrow()
+    expect(() => assertReportDelivered('TRUST_UPDATE report', { txStatus: TxStatus.SUCCESS })).not.toThrow()
   })
 })

@@ -1,1 +1,37 @@
-[]
+[
+  {
+    "id": "coin-bureau-insider-test-seed",
+    "handle": "cbinsider",
+    "platform": "telegram",
+    "url": "https://t.me/cbinsider",
+    "trust": 0.5
+  },
+  {
+    "id": "crypto-scanner-100eyes-test-seed",
+    "handle": "CryptoScanner100eyes",
+    "platform": "telegram",
+    "url": "https://t.me/CryptoScanner100eyes",
+    "trust": 0.5
+  },
+  {
+    "id": "glassnode-test-seed",
+    "handle": "glassnode",
+    "platform": "telegram",
+    "url": "https://t.me/glassnode",
+    "trust": 0.5
+  },
+  {
+    "id": "bitcoin-industry-test-seed",
+    "handle": "bitcoin_industry",
+    "platform": "telegram",
+    "url": "https://t.me/bitcoin_industry",
+    "trust": 0.5
+  },
+  {
+    "id": "altcoin-gordon-test-seed",
+    "handle": "@AltcoinGordon",
+    "platform": "x",
+    "url": "https://x.com/AltcoinGordon",
+    "trust": 0.5
+  }
+]
