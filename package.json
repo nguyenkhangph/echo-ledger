@@ -1,12 +1,11 @@
 {
   "name": "echo-ledger",
   "private": true,
-  "workspaces": [
-    "shared",
-    "agent"
-  ],
+  "workspaces": ["shared", "agent", "dashboard"],
   "scripts": {
     "test": "bun test",
-    "typecheck": "bun run --filter '*' typecheck"
+    "typecheck": "bun run --filter '*' typecheck",
+    "dashboard:dev": "bun run --cwd dashboard dev",
+    "dashboard:build": "bun run --cwd dashboard build"
   }
 }
