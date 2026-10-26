@@ -33,5 +33,47 @@
     "platform": "x",
     "url": "https://x.com/AltcoinGordon",
     "trust": 0.5
+  },
+  {
+    "id": "ali-martinez",
+    "handle": "@ali_charts",
+    "platform": "x",
+    "url": "https://x.com/ali_charts",
+    "trust": 0.5
+  },
+  {
+    "id": "rekt-capital",
+    "handle": "@rektcapital",
+    "platform": "x",
+    "url": "https://x.com/rektcapital",
+    "trust": 0.5
+  },
+  {
+    "id": "crypto-mich-nl",
+    "handle": "@CryptoMichNL",
+    "platform": "x",
+    "url": "https://x.com/CryptoMichNL",
+    "trust": 0.5
+  },
+  {
+    "id": "benjamin-cowen",
+    "handle": "@intocryptoverse",
+    "platform": "x",
+    "url": "https://x.com/intocryptoverse",
+    "trust": 0.5
+  },
+  {
+    "id": "lookonchain",
+    "handle": "@LookOnChain",
+    "platform": "x",
+    "url": "https://x.com/LookOnChain",
+    "trust": 0.5
+  },
+  {
+    "id": "aixbt-agent",
+    "handle": "@aixbt_agent",
+    "platform": "x",
+    "url": "https://x.com/aixbt_agent",
+    "trust": 0.5
   }
 ]

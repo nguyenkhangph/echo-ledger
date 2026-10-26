@@ -1,5 +1,7 @@
 # Agent ingestion
 
+> **Live-run X coverage is manual:** The six real X candidates configured in `kols.json` (`@ali_charts`, `@rektcapital`, `@CryptoMichNL`, `@intocryptoverse`, `@LookOnChain`, and `@aixbt_agent`) have no automated network client. During the live-run window, someone must copy notable posts into `manual_posts.json`; otherwise these accounts contribute no posts to the automated 24-hour pipeline. Telegram sources are the only fully automated ingestion path.
+
 Configure at most 20 sources in `kols.json`:
 
 ```json
