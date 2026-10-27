@@ -87,4 +87,49 @@ describe("submission pipeline", () => {
       card_id: approveLongCard.card_id,
     });
   });
+
+  test("allows one decision per token until its horizon passes, even when the source set grows", async () => {
+    const grown = { ...approveLongCard, sources: [...approveLongCard.sources, { ...approveLongCard.sources[0]!, url: "https://x.com/late/status/999", kol: "late-voice" }] };
+    const fixture = await setup([approveLongCard, grown]);
+    const sent: string[] = [];
+    const client: CardSubmissionClient = { submit: async (payload) => { sent.push(payload.card.card_id); return "sent"; } };
+    const run = (at: string) => runSubmissionPipeline({
+      draftsDirectory: fixture.draftsDirectory,
+      submittedDirectory: fixture.submittedDirectory,
+      date: "2026-10-26",
+      client,
+      replayGuard: fixture.guard,
+      now: () => new Date(at),
+      logger: { log: () => undefined, error: () => undefined },
+    });
+
+    const first = await run("2026-10-26T12:00:00.000Z");
+    expect(first.outcomes.map((outcome) => outcome.status)).toEqual(["sent", "skipped_duplicate"]);
+    expect(first.outcomes[1]?.reason).toContain("one decision per token");
+    expect(sent).toHaveLength(1);
+
+    const afterHorizon = new Date(Date.parse("2026-10-26T12:00:00.000Z") + approveLongCard.risk_rules.horizon_h * 3_600_000 + 60_000).toISOString();
+    const later = await run(afterHorizon);
+    expect(later.outcomes.map((outcome) => outcome.status)).toEqual(["skipped_duplicate", "sent"]);
+    expect(sent).toHaveLength(2);
+  });
+
+  test("reads the token of legacy ledger entries from their card_id", async () => {
+    const fixture = await setup([approveLongCard]);
+    await Bun.write(join(fixture.root, "submitted-ledger.json"), JSON.stringify({
+      "0xlegacy": { card_id: `card-${approveLongCard.token.toLowerCase()}-approve-123`, cardHash: `0x${"1".repeat(64)}`, submitted_at: "2026-10-26T11:00:00.000Z" },
+    }));
+    let calls = 0;
+    const result = await runSubmissionPipeline({
+      draftsDirectory: fixture.draftsDirectory,
+      submittedDirectory: fixture.submittedDirectory,
+      date: "2026-10-26",
+      client: { submit: async () => { calls += 1; return "sent"; } },
+      replayGuard: fixture.guard,
+      now: () => new Date("2026-10-26T12:00:00.000Z"),
+      logger: { log: () => undefined, error: () => undefined },
+    });
+    expect(calls).toBe(0);
+    expect(result.outcomes[0]?.status).toBe("skipped_duplicate");
+  });
 });

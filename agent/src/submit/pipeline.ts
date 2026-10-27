@@ -95,6 +95,21 @@ export async function runSubmissionPipeline({
         continue;
       }
 
+      const active = await replayGuard.findActiveTokenDecision(draft.token, now(), draft.risk_rules.horizon_h);
+      if (active) {
+        const reason = `${draft.token.toUpperCase()} already decided as ${active.card_id} at ${active.submitted_at}; one decision per token until its ${active.horizon_h ?? draft.risk_rules.horizon_h} h horizon passes`;
+        logger.log(`Skipping ${draft.token}: ${reason}`);
+        outcomes.push(SubmissionOutcome.parse({
+          input_index: inputIndex,
+          token: draft.token,
+          card_id: active.card_id,
+          cardHash: active.cardHash,
+          status: "skipped_duplicate",
+          reason,
+        }));
+        continue;
+      }
+
       const payload = hashFinalizedCard(finalizeCard(draft, now()));
       const status = await client.submit(payload, date);
       if (status === "sent") await replayGuard.record(payload.card, payload.cardHash, now());
