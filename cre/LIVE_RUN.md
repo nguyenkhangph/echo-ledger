@@ -68,7 +68,7 @@ Also confirm, without printing it, that `D:\Projects\echo-ledger\cre\.env` conta
 In `D:\Projects\echo-ledger\agent\.env`, set:
 
 ```dotenv
-CRE_RECORD_URL=http://localhost:2000
+CRE_RECORD_URL=http://localhost:2000/trigger
 ```
 
 Keep the existing LLM settings required by A2/A4. Do not print the file.
@@ -102,7 +102,7 @@ Set-Location 'D:\Projects\echo-ledger\cre'
 cre workflow simulate record --listen --target staging-settings --broadcast
 ```
 
-Submit exactly one approved, known fixture through `http://localhost:2000`. Before beginning the live clock, require all of the following:
+Submit exactly one approved, known fixture through `http://localhost:2000/trigger`. Before beginning the live clock, require all of the following:
 
 1. CRE logs a nonzero transaction hash.
 2. The transaction succeeds on Sepolia.

@@ -50,6 +50,40 @@ describe("CRE record client", () => {
     const payload = hashFinalizedCard(approveLongCard);
 
     expect(await client.submit(payload, "2026-10-26")).toBe("sent");
-    expect(JSON.parse(requestBody)).toEqual(payload);
+    expect(JSON.parse(requestBody)).toEqual({ input: payload });
+  });
+
+  test("completes a bare listener host to the simulator's /trigger path", async () => {
+    let requestUrl = "";
+    const client = new CreRecordClient({
+      url: "http://localhost:2000",
+      dryRunDirectory: "unused",
+      fetcher: async (input) => {
+        requestUrl = String(input);
+        return new Response("ok", { status: 200 });
+      },
+      limiter: new RateLimiter(0),
+      retryDelayMs: 0,
+    });
+
+    expect(await client.submit(hashFinalizedCard(approveLongCard), "2026-10-26")).toBe("sent");
+    expect(requestUrl).toBe("http://localhost:2000/trigger");
+  });
+
+  test("does not retry after a timeout, since the listener may already be broadcasting", async () => {
+    let calls = 0;
+    const client = new CreRecordClient({
+      url: "http://localhost:2000/trigger",
+      dryRunDirectory: "unused",
+      fetcher: async () => {
+        calls += 1;
+        throw new DOMException("The operation timed out.", "TimeoutError");
+      },
+      limiter: new RateLimiter(0),
+      retryDelayMs: 0,
+    });
+
+    await expect(client.submit(hashFinalizedCard(approveLongCard), "2026-10-26")).rejects.toThrow("not retried");
+    expect(calls).toBe(1);
   });
 });
