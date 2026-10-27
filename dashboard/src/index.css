@@ -214,6 +214,10 @@ svg { width: 1.25rem; fill: none; stroke: currentColor; stroke-linecap: round; s
 .launch-row:hover .launch-row__body strong { color: var(--ec-mint); }
 .launch-row__body span { display: block; margin-top: 2px; overflow: hidden; color: var(--ec-muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .launch-row__arrow { color: var(--ec-muted); }
+.row-tag { margin-left: 8px; padding: 1px 6px; border: 1px solid var(--ec-border); color: var(--ec-muted); font: 500 9px var(--mono-font); font-style: normal; letter-spacing: 0.1em; text-transform: uppercase; vertical-align: middle; }
+.row-tag--chain { color: var(--ec-mint); border-color: rgba(255, 83, 72, 0.45); }
+.hero-panel__note { margin: 0; padding: 12px 20px; border-bottom: 1px solid var(--ec-border); color: var(--ec-muted); font-size: 11px; line-height: 1.6; }
+.kol-identity a:hover strong { color: var(--ec-mint); }
 .hero-panel__foot { display: flex; align-items: center; justify-content: space-between; padding: 16px 20px; font-size: 12px; transition: background-color 0.2s ease; }
 .hero-panel__foot:hover { background: rgba(255, 255, 255, 0.03); }
 
@@ -365,6 +369,7 @@ h2 { margin: 0; font-size: 1.05rem; font-weight: 700; letter-spacing: -0.01em; }
 .feed-panel { grid-column: 1 / -1; }
 
 .watchlist-labels { display: grid; grid-template-columns: minmax(210px, 1.5fr) minmax(150px, 1fr) minmax(100px, 0.7fr); padding: 12px 22px; border-bottom: 1px solid var(--ec-border-soft); color: var(--ec-muted); font: 10px var(--mono-font); letter-spacing: 0.16em; text-transform: uppercase; }
+.watchlist-rows { max-height: 576px; overflow-y: auto; scrollbar-width: thin; }
 .kol-row { display: grid; grid-template-columns: 44px minmax(150px, 1.5fr) minmax(150px, 1fr) minmax(100px, 0.7fr); align-items: center; min-height: 72px; padding: 12px 22px; border-bottom: 1px solid var(--ec-border-soft); transition: background-color 0.2s ease; }
 .kol-row:hover { background: rgba(214, 43, 34, 0.05); }
 .kol-identity { display: grid; gap: 5px; min-width: 0; }

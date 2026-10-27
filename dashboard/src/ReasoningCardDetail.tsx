@@ -137,7 +137,7 @@ function OnChainMatch({ hash, fallbackTx }: { hash: string; fallbackTx?: string 
   return <p className="placeholder-state">No EchoLedger record carries this hash. This card has not been written on chain.</p>;
 }
 
-export function ReasoningCardDetail({ card }: { card: FixtureCard }) {
+export function ReasoningCardDetail({ card, fixture = false }: { card: FixtureCard; fixture?: boolean }) {
   const hash = cardHash(card);
   const score = card.convergence?.score ?? 0;
   const scorePercent = Math.min(100, Math.max(0, score * 100));
@@ -185,7 +185,7 @@ export function ReasoningCardDetail({ card }: { card: FixtureCard }) {
         <header className="card-hero">
           <div>
             <a className="back-link" href="/">← Radar</a>
-            <p className="eyebrow">Reasoning card · {card.window_h ?? "—"}h window</p>
+            <p className="eyebrow">{fixture ? "Fixture reasoning card" : "Reasoning card"} · {card.window_h ?? "—"}h window</p>
             <div className="card-title-row">
               <span className="token-icon">{card.token.slice(0, 2)}</span>
               <h1 className="display-font">{card.token}</h1>

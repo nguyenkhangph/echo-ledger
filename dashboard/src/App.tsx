@@ -1,80 +1,50 @@
 import { exampleCards } from "@echo/shared/fixtures";
 import type { ReasoningCard } from "@echo/shared/card";
+import { cardHash } from "@echo/shared/hash";
 import { CardNotFound, ReasoningCardDetail } from "./ReasoningCardDetail";
 import { Scorecard } from "./Scorecard";
 import { OnChainLedger } from "./components/OnChainLedger";
 import { EclipseOrb, Reveal, SectionHeading, SiteLayout } from "./components/SiteChrome";
+import { useLedger } from "./data/ledger";
+import {
+  candidates,
+  candidatesDate,
+  decodeEntities,
+  draftCards,
+  latestPosts,
+  pipelineStats,
+  relativeTime,
+  signalPosts,
+  snapshotTime,
+  watchlistRows,
+  WINDOW_HOURS,
+  type WatchlistRow,
+} from "./data/pipeline";
 
 const RADAR_THRESHOLD = 0.6;
-const snapshotTime = new Date(
-  Math.max(...exampleCards.map((card) => Date.parse(card.created_at))),
-);
 
-type CardSource = ReasoningCard["sources"][number];
-type Sentiment = CardSource["extract"]["sentiment"];
+/** Cards the agent drafted come first; repository fixture cards stay listed, tagged as fixtures. */
+const heroCards: Array<{ card: ReasoningCard; fixture: boolean }> = [
+  ...draftCards.map((card) => ({ card, fixture: false })),
+  ...exampleCards.map((card) => ({ card, fixture: true })),
+].slice(0, 4);
+const fixtureHashes = new Map(heroCards.map(({ card }) => [card.card_id, cardHash(card).toLowerCase()]));
 
-type FeedItem = CardSource & {
-  cardId: string;
-  token: string;
-  isEcho: boolean;
-};
+const sentimentClass = (sentiment: string) => (sentiment === "bullish" ? "bull" : sentiment === "bearish" ? "bear" : "neutral");
 
-type KolProfile = {
-  name: string;
-  initials: string;
-  token: string;
-  sentiment: Sentiment;
-  trust: number;
-};
-
-function initialsFor(name: string) {
-  return name
-    .split(/[-_\s]+/)
-    .map((part) => part[0])
-    .join("")
-    .slice(0, 2)
-    .toUpperCase();
-}
-
-const feed: FeedItem[] = exampleCards
-  .flatMap((card) =>
-    card.sources.map((source) => ({
-      ...source,
-      cardId: card.card_id,
-      token: card.token,
-      isEcho: Boolean(source.echo_of) || source.indep < 1,
-    })),
-  )
-  .sort((a, b) => Date.parse(b.posted_at) - Date.parse(a.posted_at));
-
-const watchlist: KolProfile[] = feed.map((source) => ({
-  name: source.kol,
-  initials: initialsFor(source.kol),
-  token: source.token,
-  sentiment: source.extract.sentiment,
-  // Temporary mock trust until agent reputation is available.
-  trust: Math.round((source.indep * 0.55 + source.extract.conviction * 0.45) * 100),
-}));
-
-const newestCards = [...exampleCards].sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at));
-const approvedCount = exampleCards.filter((card) => card.debate?.verdict === "APPROVE").length;
-const echoDropped = exampleCards.reduce((total, card) => total + (card.convergence?.echo_dropped ?? 0), 0);
-
-function formatRelativeTime(date: string) {
-  const diffMinutes = Math.max(
-    0,
-    Math.round((snapshotTime.getTime() - Date.parse(date)) / 60_000),
-  );
-
-  if (diffMinutes < 60) return `${diffMinutes}m ago`;
-  const hours = Math.floor(diffMinutes / 60);
-  const minutes = diffMinutes % 60;
-  return minutes ? `${hours}h ${minutes}m ago` : `${hours}h ago`;
+function initialsFor(handle: string) {
+  const clean = handle.replace(/^@/, "");
+  const parts = clean.split(/[-_\s]+/).filter(Boolean);
+  return (parts.length > 1 ? parts.map((part) => part[0]).join("") : clean.replace(/[^A-Za-z0-9]/g, "")).slice(0, 2).toUpperCase();
 }
 
 function verdictLabel(card: ReasoningCard) {
   const verdict = card.debate?.verdict ?? "HOLD";
   return verdict === "HOLD" ? "CONSTRAIN" : verdict;
+}
+
+function formatUtc(date: Date) {
+  return new Intl.DateTimeFormat("en", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", timeZone: "UTC" }).format(date) + " UTC";
 }
 
 function HeroStat({ label, value, live = false }: { label: string; value: string; live?: boolean }) {
@@ -90,29 +60,42 @@ function HeroStat({ label, value, live = false }: { label: string; value: string
 }
 
 function LatestCards() {
+  const ledger = useLedger();
+  const snapshot = ledger.status === "live" ? ledger.snapshot : ledger.status === "error" ? ledger.snapshot : undefined;
+  const onChain = new Set(snapshot?.positions.map((position) => position.cardHash.toLowerCase()) ?? []);
+
   return (
     <div className="hero-panel">
       <div className="hero-panel__head">
         <p className="mono-font"><span className="live-dot" aria-hidden="true" />Latest reasoning cards</p>
-        <span className="mono-font">Ethereum Sepolia</span>
+        <span className="mono-font">{draftCards.length ? `${draftCards.length} from the agent` : "Ethereum Sepolia"}</span>
       </div>
       <ul>
-        {newestCards.map((card, index) => (
-          <li key={card.card_id} className="pop-in" style={{ animationDelay: `${index * 70}ms` }}>
-            <a className={`launch-row${index === 0 ? " launch-row--latest" : ""}`} href={`/card/${encodeURIComponent(card.card_id)}`}>
-              <span className="mono-font launch-row__index">#{newestCards.length - index}</span>
-              <span className="token-icon">{card.token.slice(0, 2)}</span>
-              <span className="launch-row__body">
-                <strong>{card.token}</strong>
-                <span className="mono-font">
-                  {verdictLabel(card)} · score {card.convergence.score.toFixed(2)} · {card.convergence.independent_kols} independent
+        {heroCards.map(({ card, fixture }, index) => {
+          const recorded = onChain.has(fixtureHashes.get(card.card_id)!);
+          return (
+            <li key={card.card_id} className="pop-in" style={{ animationDelay: `${index * 70}ms` }}>
+              <a className={`launch-row${index === 0 ? " launch-row--latest" : ""}`} href={`/card/${encodeURIComponent(card.card_id)}`}>
+                <span className="token-icon">{card.token.slice(0, 2)}</span>
+                <span className="launch-row__body">
+                  <strong>
+                    {card.token}
+                    {fixture && <em className="row-tag">fixture</em>}
+                    {recorded && <em className="row-tag row-tag--chain">on-chain ✓</em>}
+                  </strong>
+                  <span className="mono-font">
+                    {verdictLabel(card)} · score {card.convergence.score.toFixed(2)} · {card.convergence.independent_kols} independent
+                  </span>
                 </span>
-              </span>
-              <span className="launch-row__arrow" aria-hidden="true">→</span>
-            </a>
-          </li>
-        ))}
+                <span className="launch-row__arrow" aria-hidden="true">→</span>
+              </a>
+            </li>
+          );
+        })}
       </ul>
+      {draftCards.length === 0 && (
+        <p className="hero-panel__note mono-font">No reasoning card has been drafted from live sources yet; a card appears here once a token passes convergence and the debate runs. Cards tagged “fixture” are repository examples used to verify the pipeline.</p>
+      )}
       <a href="#radar" className="hero-panel__foot mono-font">
         Open live radar <span aria-hidden="true">→</span>
       </a>
@@ -120,28 +103,30 @@ function LatestCards() {
   );
 }
 
-// One pass of the ticker has to be wider than any screen, or a gap shows
-// before the loop restarts, so short feeds are repeated to at least 12 items.
-const TICKER_MIN_ITEMS = 12;
-
 function SignalTicker() {
-  if (feed.length === 0) return null;
-  const pass = Array.from({ length: Math.ceil(TICKER_MIN_ITEMS / feed.length) }, () => feed).flat();
+  const items = signalPosts.length
+    ? signalPosts.map((post) => ({ key: post.id, url: post.url, handle: post.handle, token: post.signal.token!, label: post.signal.is_echo ? "echo" : post.signal.sentiment }))
+    : latestPosts.slice(0, 12).map((post) => ({ key: post.id, url: post.url, handle: post.handle, token: null, label: "post" }));
+  if (items.length === 0) return null;
+  // One pass must be wider than any screen, or a gap shows before the loop restarts.
+  const pass = Array.from({ length: Math.ceil(12 / items.length) }, () => items).flat();
   const loop = [...pass, ...pass];
   return (
     <div className="ticker" aria-label="Latest signals">
       <div className="ticker__track mono-font">
         {loop.map((item, index) => (
           <a
-            key={`${item.url}-${index}`}
-            href={`/card/${encodeURIComponent(item.cardId)}`}
-            aria-hidden={index >= feed.length ? true : undefined}
-            tabIndex={index >= feed.length ? -1 : undefined}
+            key={`${item.key}-${index}`}
+            href={item.url}
+            target="_blank"
+            rel="noreferrer"
+            aria-hidden={index >= items.length ? true : undefined}
+            tabIndex={index >= items.length ? -1 : undefined}
           >
             <span className="ticker__dot" aria-hidden="true" />
-            <strong>@{item.kol}</strong>
-            <span>${item.token}</span>
-            <span>{item.isEcho ? "echo" : item.extract.sentiment}</span>
+            <strong>{item.handle.startsWith("@") ? item.handle : `@${item.handle}`}</strong>
+            {item.token && <span>${item.token}</span>}
+            <span>{item.label}</span>
           </a>
         ))}
       </div>
@@ -178,8 +163,165 @@ function HowItWorks() {
   );
 }
 
+function WatchlistPanel() {
+  const ledger = useLedger();
+  const snapshot = ledger.status === "live" ? ledger.snapshot : ledger.status === "error" ? ledger.snapshot : undefined;
+  const trustFor = (row: WatchlistRow) => snapshot?.kols.find((kol) => kol.label === row.handle)?.score ?? row.trust * 10_000;
+
+  return (
+    <section aria-labelledby="watchlist-title">
+      <div className="panel-heading">
+        <div>
+          <p className="section-kicker">agent/kols.json</p>
+          <h2 id="watchlist-title">KOL Watchlist</h2>
+        </div>
+        <span className="count-badge">{watchlistRows.length}</span>
+      </div>
+      <div className="watchlist-labels" aria-hidden="true">
+        <span>Voice</span><span>Last signal</span><span>Trust</span>
+      </div>
+      <div className="watchlist-rows">
+        {watchlistRows.map((row) => {
+          const trust = trustFor(row) / 100;
+          const manual = row.platform === "x" && row.lastPostAt === null;
+          return (
+            <article className="kol-row" key={row.id}>
+              <div className="avatar">{initialsFor(row.handle)}</div>
+              <div className="kol-identity">
+                <a href={row.url} target="_blank" rel="noreferrer"><strong>{row.handle.startsWith("@") ? row.handle : `@${row.handle}`}</strong></a>
+                <span>
+                  <i className="platform-dot" /> {row.platform}
+                  {" · "}
+                  {manual ? "manual feed, no posts yet" : `${row.postsInWindow} posts / ${WINDOW_HOURS}h`}
+                </span>
+              </div>
+              <div className="last-signal">
+                {row.lastSignal ? (
+                  <>
+                    <span className={`sentiment ${sentimentClass(row.lastSignal.sentiment)}`}>{row.lastSignal.sentiment}</span>
+                    <b>{row.lastSignal.token}</b>
+                    {row.lastSignal.isEcho && <span className="echo-tag">echo</span>}
+                  </>
+                ) : (
+                  <span className="muted-state">no call yet</span>
+                )}
+              </div>
+              <div className="trust-cell">
+                <span>{trust.toFixed(1)}%</span>
+                <div className="trust-track" aria-label={`${trust.toFixed(1)}% trust`}>
+                  <i className="bar-shimmer" style={{ width: `${trust}%` }} />
+                </div>
+              </div>
+            </article>
+          );
+        })}
+      </div>
+      <p className="mock-note">Trust is the on-chain score once a source has a settled call; every source starts at 50%.</p>
+    </section>
+  );
+}
+
+function ConvergencePanel() {
+  return (
+    <section aria-labelledby="convergence-title">
+      <div className="panel-heading">
+        <div>
+          <p className="section-kicker">{candidatesDate ? `Agent cycle · ${candidatesDate}` : `Last ${WINDOW_HOURS} hours`}</p>
+          <h2 id="convergence-title">Convergence</h2>
+        </div>
+        <span className="legend"><i /> threshold {RADAR_THRESHOLD.toFixed(2)}</span>
+      </div>
+      {candidates.length === 0 ? (
+        <p className="ledger-empty mono-font">No token has a signal in the current window yet.</p>
+      ) : (
+        <div className="convergence-list">
+          {candidates.map((candidate) => {
+            const percent = Math.max(0, candidate.convergence.score * 100);
+            const above = candidate.convergence.passed;
+            const independent = candidate.convergence.independent_count;
+            const direction = candidate.sources.find((source) => !source.is_echo)?.sentiment ?? candidate.sources[0]?.sentiment ?? "neutral";
+            return (
+              <div className="token-signal" key={candidate.token}>
+                <div className="token-summary">
+                  <span className="token-icon">{candidate.token.slice(0, 2)}</span>
+                  <div>
+                    <strong>{candidate.token} <span className={`sentiment ${sentimentClass(direction)}`}>{direction}</span></strong>
+                    <small>
+                      {independent} independent {independent === 1 ? "voice" : "voices"}
+                      {candidate.convergence.echo_count ? ` · ${candidate.convergence.echo_count} echo` : ""}
+                      {!above && independent < 2 ? " · needs 2+" : ""}
+                    </small>
+                  </div>
+                  <b className={above ? "hot-score" : ""}>{candidate.convergence.score.toFixed(2)}</b>
+                </div>
+                <div className="convergence-track" aria-label={`${candidate.token} convergence ${percent.toFixed(0)}%`}>
+                  <span className="threshold-line" style={{ left: `${RADAR_THRESHOLD * 100}%` }} />
+                  <i className={`bar-shimmer${above ? " above" : ""}`} style={{ width: `${percent}%` }} />
+                </div>
+                <div className="track-scale"><span>0</span><span>{above ? "passed" : "signal strength"}</span><span>1.0</span></div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function FeedPanel() {
+  const showingSignals = signalPosts.length > 0;
+  const items = showingSignals ? signalPosts.slice(0, 12) : latestPosts.slice(0, 8);
+  return (
+    <section aria-labelledby="feed-title">
+      <div className="panel-heading">
+        <div>
+          <p className="section-kicker">{showingSignals ? `Actionable calls · last ${WINDOW_HOURS}h` : "Latest posts · no actionable call yet"}</p>
+          <h2 id="feed-title">Event Feed</h2>
+        </div>
+        <span className="streaming"><i className="live-dot" /> {pipelineStats.sponsoredInWindow ? `${pipelineStats.sponsoredInWindow} sponsored filtered` : "streaming"}</span>
+      </div>
+      {items.length === 0 ? (
+        <p className="ledger-empty mono-font">The agent has not ingested any posts yet. Run the agent loop and reload.</p>
+      ) : (
+        <div className="feed-list">
+          {items.map((post) => {
+            const signal = "signal" in post ? (post as (typeof signalPosts)[number]).signal : null;
+            const isEcho = Boolean(signal?.is_echo);
+            const text = decodeEntities(post.text);
+            return (
+              <a className={`feed-item${isEcho ? " echo" : ""}`} key={post.id} href={post.url} target="_blank" rel="noreferrer" aria-label={`Open original post by ${post.handle}`}>
+                <div className="feed-line" aria-hidden="true"><i /></div>
+                <div className="feed-content">
+                  <div className="feed-meta">
+                    <strong>{post.handle.startsWith("@") ? post.handle : `@${post.handle}`}</strong>
+                    <span className="platform">{post.platform}</span>
+                    <time dateTime={post.posted_at}>{relativeTime(post.posted_at)}</time>
+                  </div>
+                  <p>“{text.length > 240 ? `${text.slice(0, 240)}…` : text}”</p>
+                  <div className="feed-tags">
+                    {signal ? (
+                      <>
+                        <span className="token-tag">{signal.token}</span>
+                        <span className={`sentiment ${sentimentClass(signal.sentiment)}`}>{signal.sentiment}</span>
+                        <span className="token-tag">conviction {signal.conviction.toFixed(1)}</span>
+                        {isEcho && <span className="echo-tag">↳ Echo{signal.echo_of ? ` of ${signal.echo_of}` : " detected"}</span>}
+                      </>
+                    ) : (
+                      <span className="muted-state">no actionable call</span>
+                    )}
+                  </div>
+                </div>
+              </a>
+            );
+          })}
+        </div>
+      )}
+    </section>
+  );
+}
+
 function Radar() {
-  const latest = newestCards[0];
+  const latest = heroCards[0]?.card;
   return (
     <SiteLayout active="radar">
       <section className="hero">
@@ -205,10 +347,10 @@ function Radar() {
               <a className="ghost-button" href="/scorecard">View scorecard</a>
             </div>
             <div className="hero__stats fade-up" style={{ ["--d" as string]: "320ms" }}>
-              <HeroStat live label="Voices monitored" value={String(watchlist.length)} />
-              <HeroStat label="Reasoning cards" value={String(exampleCards.length)} />
-              <HeroStat label="Approved" value={String(approvedCount)} />
-              <HeroStat label="Echoes discounted" value={String(echoDropped)} />
+              <HeroStat live label="Sources watched" value={String(pipelineStats.sources)} />
+              <HeroStat label={`Posts read · ${WINDOW_HOURS}h`} value={String(pipelineStats.postsInWindow)} />
+              <HeroStat label="Actionable calls" value={String(pipelineStats.signalsInWindow)} />
+              <HeroStat label="Echoes caught" value={String(pipelineStats.echoesInWindow)} />
             </div>
           </div>
           <div className="fade-up hero__panel-wrap" style={{ ["--d" as string]: "200ms" }}>
@@ -222,118 +364,18 @@ function Radar() {
       <section className="page-section" id="radar" aria-labelledby="radar-title">
         <Reveal>
           <div className="section-heading-row">
-            <SectionHeading id="radar-title" eyebrow="Live radar" title="Independent voices, measured before the market moves" />
+            <SectionHeading id="radar-title" eyebrow="Live radar · agent output" title="Independent voices, measured before the market moves" />
             <div className="scan-status" aria-label="Live scan status">
               <span className="live-dot" aria-hidden="true" />
-              <span className="mono-font">Live scan · {watchlist.length} voices</span>
+              <span className="mono-font">{snapshotTime ? `Last post ${formatUtc(snapshotTime)}` : "Waiting for the first ingest"}</span>
             </div>
           </div>
         </Reveal>
 
         <div className="dashboard-grid">
-          <Reveal className="panel watchlist-panel">
-            <section aria-labelledby="watchlist-title">
-              <div className="panel-heading">
-                <div>
-                  <p className="section-kicker">Signal sources</p>
-                  <h2 id="watchlist-title">KOL Watchlist</h2>
-                </div>
-                <span className="count-badge">{watchlist.length}</span>
-              </div>
-
-              <div className="watchlist-labels" aria-hidden="true">
-                <span>Voice</span><span>Last signal</span><span>Trust</span>
-              </div>
-              <div className="watchlist-rows">
-                {watchlist.map((kol) => (
-                  <article className="kol-row" key={kol.name}>
-                    <div className="avatar">{kol.initials}</div>
-                    <div className="kol-identity">
-                      <strong>@{kol.name}</strong>
-                      <span><i className="platform-dot" /> monitored</span>
-                    </div>
-                    <div className="last-signal">
-                      <span className={`sentiment ${kol.sentiment}`}>{kol.sentiment}</span>
-                      <b>{kol.token}</b>
-                    </div>
-                    <div className="trust-cell">
-                      <span>{kol.trust}%</span>
-                      <div className="trust-track" aria-label={`${kol.trust}% trust`}>
-                        <i className="bar-shimmer" style={{ width: `${kol.trust}%` }} />
-                      </div>
-                    </div>
-                  </article>
-                ))}
-              </div>
-              <p className="mock-note">Trust is estimated from fixture independence and conviction.</p>
-            </section>
-          </Reveal>
-
-          <Reveal className="panel convergence-panel" delay={90}>
-            <section aria-labelledby="convergence-title">
-              <div className="panel-heading">
-                <div>
-                  <p className="section-kicker">Last 6 hours</p>
-                  <h2 id="convergence-title">Convergence</h2>
-                </div>
-                <span className="legend"><i /> threshold {RADAR_THRESHOLD.toFixed(2)}</span>
-              </div>
-
-              <div className="convergence-list">
-                {exampleCards.map((card) => {
-                  const percent = Math.max(0, card.convergence.score * 100);
-                  const aboveThreshold = card.convergence.score >= RADAR_THRESHOLD;
-                  return (
-                    <a className="token-signal" key={card.card_id} href={`/card/${encodeURIComponent(card.card_id)}`}>
-                      <div className="token-summary">
-                        <span className="token-icon">{card.token.slice(0, 2)}</span>
-                        <div><strong>{card.token}</strong><small>{card.convergence.independent_kols} independent {card.convergence.independent_kols === 1 ? "voice" : "voices"}</small></div>
-                        <b className={aboveThreshold ? "hot-score" : ""}>{card.convergence.score.toFixed(2)}</b>
-                      </div>
-                      <div className="convergence-track" aria-label={`${card.token} convergence ${percent}%`}>
-                        <span className="threshold-line" style={{ left: `${RADAR_THRESHOLD * 100}%` }} />
-                        <i className={`bar-shimmer${aboveThreshold ? " above" : ""}`} style={{ width: `${percent}%` }} />
-                      </div>
-                      <div className="track-scale"><span>0</span><span>signal strength</span><span>1.0</span></div>
-                    </a>
-                  );
-                })}
-              </div>
-            </section>
-          </Reveal>
-
-          <Reveal className="panel feed-panel" delay={120}>
-            <section aria-labelledby="feed-title">
-              <div className="panel-heading">
-                <div>
-                  <p className="section-kicker">Incoming</p>
-                  <h2 id="feed-title">Event Feed</h2>
-                </div>
-                <span className="streaming"><i className="live-dot" /> streaming</span>
-              </div>
-
-              <div className="feed-list">
-                {feed.map((item) => (
-                  <a className={`feed-item${item.isEcho ? " echo" : ""}`} key={item.url} href={`/card/${encodeURIComponent(item.cardId)}`} aria-label={`Open ${item.token} reasoning card`}>
-                    <div className="feed-line" aria-hidden="true"><i /></div>
-                    <div className="feed-content">
-                      <div className="feed-meta">
-                        <strong>@{item.kol}</strong>
-                        <span className="platform">{item.platform}</span>
-                        <time dateTime={item.posted_at}>{formatRelativeTime(item.posted_at)}</time>
-                      </div>
-                      <p>“{item.quote}”</p>
-                      <div className="feed-tags">
-                        <span className="token-tag">{item.token}</span>
-                        <span className={`sentiment ${item.extract.sentiment}`}>{item.extract.sentiment}</span>
-                        {item.isEcho && <span className="echo-tag">↳ Echo detected</span>}
-                      </div>
-                    </div>
-                  </a>
-                ))}
-              </div>
-            </section>
-          </Reveal>
+          <Reveal className="panel watchlist-panel"><WatchlistPanel /></Reveal>
+          <Reveal className="panel convergence-panel" delay={90}><ConvergencePanel /></Reveal>
+          <Reveal className="panel feed-panel" delay={120}><FeedPanel /></Reveal>
         </div>
       </section>
 
@@ -352,8 +394,8 @@ function App() {
   const cardRoute = typeof window === "undefined" ? null : window.location.pathname.match(/^\/card\/([^/]+)\/?$/);
   if (cardRoute) {
     const cardId = decodeURIComponent(cardRoute[1]);
-    const card = exampleCards.find((candidate) => candidate.card_id === cardId);
-    return card ? <ReasoningCardDetail card={card} /> : <CardNotFound cardId={cardId} />;
+    const card = [...draftCards, ...exampleCards].find((candidate) => candidate.card_id === cardId);
+    return card ? <ReasoningCardDetail card={card} fixture={exampleCards.some((example) => example.card_id === card.card_id)} /> : <CardNotFound cardId={cardId} />;
   }
 
   return <Radar />;
