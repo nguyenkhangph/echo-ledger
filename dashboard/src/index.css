@@ -557,6 +557,53 @@ code { color: var(--ec-text); font: 12px var(--mono-font); overflow-wrap: anywhe
 .leaderboard-note { margin: 0; padding: 16px 22px; border-top: 1px solid var(--ec-border); color: var(--ec-muted); font: 11px/1.6 var(--mono-font); }
 
 /* ------------------------------------------------------------------ */
+/* On-chain ledger (live Sepolia reads)                                */
+/* ------------------------------------------------------------------ */
+
+.ledger-grid { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(300px, 1fr); gap: 20px; align-items: start; }
+.ledger-empty { margin: 0; padding: 22px; color: var(--ec-muted); font-size: 12px; line-height: 1.7; }
+.ledger-empty.panel { display: block; }
+.ledger-empty--error { color: var(--ec-mint); }
+.ledger-row { display: grid; grid-template-columns: minmax(130px, 1.1fr) auto minmax(120px, 1fr) minmax(120px, 1fr); grid-template-areas: "token badge prices pnl" "sources sources tx tx"; gap: 14px 18px; align-items: center; padding: 18px 22px; border-bottom: 1px solid var(--ec-border-soft); transition: background-color 0.2s ease; }
+.ledger-row:last-child { border-bottom: 0; }
+.ledger-row:hover { background: rgba(214, 43, 34, 0.05); }
+.ledger-row__token { grid-area: token; display: flex; align-items: center; gap: 12px; }
+.ledger-row__token strong { display: block; font-size: 15px; }
+.ledger-row__token span.mono-font { display: block; margin-top: 2px; color: var(--ec-muted); font-size: 11px; }
+.ledger-badge { grid-area: badge; justify-self: start; padding: 5px 9px; border: 1px solid; font: 700 10px var(--mono-font); letter-spacing: 0.12em; }
+.ledger-badge--approve { color: #fff; border-color: transparent; background: var(--ec-green); }
+.ledger-badge--constrain { color: var(--amber); border-color: rgba(238, 180, 78, 0.5); }
+.ledger-badge--reject { color: var(--ec-mint); border-color: rgba(255, 83, 72, 0.55); }
+.ledger-row__prices { grid-area: prices; display: grid; gap: 4px; color: var(--ec-text); font-size: 12px; }
+.ledger-row__prices span:last-child { color: var(--ec-muted); }
+.ledger-row__pnl { grid-area: pnl; display: grid; justify-items: end; gap: 4px; }
+.ledger-row__pnl strong { color: var(--ec-mint); font-size: 1.35rem; }
+.ledger-row__pnl span.mono-font { color: var(--ec-muted); font-size: 10px; }
+.ledger-status { padding: 4px 8px; border: 1px dashed rgba(255, 255, 255, 0.25); color: var(--ec-text); font: 600 10px var(--mono-font); letter-spacing: 0.12em; text-transform: uppercase; }
+.ledger-row__sources { grid-area: sources; display: flex; flex-wrap: wrap; gap: 6px; font-size: 11px; }
+.ledger-row__sources span { padding: 3px 8px; border: 1px solid var(--ec-border); color: var(--ec-text); }
+.ledger-row__sources span.is-echo { color: var(--amber); border-color: rgba(238, 180, 78, 0.4); }
+.ledger-row__tx { grid-area: tx; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 14px; }
+.tx-link { color: var(--ec-mint); font: 500 11px var(--mono-font); white-space: nowrap; }
+.tx-link span { color: var(--ec-muted); }
+.tx-link:hover, .tx-link:hover span { color: var(--ec-text); }
+.trust-feed { margin: 0; padding: 0; list-style: none; }
+.trust-feed li { display: grid; grid-template-columns: 10px 1fr auto; grid-template-areas: "dot name score" "dot time tx"; gap: 4px 12px; align-items: center; padding: 16px 22px; border-bottom: 1px solid var(--ec-border-soft); }
+.trust-feed li:last-child { border-bottom: 0; }
+.trust-feed__dot { grid-area: dot; width: 6px; height: 6px; background: var(--ec-green); box-shadow: 0 0 8px rgba(214, 43, 34, 0.7); }
+.trust-feed li strong { grid-area: name; font-size: 14px; }
+.trust-feed li > span.mono-font:not(.trust-feed__time) { grid-area: score; color: var(--ec-mint); font-size: 12px; }
+.trust-feed__time { grid-area: time; color: var(--ec-muted); font-size: 10px; }
+.trust-feed li .tx-link { grid-area: tx; justify-self: end; }
+.reference-body > .chain-match { display: grid; gap: 8px; padding: 14px; border: 1px solid rgba(255, 83, 72, 0.45); background: rgba(214, 43, 34, 0.06); }
+.chain-match__ok { margin: 0; color: var(--ec-mint); font-size: 12px; font-weight: 600; }
+.chain-match__meta { margin: 0; color: var(--ec-muted); font-size: 11px; }
+.chain-match__links { display: flex; flex-wrap: wrap; gap: 16px; }
+.empty-row { padding: 22px !important; color: var(--ec-muted) !important; font: 12px var(--mono-font); text-align: left; }
+p.empty-row { margin: 0; }
+.score-as-of a { color: var(--ec-mint); font: 500 10px var(--mono-font); letter-spacing: 0.1em; text-transform: uppercase; }
+
+/* ------------------------------------------------------------------ */
 /* Responsive                                                          */
 /* ------------------------------------------------------------------ */
 
@@ -574,7 +621,7 @@ code { color: var(--ec-text); font: 12px var(--mono-font); overflow-wrap: anywhe
   .mobile-menu a { display: flex; align-items: center; justify-content: space-between; padding: 14px 0; border-bottom: 1px solid var(--ec-border); color: var(--ec-muted); }
   .mobile-menu a[aria-current] { color: var(--ec-text); }
   .mobile-menu a span { width: 6px; height: 6px; background: var(--ec-green); }
-  .dashboard-grid, .detail-grid, .portfolio-grid { grid-template-columns: 1fr; }
+  .dashboard-grid, .detail-grid, .portfolio-grid, .ledger-grid { grid-template-columns: 1fr; }
   .feed-panel { grid-column: auto; }
   .feed-list, .source-list, .rule-list { grid-template-columns: 1fr; }
   .feed-item:nth-child(odd), .source-row:nth-child(odd), .rule-row:nth-child(odd) { border-right: 0; }
@@ -599,6 +646,9 @@ code { color: var(--ec-text); font: 12px var(--mono-font); overflow-wrap: anywhe
   .panel-heading { padding: 16px; }
   .watchlist-labels, .platform { display: none; }
   .kol-row { grid-template-columns: 40px 1fr auto; gap: 6px; padding: 12px 16px; }
+  .ledger-row { grid-template-columns: 1fr auto; grid-template-areas: "token pnl" "badge prices" "sources sources" "tx tx"; padding: 16px; }
+  .ledger-row__prices { justify-items: end; }
+  .ledger-row__tx { justify-content: flex-start; }
   .last-signal { grid-column: 2; }
   .trust-cell { grid-column: 3; grid-row: 1 / 3; width: 72px; }
   .convergence-list { padding-inline: 16px; }

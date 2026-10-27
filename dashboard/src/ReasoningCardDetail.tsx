@@ -2,6 +2,7 @@ import { useState } from "react";
 import type { ReasoningCard } from "@echo/shared/card";
 import { cardHash } from "@echo/shared/hash";
 import { SiteLayout } from "./components/SiteChrome";
+import { etherscanTx, shortHash, useLedger } from "./data/ledger";
 
 const RADAR_THRESHOLD = 0.6;
 
@@ -107,6 +108,33 @@ function Status({ state }: { state: RuleState }) {
       {state === "pending" ? "Awaiting data" : state}
     </span>
   );
+}
+
+/** Recomputes nothing on chain: it looks for a PositionOpened whose cardHash equals the hash computed above. */
+function OnChainMatch({ hash, fallbackTx }: { hash: string; fallbackTx?: string }) {
+  const ledger = useLedger();
+  const snapshot = ledger.status === "live" ? ledger.snapshot : ledger.status === "error" ? ledger.snapshot : undefined;
+  const match = snapshot?.positions.find((position) => position.cardHash.toLowerCase() === hash.toLowerCase());
+
+  if (match) {
+    return (
+      <div className="chain-match">
+        <p className="chain-match__ok mono-font">✓ Hash matches PositionOpened on Sepolia · {match.attestation}</p>
+        <p className="mono-font chain-match__meta">
+          {match.settled ? `Settled at ${match.pnlBps! > 0 ? "+" : ""}${match.pnlBps} bps` : "Position open"} · block {match.openedBlock.toLocaleString("en-US")}
+        </p>
+        <div className="chain-match__links">
+          <a className="external-link" href={etherscanTx(match.openTx)} target="_blank" rel="noreferrer">Open tx {shortHash(match.openTx)} ↗</a>
+          {match.settleTx && <a className="external-link" href={etherscanTx(match.settleTx)} target="_blank" rel="noreferrer">Settle tx {shortHash(match.settleTx)} ↗</a>}
+        </div>
+      </div>
+    );
+  }
+  if (fallbackTx) return <a className="external-link" href={etherscanTx(fallbackTx)} target="_blank" rel="noreferrer">View transaction on Etherscan ↗</a>;
+  if (ledger.status === "loading") return <p className="placeholder-state">Checking Sepolia for this hash…</p>;
+  if (ledger.status === "unconfigured") return <p className="placeholder-state">Ledger address not configured, so the hash cannot be checked on chain.</p>;
+  if (!snapshot) return <p className="placeholder-state">Could not read Sepolia to check this hash.</p>;
+  return <p className="placeholder-state">No EchoLedger record carries this hash. This card has not been written on chain.</p>;
 }
 
 export function ReasoningCardDetail({ card }: { card: FixtureCard }) {
@@ -236,7 +264,7 @@ export function ReasoningCardDetail({ card }: { card: FixtureCard }) {
         <div className="detail-grid detail-grid-bottom">
           <section className="panel detail-section" aria-labelledby="chain-title">
             <div className="panel-heading"><div><p className="section-kicker">Sepolia</p><h2 id="chain-title">On-chain reference</h2></div></div>
-            <div className="reference-body"><span>Canonical card hash</span><div><code title={hash}>{shortValue(hash)}</code><CopyButton value={hash} label="card hash" /></div>{transactionHash ? <a className="external-link" href={`https://sepolia.etherscan.io/tx/${transactionHash}`} target="_blank" rel="noreferrer">View transaction on Etherscan ↗</a> : <p className="placeholder-state">Transaction pending — no Sepolia transaction hash in fixture.</p>}</div>
+            <div className="reference-body"><span>Canonical card hash</span><div><code title={hash}>{shortValue(hash)}</code><CopyButton value={hash} label="card hash" /></div><OnChainMatch hash={hash} fallbackTx={transactionHash} /></div>
           </section>
 
           <section className="panel detail-section" aria-labelledby="models-title">

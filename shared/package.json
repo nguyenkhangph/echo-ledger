@@ -8,7 +8,8 @@
     "./card": "./src/card.ts",
     "./fixtures": "./src/fixtures.ts",
     "./hash": "./src/hash.ts",
-    "./card.schema.json": "./card.schema.json"
+    "./card.schema.json": "./card.schema.json",
+    "./ledger": "./src/ledger.ts"
   },
   "scripts": {
     "generate:schema": "bun run scripts/generate-schema.ts",

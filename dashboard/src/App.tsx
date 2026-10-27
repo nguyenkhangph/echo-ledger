@@ -2,6 +2,7 @@ import { exampleCards } from "@echo/shared/fixtures";
 import type { ReasoningCard } from "@echo/shared/card";
 import { CardNotFound, ReasoningCardDetail } from "./ReasoningCardDetail";
 import { Scorecard } from "./Scorecard";
+import { OnChainLedger } from "./components/OnChainLedger";
 import { EclipseOrb, Reveal, SectionHeading, SiteLayout } from "./components/SiteChrome";
 
 const RADAR_THRESHOLD = 0.6;
@@ -335,6 +336,8 @@ function Radar() {
           </Reveal>
         </div>
       </section>
+
+      <OnChainLedger />
 
       <HowItWorks />
     </SiteLayout>

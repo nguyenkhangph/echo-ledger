@@ -1,4 +1,5 @@
 import { SiteLayout } from "./components/SiteChrome";
+import { etherscanAddress } from "./data/ledger";
 import { useScorecardData, type EquityPoint, type ScorecardData } from "./data/scorecard";
 
 function formatSignedBps(value: number) {
@@ -22,14 +23,15 @@ function EquityCurve({ points }: { points: EquityPoint[] }) {
   const width = 720;
   const height = 190;
   const padding = 14;
+  // The curve starts flat at 0 before the first settlement, so even one settled call draws a line.
   const values = [0, ...points.map((point) => point.cumulativePnlBps)];
   const min = Math.min(...values);
   const max = Math.max(...values);
   const range = Math.max(1, max - min);
-  const x = (index: number) => padding + (index / Math.max(1, points.length - 1)) * (width - padding * 2);
+  const x = (index: number) => padding + (index / (values.length - 1)) * (width - padding * 2);
   const y = (value: number) => height - padding - ((value - min) / range) * (height - padding * 2);
-  const polyline = points.map((point, index) => `${x(index)},${y(point.cumulativePnlBps)}`).join(" ");
-  const area = `${x(0)},${height - padding} ${polyline} ${x(points.length - 1)},${height - padding}`;
+  const polyline = values.map((value, index) => `${x(index)},${y(value)}`).join(" ");
+  const area = `${x(0)},${height - padding} ${polyline} ${x(values.length - 1)},${height - padding}`;
   const zeroY = y(0);
   const finalPoint = points.at(-1)!;
 
@@ -49,9 +51,9 @@ function EquityCurve({ points }: { points: EquityPoint[] }) {
         <line className="chart-baseline" x1={padding} x2={width - padding} y1={zeroY} y2={zeroY} />
         <polygon className="chart-area" points={area} />
         <polyline className="chart-line" points={polyline} />
-        {points.map((point, index) => <circle className="chart-point" key={point.settledAt} cx={x(index)} cy={y(point.cumulativePnlBps)} r="3" />)}
+        {points.map((point, index) => <circle className="chart-point" key={point.settledAt} cx={x(index + 1)} cy={y(point.cumulativePnlBps)} r="3" />)}
       </svg>
-      <div className="chart-axis"><span>{new Date(points[0].settledAt).toLocaleDateString("en", { month: "short", day: "numeric", timeZone: "UTC" })}</span><span>{points.length} settlements</span><span>{new Date(finalPoint.settledAt).toLocaleDateString("en", { month: "short", day: "numeric", timeZone: "UTC" })}</span></div>
+      <div className="chart-axis"><span>{new Date(points[0].settledAt).toLocaleDateString("en", { month: "short", day: "numeric", timeZone: "UTC" })}</span><span>{points.length} {points.length === 1 ? "settlement" : "settlements"}</span><span>{new Date(finalPoint.settledAt).toLocaleDateString("en", { month: "short", day: "numeric", timeZone: "UTC" })}</span></div>
     </div>
   );
 }
@@ -81,7 +83,7 @@ function PortfolioScorecard({ data }: { data: ScorecardData["portfolio"] }) {
           <div className="score-table-wrap">
             <table className="score-table token-score-table">
               <thead><tr><th>Token</th><th>Count</th><th>Win rate</th><th>Avg PnL</th></tr></thead>
-              <tbody>{data.byToken.map((token) => <tr key={token.token}><td><span className="token-icon">{token.token.slice(0, 2)}</span><strong>{token.token}</strong></td><td>{token.count}</td><td>{token.winRate}%</td><td className={token.avgPnlBps >= 0 ? "positive" : "negative"}>{formatSignedBps(token.avgPnlBps)}</td></tr>)}</tbody>
+              <tbody>{data.byToken.length === 0 && <tr><td colSpan={4} className="empty-row">No settled calls yet.</td></tr>}{data.byToken.map((token) => <tr key={token.token}><td><span className="token-icon">{token.token.slice(0, 2)}</span><strong>{token.token}</strong></td><td>{token.count}</td><td>{token.winRate}%</td><td className={token.avgPnlBps >= 0 ? "positive" : "negative"}>{formatSignedBps(token.avgPnlBps)}</td></tr>)}</tbody>
             </table>
           </div>
         </section>
@@ -118,7 +120,8 @@ function KolLeaderboard({ kols }: { kols: ScorecardData["kols"] }) {
           </tbody>
         </table>
       </div>
-      <p className="leaderboard-note">Echo calls are shown separately and do not count toward independent trust-earning calls. Trend compares the latest score with three snapshots ago.</p>
+      {kols.length === 0 && <p className="empty-row">No trust updates recorded yet.</p>}
+      <p className="leaderboard-note">Echo calls are shown separately and do not count toward independent trust-earning calls. Trend compares the latest score with the one before it (every source starts at 5,000).</p>
     </section>
   );
 }
@@ -132,7 +135,15 @@ export function Scorecard({ data }: { data?: ScorecardData }) {
       <main className="scorecard-page">
         <section className="page-heading">
           <div><p className="eyebrow">Proof of performance</p><h1 className="display-font">System <span className="accent-underline">Scorecard</span></h1><p>Practice results and source trust, measured call by call.</p></div>
-          <div className="score-as-of"><span>Snapshot</span><strong>{formatAsOf(scorecard.asOf)}</strong><small>Mock indexed data</small></div>
+          <div className="score-as-of">
+            <span>{scorecard.source.kind === "live" ? "Live · Ethereum Sepolia" : "Sample data"}</span>
+            <strong>{formatAsOf(scorecard.asOf)}</strong>
+            {scorecard.source.kind === "live" ? (
+              <a href={etherscanAddress(scorecard.source.address)} target="_blank" rel="noreferrer">Block {scorecard.source.block.toLocaleString("en-US")} ↗</a>
+            ) : (
+              <small>{scorecard.source.reason}</small>
+            )}
+          </div>
         </section>
         <PortfolioScorecard data={scorecard.portfolio} />
         <KolLeaderboard kols={scorecard.kols} />
