@@ -1,0 +1,152 @@
+# Echo Ledger
+
+**Filter the echo. Record the signal.**
+
+Echo Ledger is an AI agent that watches public crypto voices (KOLs), works out which of them are saying something *independently* and which are just repeating someone else, checks the claim against market data, argues it out in a bull/bear/judge debate, and then opens a **practice** position. Every decision produces a *reasoning card*, and the card's hash, the settlement and the resulting change in each source's trust score are written to Ethereum Sepolia by **Chainlink CRE** workflows.
+
+The point is accountability: anyone can recompute a card's hash from its contents and check it against the chain, and every source's track record is public and cannot be edited after the fact.
+
+> Practice positions only. No real capital, no exchange keys, not financial advice.
+
+---
+
+## On-chain proof (Ethereum Sepolia)
+
+Contract **EchoLedger** [`0x88fd1895d9b4BD28Cf641281b9AA1eF787b8DAd0`](https://sepolia.etherscan.io/address/0x88fd1895d9b4BD28Cf641281b9AA1eF787b8DAd0), written through the CRE simulation forwarder `0x15fC6ae953E024d975e77382eEeC56A9101f9F88`.
+
+One complete position lifecycle, each step written by a different CRE workflow:
+
+| Step | CRE workflow (trigger) | Transaction | Result |
+| --- | --- | --- | --- |
+| Open | `record` (HTTP) | [`0x0e7299…a62d`](https://sepolia.etherscan.io/tx/0x0e729f4a7b02a3f4688bb37f92775992af29dce3423c1611f883951a2219a62d) | `PositionOpened`: SOL, long, APPROVE |
+| Settle | `settle` (cron) | [`0x38efa1…eca09`](https://sepolia.etherscan.io/tx/0x38efa182cb2775e6b8e8d51173884d6496adac2f96b81538505f28581c3eca09) | `PositionSettled` at the 24 h horizon, **−81 bps** (block 12002764) |
+| Trust update | `reputation` (EVM log) | [`0x7b7459…8ec7b`](https://sepolia.etherscan.io/tx/0x7b7459824750fa355af5c05fe4cdc50559bb0f5b14e1acf202006f627018ec7b) | `TrustUpdated` for both sources, 5000 → 4750 (block 12002765, the very next block) |
+
+**What this run is, honestly:** this first lifecycle was a pipeline verification run. The reasoning card came from the repository fixture `card-sol-approve-001`, whose two sources (`alice-crypto`, `block-research`) are fictional. The transactions, the price-based settlement and the trust penalty are all real and on chain. The live agent run against real public sources (see [Live run](#live-run)) feeds the same `record` listener.
+
+The dashboard reads all of this straight from the contract (no indexer, no backend): the **On-chain ledger** section on the Radar page, the live Scorecard, and a hash check on every reasoning card page that turns green when the locally computed card hash matches a `PositionOpened` event.
+
+---
+
+## How it works
+
+```mermaid
+flowchart LR
+  subgraph Agent [Agent pipeline, Bun + LLM]
+    A1[A1 Ingest<br/>Telegram previews + X posts] --> A2[A2 Extract<br/>token, direction, conviction<br/>sponsored-post filter]
+    A2 --> A3[A3 Converge<br/>independent vs echo]
+    A3 --> A4[A4 Debate<br/>bull, bear, judge + risk rules]
+    A4 --> A5[A5 Submit<br/>canonical card hash, replay guard]
+  end
+  A5 -- HTTP POST --> R[CRE record<br/>HTTP trigger]
+  R -- OPEN report --> L[(EchoLedger<br/>Sepolia)]
+  S[CRE settle<br/>cron trigger<br/>3-source median price] -- SETTLE report --> L
+  L -- PositionSettled log --> P[CRE reputation<br/>EVM log trigger]
+  P -- TRUST_UPDATE report --> L
+  L --> D[Dashboard<br/>reads events + views]
+```
+
+**1. Ingest (A1).** Public Telegram channels are read from their `t.me/s/<channel>` previews; X posts are added to `agent/manual_posts.json` (there is no X API client). Forwards, quotes and replies keep a pointer to the post they reference. A channel that fails to load is skipped with a warning instead of stopping the run.
+
+**2. Extract (A2).** An LLM (any OpenAI-compatible endpoint) turns each post into a structured signal: token, bullish/bearish, conviction, timeframe. Paid promotion is caught by a deterministic guard (disclosure tags, or a bullish push combined with a referral code and a call to action) on top of the LLM's own judgement. Filtered posts are not silently dropped: they go to `fixtures/extraction-audit/` with the reason. Results are cached per post, so each post is extracted once.
+
+**3. Converge (A3).** Signals are grouped by token and direction. A post that quotes, forwards or explicitly attributes another source is an **echo**: it is shown, but it never counts towards the score. A token passes only with a convergence score of at least 0.6 **and** at least two independent sources.
+
+**4. Debate (A4).** A bull, a bear and a judge argue over the evidence (lead time versus price, volume, price agreement across sources). Deterministic risk rules (minimum market cap, maximum open positions, position size) are recorded alongside the verdict as APPROVE, CONSTRAIN or REJECT.
+
+**5. Submit (A5).** The card is serialised canonically and hashed (`shared/src/hash.ts`), deduplicated by signal identity so a restart cannot open the same call twice, and posted to the CRE `record` workflow. Without `CRE_RECORD_URL` this step is a dry run.
+
+**6. Settle and score.** The `settle` workflow checks each open position against a median of CoinGecko, Coinbase and Binance prices and closes it at the 24 h horizon or an 8 % stop loss. The `reputation` workflow reacts to each `PositionSettled` log and moves the trust score of every source in that position up on a win and down on a loss. A source flagged as an echo takes an extra penalty: it never gains from a winning call and loses twice as much on a losing one, so repeating other people cannot build a track record.
+
+---
+
+## Chainlink CRE
+
+Three TypeScript workflows in [`cre/`](cre/), built and run with CRE CLI v1.39.0:
+
+| Workflow | Trigger | Writes | Notes |
+| --- | --- | --- | --- |
+| [`record`](cre/record/) | HTTP | OPEN report (type 0) | Re-checks the card hash, runs the risk gate against live prices, records APPROVE / CONSTRAIN / REJECT. REJECT is stored for audit but never becomes an open position. |
+| [`settle`](cre/settle/) | Cron | SETTLE report (type 1) | Reads `openPositionIds`, prices each token from three sources, settles on horizon or stop loss. A `HOLD` performs no write. |
+| [`reputation`](cre/reputation/) | EVM log (`PositionSettled`, finalized) | TRUST_UPDATE report (type 2) | Batched update for every source of the settled position. |
+
+All reports go through `writeReport` to `EchoLedger.onReport` (`ReceiverTemplate` / `IReceiver`).
+
+Two lessons from running this for real, both now covered by code and tests:
+
+- **A successful transaction is not a delivered report.** The first broadcast succeeded at the transaction level, but the forwarder emitted `ReportProcessed(success=false)`: the receiver call had run out of gas, and the ledger was unchanged. Tracing the transaction and replaying it with more gas found the cause. Every workflow now checks `receiverContractExecutionStatus` as well as the transaction status and fails loudly if the receiver reverted.
+- **Gas limits come from measurements, not guesses.** Foundry tests with the worst case of 20 sources measure 3.54 M gas for OPEN, 0.43 M for SETTLE and 6.89 M for TRUST_UPDATE. The workflow configs use 5 M, 750 k and 9.5 M.
+
+### Why local simulation and not a deployed DON
+
+Chainlink told us directly that deploying CRE workflows to a testnet or mainnet DON currently requires a commercial agreement with them, and that local simulation is the intended path for hackathon projects. The workflows therefore run with `cre workflow simulate … --broadcast`: the same workflow code, compiled to WASM and executed by the CRE simulator, writing real reports to Sepolia through the simulation forwarder. `record` and `reputation` run as persistent `--listen` processes; `settle` is driven by an operator loop because the simulator executes a cron trigger once per invocation. The full operating procedure is in [`cre/LIVE_RUN.md`](cre/LIVE_RUN.md).
+
+---
+
+## Live run
+
+The agent and all three workflows were run continuously against Sepolia from 26 Oct 2026 (local simulation, five terminals, see [`cre/LIVE_RUN.md`](cre/LIVE_RUN.md)). The watchlist in [`agent/kols.json`](agent/kols.json) holds 19 sources:
+
+- **Telegram, fully automated:** WatcherGuru, Cointelegraph, Wu Blockchain, Lookonchain, The Daily Hodl, CryptoQuant, Glassnode, DaanCrypto, BitcoinBullets.
+- **X, via `manual_posts.json`:** TedPillows, AltcoinSherpa, KillaXBT, Morecryptoonl, ZordXBT, CryptoAnup, Ali Martinez, Rekt Capital, and two Vietnamese-language analysts.
+
+The list deliberately mixes large accounts that are often repeated with small independent ones that cover the same tokens, which is exactly where echo detection matters. In the first hours on real data, the agent extracted bearish calls on HYPE and ETH and flagged a bullish BTC post as an echo of another account, so it did not count towards convergence.
+
+---
+
+## Repository layout
+
+| Path | What it is |
+| --- | --- |
+| [`agent/`](agent/) | Pipeline stages A1 to A5 (`src/ingest`, `extract`, `convergence`, `debate`, `submit`) and the watchlist |
+| [`cre/`](cre/) | The three CRE workflows, their configs and the live-run runbook |
+| [`contracts/`](contracts/) | `EchoLedger.sol` (Foundry), including worst-case gas tests |
+| [`shared/`](shared/) | Reasoning-card schema, canonical hashing, fixtures, and the Sepolia reader used by the dashboard |
+| [`dashboard/`](dashboard/) | Vite + React UI: Radar, reasoning cards, Scorecard |
+| [`fixtures/`](fixtures/) | Pipeline inputs and outputs per day |
+
+---
+
+## Running it
+
+Prerequisites: [Bun](https://bun.sh) 1.3+, [Foundry](https://getfoundry.sh), and CRE CLI v1.39.0 for the workflows.
+
+```bash
+bun install
+(cd shared && bun test) && (cd agent && bun test) && (cd dashboard && bun test)
+(cd contracts && forge test)  # contract tests, including worst-case gas
+# CRE workflow tests: run `bun install` and then `bun test` inside cre/record, cre/settle and cre/reputation
+```
+
+**Dashboard** (reads Sepolia directly from the browser):
+
+```bash
+# dashboard/.env
+VITE_LEDGER_ADDRESS=0x88fd1895d9b4BD28Cf641281b9AA1eF787b8DAd0
+# optional: VITE_SEPOLIA_RPC_URL, VITE_LEDGER_FROM_BLOCK (defaults to the deployment block 11974596)
+
+bun run dashboard:dev
+```
+
+If Sepolia cannot be read, the Scorecard falls back to sample data and says so in its header.
+
+**Agent pipeline** (from `agent/`, with `LLM_BASE_URL`, `LLM_API_KEY` and `LLM_MODEL` set in `agent/.env`):
+
+```bash
+bun run ingest
+bun run extract --date 2026-10-27
+bun run converge --window 24
+bun run debate --date 2026-10-27
+bun run submit --date 2026-10-27   # dry run unless CRE_RECORD_URL is set
+```
+
+**CRE workflows:** follow [`cre/LIVE_RUN.md`](cre/LIVE_RUN.md). Any command with `--broadcast` sends real Sepolia transactions.
+
+---
+
+## Known limitations
+
+- X has no automated client; X sources contribute only the posts pasted into `agent/manual_posts.json`.
+- Workflows run in the CRE simulator rather than on a DON (see above).
+- The `settle` cadence is an external loop, not exact wall-clock cron.
+- The LLM provider is configurable; extraction quality depends on the model behind it.
