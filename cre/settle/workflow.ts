@@ -7,6 +7,7 @@ import {
   getNetwork,
   hexToBase64,
   LAST_FINALIZED_BLOCK_NUMBER,
+  LATEST_BLOCK_NUMBER,
   median,
   prepareReportRequest,
   protoBigIntToBigint,
@@ -147,7 +148,12 @@ const getEvmClient = (runtime: Runtime<Config>): EVMClient => {
   return new cre.capabilities.EVMClient(network.chainSelector.selector)
 }
 
-const callLedger = (runtime: Runtime<Config>, client: EVMClient, callData: Hex): Hex => {
+const callLedger = (
+  runtime: Runtime<Config>,
+  client: EVMClient,
+  callData: Hex,
+  blockNumber: typeof LAST_FINALIZED_BLOCK_NUMBER = LAST_FINALIZED_BLOCK_NUMBER,
+): Hex => {
   const reply = client
     .callContract(runtime, {
       call: encodeCallMsg({
@@ -155,10 +161,25 @@ const callLedger = (runtime: Runtime<Config>, client: EVMClient, callData: Hex):
         to: runtime.config.ledgerAddress as Address,
         data: callData,
       }),
-      blockNumber: LAST_FINALIZED_BLOCK_NUMBER,
+      blockNumber,
     })
     .result()
   return bytesToHex(reply.data)
+}
+
+/**
+ * Open positions are discovered at the finalized block, which trails the head by ~15 minutes on
+ * Sepolia. A position this workflow settled a few minutes ago still looks open there, so confirm at
+ * the latest block before writing; otherwise the ledger rejects the duplicate inside the forwarder
+ * call and the transaction only burns gas.
+ */
+const stillOpenAtLatest = (runtime: Runtime<Config>, client: EVMClient, id: Hex): boolean => {
+  const position = decodeFunctionResult({
+    abi: ledgerAbi,
+    functionName: 'getPosition',
+    data: callLedger(runtime, client, encodeFunctionData({ abi: ledgerAbi, functionName: 'getPosition', args: [id] }), LATEST_BLOCK_NUMBER),
+  })
+  return position.exists && !position.settled
 }
 
 const readOpenPositions = (runtime: Runtime<Config>, client: EVMClient): Position[] => {
@@ -304,6 +325,10 @@ export const onCronTrigger = (runtime: Runtime<Config>, _payload: CronPayload): 
     )
     if (!reason) {
       runtime.log(`HOLD id=${position.id} token=${position.token} pnlBps=${pnlBps.toString()}`)
+      continue
+    }
+    if (!stillOpenAtLatest(runtime, client, position.id)) {
+      runtime.log(`SKIP id=${position.id} token=${position.token} already settled at the latest block (finalized view not caught up)`)
       continue
     }
     writeSettlement(runtime, client, position, exitPriceE8, pnlBps, nowSeconds, reason)
