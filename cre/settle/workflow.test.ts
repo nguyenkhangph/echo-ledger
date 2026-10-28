@@ -6,6 +6,10 @@ import { assertReportDelivered, calculatePnlBps, medianPriceE8, settlementReason
 describe('SETTLE calculations', () => {
   test('uses the median consensus price and rejects >1% disagreement', () => {
     expect(medianPriceE8({ coingecko: 100, coinbase: 100.2, binance: 99.9 })).toBe(10_000_000_000n)
+    // One source unavailable (0): median of the other two.
+    expect(medianPriceE8({ coingecko: 0, coinbase: 100.2, binance: 99.8 })).toBe(10_000_000_000n)
+    expect(() => medianPriceE8({ coingecko: 0, coinbase: 0, binance: 99.8 })).toThrow('at least 2')
+    expect(() => medianPriceE8({ coingecko: 0, coinbase: 100, binance: 95 })).toThrow('disagree')
     expect(() => medianPriceE8({ coingecko: 100, coinbase: 100.2, binance: 95 })).toThrow(
       'Price sources disagree by more than 1%',
     )

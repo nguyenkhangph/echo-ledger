@@ -79,6 +79,7 @@ export type Position = {
   entryPriceE8: bigint
 }
 
+/** USD prices per source; 0 marks a source that did not answer (kept numeric for consensus aggregation). */
 export type PriceSnapshot = {
   coingecko: number
   coinbase: number
@@ -86,10 +87,21 @@ export type PriceSnapshot = {
 }
 
 const priceSnapshotSchema = z.object({
-  coingecko: z.number().positive(),
-  coinbase: z.number().positive(),
-  binance: z.number().positive(),
+  coingecko: z.number().nonnegative(),
+  coinbase: z.number().nonnegative(),
+  binance: z.number().nonnegative(),
 })
+
+/** A missing or malformed response counts as 0 (absent) instead of failing the whole settlement run. */
+const priceOrZero = (statusCode: number, read: () => unknown): number => {
+  if (statusCode !== 200) return 0
+  try {
+    const value = Number(read())
+    return Number.isFinite(value) && value > 0 ? value : 0
+  } catch {
+    return 0
+  }
+}
 
 const tokenMap: Record<string, { gecko: string; coinbase: string; binance: string }> = {
   BTC: { gecko: 'bitcoin', coinbase: 'BTC-USD', binance: 'BTCUSDT' },
@@ -116,17 +128,12 @@ const fetchPrices = (requester: HTTPSendRequester, token: string): PriceSnapshot
     .sendRequest({ method: 'GET', url: `https://api.binance.com/api/v3/ticker/price?symbol=${symbols.binance}` })
     .result()
 
-  if (geckoResponse.statusCode !== 200 || coinbaseResponse.statusCode !== 200 || binanceResponse.statusCode !== 200) {
-    throw new Error(`One or more ${token} price APIs returned a non-200 response`)
-  }
-
-  const gecko = parseJson(geckoResponse.body)
-  const coinbase = parseJson(coinbaseResponse.body)
-  const binance = parseJson(binanceResponse.body)
+  // Free public price APIs rate-limit or blip for minutes at a time (CoinGecko especially). One
+  // unavailable source must not block a settlement; medianPriceE8 still requires two that agree.
   return priceSnapshotSchema.parse({
-    coingecko: Number(gecko[symbols.gecko]?.usd),
-    coinbase: Number(coinbase.data?.amount),
-    binance: Number(binance.price),
+    coingecko: priceOrZero(geckoResponse.statusCode, () => parseJson(geckoResponse.body)[symbols.gecko]?.usd),
+    coinbase: priceOrZero(coinbaseResponse.statusCode, () => parseJson(coinbaseResponse.body).data?.amount),
+    binance: priceOrZero(binanceResponse.statusCode, () => parseJson(binanceResponse.body).price),
   })
 }
 
@@ -198,8 +205,10 @@ const readOpenedAt = (runtime: Runtime<Config>, client: EVMClient, positionId: H
 }
 
 export const medianPriceE8 = (snapshot: PriceSnapshot): bigint => {
-  const prices = [snapshot.coingecko, snapshot.coinbase, snapshot.binance].sort((a, b) => a - b)
-  const medianPrice = prices[1]
+  const prices = [snapshot.coingecko, snapshot.coinbase, snapshot.binance].filter((price) => price > 0).sort((a, b) => a - b)
+  if (prices.length < 2) throw new Error(`Only ${prices.length} of 3 price sources responded; at least 2 are required`)
+  const middle = Math.floor(prices.length / 2)
+  const medianPrice = prices.length % 2 ? prices[middle] : (prices[middle - 1] + prices[middle]) / 2
   const maxDeviation = Math.max(...prices.map((price) => Math.abs(price - medianPrice) / medianPrice))
   if (maxDeviation > 0.01) throw new Error('Price sources disagree by more than 1%')
   return BigInt(Math.round(medianPrice * 1e8))
@@ -279,7 +288,7 @@ export const onCronTrigger = (runtime: Runtime<Config>, _payload: CronPayload): 
         .result()
       priceByToken[position.token] = medianPriceE8(snapshot)
       runtime.log(
-        `Prices token=${position.token} coingecko=${snapshot.coingecko} coinbase=${snapshot.coinbase} binance=${snapshot.binance}`,
+        `Prices token=${position.token} coingecko=${snapshot.coingecko || 'unavailable'} coinbase=${snapshot.coinbase || 'unavailable'} binance=${snapshot.binance || 'unavailable'}`,
       )
     }
 
