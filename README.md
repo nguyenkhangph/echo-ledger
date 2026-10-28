@@ -14,15 +14,29 @@ The point is accountability: anyone can recompute a card's hash from its content
 
 Contract **EchoLedger** [`0x88fd1895d9b4BD28Cf641281b9AA1eF787b8DAd0`](https://sepolia.etherscan.io/address/0x88fd1895d9b4BD28Cf641281b9AA1eF787b8DAd0), written through the CRE simulation forwarder `0x15fC6ae953E024d975e77382eEeC56A9101f9F88`.
 
-One complete position lifecycle, each step written by a different CRE workflow:
+### A live decision from real sources
+
+The agent read public Telegram channels, found an independent bullish BTC narrative, debated it and opened a practice long. Each step below was written by a different CRE workflow:
+
+| Step | CRE workflow (trigger) | Transaction | Result |
+| --- | --- | --- | --- |
+| Open | `record` (HTTP, posted by the agent) | [`0xba6549…683b`](https://sepolia.etherscan.io/tx/0xba6549c2fb6f5ded676ed5d15df1b185c6685b150998475d9484592e71ea683b) | `PositionOpened`: BTC long (block 12004347, 27 Oct) |
+| Settle | `settle` (cron) | [`0xd7c1b6…b362`](https://sepolia.etherscan.io/tx/0xd7c1b6ebafaf4a271d8af6b63fc03db1ec3d870d17b496d54ed7f1853a30b362) | `PositionSettled` at the 24 h horizon, **+234 bps** (block 12011543, 28 Oct) |
+| Trust update | `reputation` (EVM log) | [`0xa452f5…2f28`](https://sepolia.etherscan.io/tx/0xa452f537347113d5c0bd61b9716bbbdcce94df3a8779cc5c1837884750ef2f28) | `TrustUpdated`, 5000 → 5250, for the four sources behind the call: Wu Blockchain, Glassnode, The Daily Hodl and CryptoQuant (block 12011544, the next block) |
+
+Between 27 and 28 Oct the agent wrote five BTC decisions in total ([`0xcaecb7…8da8`](https://sepolia.etherscan.io/tx/0xcaecb75332aeffed6dea3619d88f26e72b8d4c779d72be8fa19868e7a58c8da8), [`0x35e13f…a1b8`](https://sepolia.etherscan.io/tx/0x35e13fe9a8db5fddd11725cbcb8e46700e7780e688640f76df625bb26052a1b8), [`0xacc7f8…788c`](https://sepolia.etherscan.io/tx/0xacc7f8d2ad91a15648260c829beeb94c089e5b888c6822d6a4f89c46e0e0788c), [`0xdd9baf…f35e`](https://sepolia.etherscan.io/tx/0xdd9baf845a2fc5702ab754b80344b2bad0f46f7d14eb00de8c3f61b6ed21f35e)). That exposed a real flaw: every new post joining the same BTC narrative changed its source set and looked like a new signal, so one story opened three positions before the `max_open` limit stopped it. The agent now allows one decision per token per horizon (see [Lessons from the live run](#lessons-from-the-live-run)). The extra positions stay on chain as recorded.
+
+### Pipeline verification run
+
+Before the live run, one fixture card was pushed through all three workflows to prove the on-chain path:
 
 | Step | CRE workflow (trigger) | Transaction | Result |
 | --- | --- | --- | --- |
 | Open | `record` (HTTP) | [`0x0e7299…a62d`](https://sepolia.etherscan.io/tx/0x0e729f4a7b02a3f4688bb37f92775992af29dce3423c1611f883951a2219a62d) | `PositionOpened`: SOL, long, APPROVE |
 | Settle | `settle` (cron) | [`0x38efa1…eca09`](https://sepolia.etherscan.io/tx/0x38efa182cb2775e6b8e8d51173884d6496adac2f96b81538505f28581c3eca09) | `PositionSettled` at the 24 h horizon, **−81 bps** (block 12002764) |
-| Trust update | `reputation` (EVM log) | [`0x7b7459…8ec7b`](https://sepolia.etherscan.io/tx/0x7b7459824750fa355af5c05fe4cdc50559bb0f5b14e1acf202006f627018ec7b) | `TrustUpdated` for both sources, 5000 → 4750 (block 12002765, the very next block) |
+| Trust update | `reputation` (EVM log) | [`0x7b7459…8ec7b`](https://sepolia.etherscan.io/tx/0x7b7459824750fa355af5c05fe4cdc50559bb0f5b14e1acf202006f627018ec7b) | `TrustUpdated` for both sources, 5000 → 4750 (block 12002765) |
 
-**What this run is, honestly:** this first lifecycle was a pipeline verification run. The reasoning card came from the repository fixture `card-sol-approve-001`, whose two sources (`alice-crypto`, `block-research`) are fictional. The transactions, the price-based settlement and the trust penalty are all real and on chain. The live agent run against real public sources (see [Live run](#live-run)) feeds the same `record` listener.
+This card is the repository fixture `card-sol-approve-001`; its two sources (`alice-crypto`, `block-research`) are fictional. The transactions, the price-based settlement and the trust penalty are real.
 
 The dashboard reads all of this straight from the contract (no indexer, no backend): the **On-chain ledger** section on the Radar page, the live Scorecard, and a hash check on every reasoning card page that turns green when the locally computed card hash matches a `PositionOpened` event.
 
@@ -90,7 +104,19 @@ The agent and all three workflows were run continuously against Sepolia from 26 
 - **Telegram, fully automated:** WatcherGuru, Cointelegraph, Wu Blockchain, Lookonchain, The Daily Hodl, CryptoQuant, Glassnode, DaanCrypto, BitcoinBullets.
 - **X, via `manual_posts.json`:** TedPillows, AltcoinSherpa, KillaXBT, Morecryptoonl, ZordXBT, CryptoAnup, Ali Martinez, Rekt Capital, and two Vietnamese-language analysts.
 
-The list deliberately mixes large accounts that are often repeated with small independent ones that cover the same tokens, which is exactly where echo detection matters. In the first hours on real data, the agent extracted bearish calls on HYPE and ETH and flagged a bullish BTC post as an echo of another account, so it did not count towards convergence.
+The list deliberately mixes large accounts that are often repeated with small independent ones that cover the same tokens, which is exactly where echo detection matters. In the first hours on real data, the agent extracted bearish calls on HYPE and ETH and flagged a bullish BTC post as an echo of another account, so it did not count towards convergence. The next day a bullish BTC narrative passed convergence with independent sources; the resulting position settled at +234 bps and raised the trust of the four sources behind it (see [On-chain proof](#a-live-decision-from-real-sources)).
+
+---
+
+## Lessons from the live run
+
+Running the system for real against Sepolia surfaced problems no test had caught. Each is fixed in code, and all but the stale-read fix (which needs the CRE runtime) have a unit test:
+
+- **One narrative, several positions.** The replay guard keyed on the exact set of source posts, so a growing narrative looked new on every cycle. Decisions are now limited to one per token per horizon.
+- **Stale reads after a settlement.** `settle` discovers open positions at the finalized block, about 15 minutes behind the head. For that window a just-settled position still looked open and was sent again; the ledger rejected it inside the forwarder call while the outer transaction succeeded. The workflow now re-checks the position at the latest block before writing.
+- **Free price APIs are not always up.** Requiring all three price sources made settlement fail whenever one was rate-limited. It now settles on the median of at least two sources that agree within 1 %.
+- **The agent-to-CRE hop.** The simulator's HTTP trigger listens on `/trigger` and expects `{"input": ...}`; the first live submission failed with a 404 until the client was fixed.
+- **Dead sources.** The first watchlist had channels that had stopped posting, so the agent saw no posts at all. Candidate channels were then checked for posts in the last 24 hours before being added, and one unreachable channel no longer stops ingestion.
 
 ---
 
