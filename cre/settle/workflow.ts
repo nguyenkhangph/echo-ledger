@@ -116,18 +116,18 @@ const fetchPrices = (requester: HTTPSendRequester, token: string): PriceSnapshot
   const symbols = tokenMap[token.toUpperCase()]
   if (!symbols) throw new Error(`Unsupported token: ${token}`)
 
-  const geckoResponse = requester
-    .sendRequest({
-      method: 'GET',
-      url: `https://api.coingecko.com/api/v3/simple/price?ids=${symbols.gecko}&vs_currencies=usd`,
-    })
-    .result()
-  const coinbaseResponse = requester
-    .sendRequest({ method: 'GET', url: `https://api.coinbase.com/v2/prices/${symbols.coinbase}/spot` })
-    .result()
-  const binanceResponse = requester
-    .sendRequest({ method: 'GET', url: `https://api.binance.com/api/v3/ticker/price?symbol=${symbols.binance}` })
-    .result()
+  // A timeout or transport error from one source throws out of .result(); treat it like any other
+  // unavailable source (status 0) instead of failing the whole settlement run.
+  const fetchSource = (url: string): { statusCode: number; body: Uint8Array } => {
+    try {
+      return requester.sendRequest({ method: 'GET', url }).result()
+    } catch {
+      return { statusCode: 0, body: new Uint8Array() }
+    }
+  }
+  const geckoResponse = fetchSource(`https://api.coingecko.com/api/v3/simple/price?ids=${symbols.gecko}&vs_currencies=usd`)
+  const coinbaseResponse = fetchSource(`https://api.coinbase.com/v2/prices/${symbols.coinbase}/spot`)
+  const binanceResponse = fetchSource(`https://api.binance.com/api/v3/ticker/price?symbol=${symbols.binance}`)
 
   // Free public price APIs rate-limit or blip for minutes at a time (CoinGecko especially). One
   // unavailable source must not block a settlement; medianPriceE8 still requires two that agree.
