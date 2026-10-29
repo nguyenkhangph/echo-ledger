@@ -3,6 +3,8 @@ import type { ReasoningCard } from "@echo/shared/card";
 import { cardHash } from "@echo/shared/hash";
 import { CardNotFound, ReasoningCardDetail } from "./ReasoningCardDetail";
 import { Scorecard } from "./Scorecard";
+import { DecisionFunnel } from "./components/DecisionFunnel";
+import { EchoGraph } from "./components/EchoGraph";
 import { OnChainLedger } from "./components/OnChainLedger";
 import { EclipseOrb, Reveal, SectionHeading, SiteLayout } from "./components/SiteChrome";
 import { useLedger } from "./data/ledger";
@@ -27,7 +29,10 @@ const RADAR_THRESHOLD = 0.6;
 const heroCards: Array<{ card: ReasoningCard; fixture: boolean }> = [
   ...draftCards.map((card) => ({ card, fixture: false })),
   ...exampleCards.map((card) => ({ card, fixture: true })),
-].slice(0, 4);
+]
+  // The agent can re-draft the same card id on later cycles; list each card once.
+  .filter(({ card }, index, all) => all.findIndex((other) => other.card.card_id === card.card_id) === index)
+  .slice(0, 4);
 const fixtureHashes = new Map(heroCards.map(({ card }) => [card.card_id, cardHash(card).toLowerCase()]));
 
 const sentimentClass = (sentiment: string) => (sentiment === "bullish" ? "bull" : sentiment === "bearish" ? "bear" : "neutral");
@@ -47,18 +52,6 @@ function formatUtc(date: Date) {
   return new Intl.DateTimeFormat("en", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", timeZone: "UTC" }).format(date) + " UTC";
 }
 
-function HeroStat({ label, value, live = false }: { label: string; value: string; live?: boolean }) {
-  return (
-    <div className="hero-stat">
-      <p className="mono-font">
-        {live && <span className="live-dot" aria-hidden="true" />}
-        {value}
-      </p>
-      <span>{label}</span>
-    </div>
-  );
-}
-
 function LatestCards() {
   const ledger = useLedger();
   const snapshot = ledger.status === "live" ? ledger.snapshot : ledger.status === "error" ? ledger.snapshot : undefined;
@@ -68,7 +61,7 @@ function LatestCards() {
     <div className="hero-panel">
       <div className="hero-panel__head">
         <p className="mono-font"><span className="live-dot" aria-hidden="true" />Latest reasoning cards</p>
-        <span className="mono-font">{draftCards.length ? `${draftCards.length} from the agent` : "Ethereum Sepolia"}</span>
+        <span className="mono-font">{heroCards.some((item) => !item.fixture) ? `${heroCards.filter((item) => !item.fixture).length} from the agent` : "Ethereum Sepolia"}</span>
       </div>
       <ul>
         {heroCards.map(({ card, fixture }, index) => {
@@ -350,11 +343,8 @@ function Radar() {
               )}
               <a className="ghost-button" href="/scorecard">View scorecard</a>
             </div>
-            <div className="hero__stats fade-up" style={{ ["--d" as string]: "320ms" }}>
-              <HeroStat live label="Sources watched" value={String(pipelineStats.sources)} />
-              <HeroStat label={`Posts read · ${WINDOW_HOURS}h`} value={String(pipelineStats.postsInWindow)} />
-              <HeroStat label="Actionable calls" value={String(pipelineStats.signalsInWindow)} />
-              <HeroStat label="Echoes caught · all time" value={String(pipelineStats.echoesTotal)} />
+            <div className="hero__funnel fade-up" style={{ ["--d" as string]: "320ms" }}>
+              <DecisionFunnel />
             </div>
           </div>
           <div className="fade-up hero__panel-wrap" style={{ ["--d" as string]: "200ms" }}>
@@ -377,7 +367,8 @@ function Radar() {
         </Reveal>
 
         <div className="dashboard-grid">
-          <Reveal className="panel watchlist-panel"><WatchlistPanel /></Reveal>
+          <Reveal className="panel graph-panel"><EchoGraph /></Reveal>
+          <Reveal className="panel watchlist-panel" delay={60}><WatchlistPanel /></Reveal>
           <Reveal className="panel convergence-panel" delay={90}><ConvergencePanel /></Reveal>
           <Reveal className="panel feed-panel" delay={120}><FeedPanel /></Reveal>
         </div>

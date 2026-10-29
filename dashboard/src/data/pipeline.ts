@@ -107,6 +107,26 @@ const candidateDays = parseJsonl<Candidate>(candidateFiles).filter((file) => fil
 export const candidates: Candidate[] = (candidateDays.at(-1)?.rows ?? []).sort((a, b) => b.convergence.score - a.convergence.score);
 export const candidatesDate = candidateDays.at(-1)?.date ?? null;
 
+/** Every post the watchlist produced, by id, so a graph node can show what was actually said. */
+export const postById = new Map(posts.map((post) => [post.id, post]));
+
+export type Narrative = Candidate & { date: string };
+
+/**
+ * Every convergence candidate from every agent cycle, newest first. The agent re-evaluates a growing story each
+ * cycle, so identical narratives (same sources, same flags) are listed once, at their latest date.
+ */
+const seenNarratives = new Set<string>();
+export const narratives: Narrative[] = [...candidateDays]
+  .reverse()
+  .flatMap((day) => [...day.rows].sort((a, b) => b.convergence.score - a.convergence.score).map((row) => ({ ...row, date: day.date })))
+  .filter((row) => {
+    const key = `${row.token}|${row.sources.map((source) => `${source.handle}:${source.sentiment}:${source.is_echo}`).sort().join(",")}`;
+    if (seenNarratives.has(key)) return false;
+    seenNarratives.add(key);
+    return true;
+  });
+
 /** Reasoning cards drafted by the debate stage (only tokens that passed convergence get one). */
 export const draftCards: ReasoningCard[] = parseJsonl<ReasoningCard>(draftFiles)
   .flatMap((file) => file.rows)
