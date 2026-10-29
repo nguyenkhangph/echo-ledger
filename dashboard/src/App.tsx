@@ -166,7 +166,11 @@ function HowItWorks() {
 function WatchlistPanel() {
   const ledger = useLedger();
   const snapshot = ledger.status === "live" ? ledger.snapshot : ledger.status === "error" ? ledger.snapshot : undefined;
-  const trustFor = (row: WatchlistRow) => snapshot?.kols.find((kol) => kol.label === row.handle)?.score ?? row.trust * 10_000;
+  // A source counts as scored only after a trust update (trades > 0); before that it sits at its seed trust.
+  const trustFor = (row: WatchlistRow) => {
+    const onChain = snapshot?.kols.find((kol) => kol.label === row.handle);
+    return onChain && onChain.trades > 0 ? onChain.score : row.trust * 10_000;
+  };
 
   return (
     <section aria-labelledby="watchlist-title">

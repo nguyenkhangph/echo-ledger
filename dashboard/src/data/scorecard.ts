@@ -136,7 +136,7 @@ export function buildLedgerScorecard(snapshot: LedgerSnapshot): ScorecardData {
     .map((kol) => {
       const history = snapshot.trustUpdates.filter((update) => update.kolId === kol.kolId).sort((a, b) => a.block - b.block);
       const previous = history.length > 1 ? history[history.length - 2]!.score : INITIAL_TRUST;
-      const current = kol.score || INITIAL_TRUST;
+      const current = kol.trades > 0 ? kol.score : INITIAL_TRUST;
       const trendDelta = current - previous;
       const independent = settled.filter((position) => position.sources.some((source) => source.kolId === kol.kolId && !source.echo));
       return {

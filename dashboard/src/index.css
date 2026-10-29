@@ -585,6 +585,7 @@ code { color: var(--ec-text); font: 12px var(--mono-font); overflow-wrap: anywhe
 .ledger-row__pnl strong { color: var(--ec-mint); font-size: 1.35rem; }
 .ledger-row__pnl span.mono-font { color: var(--ec-muted); font-size: 10px; }
 .ledger-status { padding: 4px 8px; border: 1px dashed rgba(255, 255, 255, 0.25); color: var(--ec-text); font: 600 10px var(--mono-font); letter-spacing: 0.12em; text-transform: uppercase; }
+.ledger-status--recorded { color: var(--ec-muted); border-style: solid; border-color: var(--ec-border); }
 .ledger-row__sources { grid-area: sources; display: flex; flex-wrap: wrap; gap: 6px; font-size: 11px; }
 .ledger-row__sources span { padding: 3px 8px; border: 1px solid var(--ec-border); color: var(--ec-text); }
 .ledger-row__sources span.is-echo { color: var(--amber); border-color: rgba(238, 180, 78, 0.4); }

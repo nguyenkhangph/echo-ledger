@@ -24,7 +24,20 @@ The agent read public Telegram channels, found an independent bullish BTC narrat
 | Settle | `settle` (cron) | [`0xd7c1b6…b362`](https://sepolia.etherscan.io/tx/0xd7c1b6ebafaf4a271d8af6b63fc03db1ec3d870d17b496d54ed7f1853a30b362) | `PositionSettled` at the 24 h horizon, **+234 bps** (block 12011543, 28 Oct) |
 | Trust update | `reputation` (EVM log) | [`0xa452f5…2f28`](https://sepolia.etherscan.io/tx/0xa452f537347113d5c0bd61b9716bbbdcce94df3a8779cc5c1837884750ef2f28) | `TrustUpdated`, 5000 → 5250, for the four sources behind the call: Wu Blockchain, Glassnode, The Daily Hodl and CryptoQuant (block 12011544, the next block) |
 
-Between 27 and 28 Oct the agent wrote five BTC decisions in total ([`0xcaecb7…8da8`](https://sepolia.etherscan.io/tx/0xcaecb75332aeffed6dea3619d88f26e72b8d4c779d72be8fa19868e7a58c8da8), [`0x35e13f…a1b8`](https://sepolia.etherscan.io/tx/0x35e13fe9a8db5fddd11725cbcb8e46700e7780e688640f76df625bb26052a1b8), [`0xacc7f8…788c`](https://sepolia.etherscan.io/tx/0xacc7f8d2ad91a15648260c829beeb94c089e5b888c6822d6a4f89c46e0e0788c), [`0xdd9baf…f35e`](https://sepolia.etherscan.io/tx/0xdd9baf845a2fc5702ab754b80344b2bad0f46f7d14eb00de8c3f61b6ed21f35e)). That exposed a real flaw: every new post joining the same BTC narrative changed its source set and looked like a new signal, so one story opened three positions before the `max_open` limit stopped it. The agent now allows one decision per token per horizon (see [Lessons from the live run](#lessons-from-the-live-run)). The extra positions stay on chain as recorded.
+All live decisions so far (every one is a BTC call from real Telegram sources):
+
+| Opened | Decision | Open tx | Settle tx | Result | Trust update |
+| --- | --- | --- | --- | --- | --- |
+| 27 Oct, block 12004347 | APPROVE, long 2.5 % | [`0xba6549…683b`](https://sepolia.etherscan.io/tx/0xba6549c2fb6f5ded676ed5d15df1b185c6685b150998475d9484592e71ea683b) | [`0xd7c1b6…b362`](https://sepolia.etherscan.io/tx/0xd7c1b6ebafaf4a271d8af6b63fc03db1ec3d870d17b496d54ed7f1853a30b362) | **+234 bps** | [`0xa452f5…2f28`](https://sepolia.etherscan.io/tx/0xa452f537347113d5c0bd61b9716bbbdcce94df3a8779cc5c1837884750ef2f28) |
+| 27 Oct, block 12004747 | APPROVE, long 3 % | [`0xcaecb7…8da8`](https://sepolia.etherscan.io/tx/0xcaecb75332aeffed6dea3619d88f26e72b8d4c779d72be8fa19868e7a58c8da8) | [`0x244a07…6bdf`](https://sepolia.etherscan.io/tx/0x244a07b66d3551ff462cebd673abcf55b6a7931a576a6a8fe6669ca167a66bdf) | **+169 bps** | [`0xbf4d5d…e6ae`](https://sepolia.etherscan.io/tx/0xbf4d5d6f4d0c1eecbb527e0e34dc8b2621b114bf97e1678844b6324b60d0e6ae) |
+| 27 Oct, block 12005491 | APPROVE, long 3 % | [`0x35e13f…a1b8`](https://sepolia.etherscan.io/tx/0x35e13fe9a8db5fddd11725cbcb8e46700e7780e688640f76df625bb26052a1b8) | [`0x115336…db34`](https://sepolia.etherscan.io/tx/0x115336607aa8bf14f8d6f63b218e42c0417a89acad131f85fc07da93febddb34) | **+72 bps** | [`0x9e95d3…7caf`](https://sepolia.etherscan.io/tx/0x9e95d32305a8fe72165a82016c0cc86073ab8cafc0b4522c863782dad4d67caf) |
+| 27 Oct, block 12005688 | REJECT | [`0xacc7f8…788c`](https://sepolia.etherscan.io/tx/0xacc7f8d2ad91a15648260c829beeb94c089e5b888c6822d6a4f89c46e0e0788c) | | recorded, no position | |
+| 27 Oct, block 12006794 | REJECT | [`0xdd9baf…f35e`](https://sepolia.etherscan.io/tx/0xdd9baf845a2fc5702ab754b80344b2bad0f46f7d14eb00de8c3f61b6ed21f35e) | | recorded, no position | |
+| 28 Oct, block 12014014 | APPROVE, long 2.5 % | [`0x31fc06…7430`](https://sepolia.etherscan.io/tx/0x31fc0653d8ec294c7929e3e5da034b67bb408135a7e78c7b7c54355501de7430) | | open at time of writing | |
+
+After three settled wins, Glassnode, The Daily Hodl and CryptoQuant stand at 5750 trust and Wu Blockchain at 5500.
+
+The first five rows exposed a real flaw: every new post joining the same BTC narrative changed its source set and looked like a new signal, so one story opened three positions before the `max_open` limit stopped it, and the next two attempts, made while those three positions were still open, were recorded as REJECT. The agent now allows one decision per token per horizon (see [Lessons from the live run](#lessons-from-the-live-run)); the sixth decision came only after the previous BTC decision's 24 h horizon had passed. The extra positions stay on chain as recorded.
 
 ### Pipeline verification run
 

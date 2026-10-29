@@ -20,6 +20,8 @@ function TxLink({ hash, label }: { hash: string; label: string }) {
 
 function PositionRow({ position }: { position: LedgerPosition }) {
   const pnl = position.pnlBps;
+  // REJECT (and side NONE) decisions are stored for audit but never open a position.
+  const recordedOnly = position.attestation === "REJECT" || position.side === "NONE";
   return (
     <article className="ledger-row">
       <div className="ledger-row__token">
@@ -35,8 +37,16 @@ function PositionRow({ position }: { position: LedgerPosition }) {
         <span>{position.exitPrice == null ? "exit —" : `exit ${formatPrice(position.exitPrice)}`}</span>
       </div>
       <div className="ledger-row__pnl">
-        {pnl == null ? <span className="ledger-status">Open</span> : <strong className="display-font">{pnl > 0 ? "+" : ""}{pnl} bps</strong>}
-        <span className="mono-font">{position.settled ? `settled ${formatTime(position.settledAt!)}` : `opened ${formatTime(position.openedAt)}`}</span>
+        {recordedOnly ? (
+          <span className="ledger-status ledger-status--recorded">Recorded</span>
+        ) : pnl == null ? (
+          <span className="ledger-status">Open</span>
+        ) : (
+          <strong className="display-font">{pnl > 0 ? "+" : ""}{pnl} bps</strong>
+        )}
+        <span className="mono-font">
+          {position.settled ? `settled ${formatTime(position.settledAt!)}` : `${recordedOnly ? "decided" : "opened"} ${formatTime(position.openedAt)}`}
+        </span>
       </div>
       <div className="ledger-row__sources mono-font">
         {position.sources.map((source) => (
@@ -47,7 +57,7 @@ function PositionRow({ position }: { position: LedgerPosition }) {
         ))}
       </div>
       <div className="ledger-row__tx">
-        <TxLink hash={position.openTx} label="Open" />
+        <TxLink hash={position.openTx} label={recordedOnly ? "Decision" : "Open"} />
         {position.settleTx && <TxLink hash={position.settleTx} label="Settle" />}
       </div>
     </article>
