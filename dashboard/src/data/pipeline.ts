@@ -117,6 +117,8 @@ export const pipelineStats = {
   postsInWindow: windowPosts.length,
   signalsInWindow: signalPosts.length,
   echoesInWindow: signalPosts.filter((post) => post.signal.is_echo).length,
+  /** Every post the extractor flagged as repeating another source, across all fixtures. */
+  echoesTotal: [...signals.values()].filter((signal) => signal.has_signal && signal.is_echo).length,
   sponsoredInWindow: windowPosts.filter((post) => signals.get(post.id)?.is_sponsored).length,
 };
 

@@ -354,7 +354,7 @@ function Radar() {
               <HeroStat live label="Sources watched" value={String(pipelineStats.sources)} />
               <HeroStat label={`Posts read · ${WINDOW_HOURS}h`} value={String(pipelineStats.postsInWindow)} />
               <HeroStat label="Actionable calls" value={String(pipelineStats.signalsInWindow)} />
-              <HeroStat label="Echoes caught" value={String(pipelineStats.echoesInWindow)} />
+              <HeroStat label="Echoes caught · all time" value={String(pipelineStats.echoesTotal)} />
             </div>
           </div>
           <div className="fade-up hero__panel-wrap" style={{ ["--d" as string]: "200ms" }}>
