@@ -1,0 +1,6 @@
+{
+  "installCommand": "bun install",
+  "buildCommand": "bun run dashboard:build",
+  "outputDirectory": "dashboard/dist",
+  "rewrites": [{ "source": "/(.*)", "destination": "/index.html" }]
+}

@@ -7,7 +7,8 @@ import watchlist from "../../../agent/kols.json";
 const DEFAULT_FROM_BLOCK = "11974596";
 const REFRESH_MS = 60_000;
 
-export const LEDGER_ADDRESS = (import.meta.env.VITE_LEDGER_ADDRESS as string | undefined)?.trim() || undefined;
+/** The live practice deployment; override with VITE_LEDGER_ADDRESS. */
+export const LEDGER_ADDRESS = (import.meta.env.VITE_LEDGER_ADDRESS as string | undefined)?.trim() || "0x88fd1895d9b4BD28Cf641281b9AA1eF787b8DAd0";
 
 type Kol = { id: string; handle: string; platform: string };
 const kols = watchlist as Kol[];
