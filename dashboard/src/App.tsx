@@ -6,6 +6,7 @@ import { Scorecard } from "./Scorecard";
 import { DecisionFunnel } from "./components/DecisionFunnel";
 import { EchoGraph } from "./components/EchoGraph";
 import { OnChainLedger } from "./components/OnChainLedger";
+import { TrustSpark } from "./components/TrustSpark";
 import { EclipseOrb, Reveal, SectionHeading, SiteLayout } from "./components/SiteChrome";
 import { useLedger } from "./data/ledger";
 import {
@@ -164,32 +165,46 @@ function WatchlistPanel() {
     const onChain = snapshot?.kols.find((kol) => kol.label === row.handle);
     return onChain && onChain.trades > 0 ? onChain.score : row.trust * 10_000;
   };
+  /** Seed trust followed by every on-chain TrustUpdated score for this source, oldest first (basis points). */
+  const historyFor = (row: WatchlistRow) => {
+    const updates = (snapshot?.trustUpdates ?? []).filter((update) => update.label === row.handle).sort((a, b) => a.block - b.block);
+    return updates.length ? [row.trust * 10_000, ...updates.map((update) => update.score)] : [];
+  };
+  // Leaderboard: sources with an on-chain score first, best trust on top; unscored sources keep watchlist order.
+  const ranked = watchlistRows
+    .map((row, index) => ({ row, index, history: historyFor(row), trust: trustFor(row) }))
+    .sort((a, b) => Number(b.history.length > 0) - Number(a.history.length > 0) || (a.history.length && b.history.length ? b.trust - a.trust : 0) || a.index - b.index);
+  const scored = ranked.filter((item) => item.history.length > 0).length;
 
   return (
     <section aria-labelledby="watchlist-title">
       <div className="panel-heading">
         <div>
-          <p className="section-kicker">agent/kols.json</p>
+          <p className="section-kicker">{scored ? `${scored} scored on-chain · agent/kols.json` : "agent/kols.json"}</p>
           <h2 id="watchlist-title">KOL Watchlist</h2>
         </div>
         <span className="count-badge">{watchlistRows.length}</span>
       </div>
       <div className="watchlist-labels" aria-hidden="true">
-        <span>Voice</span><span>Last signal</span><span>Trust</span>
+        <span>Voice</span><span>Last signal</span><span>Trust · history</span>
       </div>
       <div className="watchlist-rows">
-        {watchlistRows.map((row) => {
-          const trust = trustFor(row) / 100;
+        {ranked.map(({ row, history, trust: trustBps }, position) => {
+          const trust = trustBps / 100;
           const manual = row.platform === "x" && row.lastPostAt === null;
+          const delta = history.length ? (history[history.length - 1]! - history[0]!) / 100 : 0;
           return (
             <article className="kol-row" key={row.id}>
-              <div className="avatar">{initialsFor(row.handle)}</div>
+              <div className="avatar">
+                {initialsFor(row.handle)}
+                {history.length > 0 && <i className="rank-chip">{position + 1}</i>}
+              </div>
               <div className="kol-identity">
                 <a href={row.url} target="_blank" rel="noreferrer"><strong>{row.handle.startsWith("@") ? row.handle : `@${row.handle}`}</strong></a>
                 <span>
                   <i className="platform-dot" /> {row.platform}
                   {" · "}
-                  {manual ? "manual feed, no posts yet" : `${row.postsInWindow} posts / ${WINDOW_HOURS}h`}
+                  {manual ? "manual feed" : `${row.postsInWindow} posts / ${WINDOW_HOURS}h`}
                 </span>
               </div>
               <div className="last-signal">
@@ -204,7 +219,13 @@ function WatchlistPanel() {
                 )}
               </div>
               <div className="trust-cell">
-                <span>{trust.toFixed(1)}%</span>
+                <div className="trust-cell__top">
+                  <TrustSpark series={history} />
+                  <span className="trust-cell__pct">{trust.toFixed(1)}%</span>
+                  <span className={`trust-delta ${delta > 0 ? "up" : delta < 0 ? "down" : "flat"}`} title={history.length ? `${history.length - 1} on-chain updates since the 50% start` : "no settled call yet"}>
+                    {history.length === 0 ? "—" : delta === 0 ? "0.0" : `${delta > 0 ? "▲" : "▼"} ${Math.abs(delta).toFixed(1)}`}
+                  </span>
+                </div>
                 <div className="trust-track" aria-label={`${trust.toFixed(1)}% trust`}>
                   <i className="bar-shimmer" style={{ width: `${trust}%` }} />
                 </div>
@@ -213,7 +234,7 @@ function WatchlistPanel() {
           );
         })}
       </div>
-      <p className="mock-note">Trust is the on-chain score once a source has a settled call; every source starts at 50%.</p>
+      <p className="mock-note">Trust is the on-chain score once a source has a settled call; every source starts at 50%. ▲▼ is the change since that start.</p>
     </section>
   );
 }

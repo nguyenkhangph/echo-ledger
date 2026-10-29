@@ -1,7 +1,7 @@
 import { useState } from "react";
 import type { ReasoningCard } from "@echo/shared/card";
 import { cardHash } from "@echo/shared/hash";
-import { SiteLayout } from "./components/SiteChrome";
+import { Reveal, SiteLayout } from "./components/SiteChrome";
 import { etherscanTx, shortHash, useLedger } from "./data/ledger";
 import { decodeEntities } from "./data/pipeline";
 
@@ -111,6 +111,55 @@ function Status({ state }: { state: RuleState }) {
   );
 }
 
+const LONG_ARGUMENT = 420;
+
+function Bubble({ side, text }: { side: "bull" | "bear"; text: string }) {
+  const [open, setOpen] = useState(false);
+  const long = text.length > LONG_ARGUMENT;
+  return (
+    <article className={`bubble bubble--${side}`}>
+      <header>
+        <span className="bubble__avatar" aria-hidden="true">{side === "bull" ? "▲" : "▼"}</span>
+        <strong>{side === "bull" ? "Bull" : "Bear"}</strong>
+        <em className="mono-font">{side === "bull" ? "argues to act" : "argues against"}</em>
+      </header>
+      <p className={long && !open ? "is-clamped" : undefined}>{text}</p>
+      {long && (
+        <button className="bubble__more mono-font" type="button" onClick={() => setOpen((value) => !value)}>
+          {open ? "Show less" : "Read the full argument"}
+        </button>
+      )}
+    </article>
+  );
+}
+
+const STAMP_RING = 2 * Math.PI * 34;
+
+function VerdictStamp({ label, tone, confidence }: { label: string; tone: string; confidence: number }) {
+  const pct = Math.min(1, Math.max(0, confidence));
+  return (
+    <div className={`verdict verdict--${tone}`}>
+      <svg className="verdict__ring" viewBox="0 0 80 80" role="img" aria-label={`${Math.round(pct * 100)}% confidence`}>
+        <circle className="verdict__ring-bg" cx={40} cy={40} r={34} />
+        <circle
+          className="verdict__ring-fill"
+          cx={40}
+          cy={40}
+          r={34}
+          transform="rotate(-90 40 40)"
+          style={{ ["--s" as string]: `${pct * STAMP_RING}px`, ["--c" as string]: `${STAMP_RING}px` }}
+        />
+        <text x={40} y={45} textAnchor="middle">{Math.round(pct * 100)}%</text>
+      </svg>
+      <div className="verdict__text">
+        <span className="mono-font">Judge verdict</span>
+        <strong className="verdict__stamp">{label}</strong>
+        <small className="mono-font">after weighing both cases · rationale is not stored separately</small>
+      </div>
+    </div>
+  );
+}
+
 /** Recomputes nothing on chain: it looks for a PositionOpened whose cardHash equals the hash computed above. */
 function OnChainMatch({ hash, fallbackTx }: { hash: string; fallbackTx?: string }) {
   const ledger = useLedger();
@@ -119,8 +168,17 @@ function OnChainMatch({ hash, fallbackTx }: { hash: string; fallbackTx?: string 
 
   if (match) {
     return (
-      <div className="chain-match">
-        <p className="chain-match__ok mono-font">✓ Hash matches PositionOpened on Sepolia · {match.attestation}</p>
+      <Reveal className="chain-match-reveal"><div className="chain-match">
+        <div className="seal">
+          <svg className="seal__icon" viewBox="0 0 48 48" aria-hidden="true">
+            <circle className="seal__circle" cx={24} cy={24} r={20} />
+            <path className="seal__check" d="m14 25 7 7 14-16" />
+          </svg>
+          <div>
+            <p className="chain-match__ok mono-font">Verified on Sepolia · {match.attestation}</p>
+            <p className="seal__sub mono-font">computed card hash = PositionOpened.cardHash</p>
+          </div>
+        </div>
         <p className="mono-font chain-match__meta">
           {match.settled ? `Settled at ${match.pnlBps! > 0 ? "+" : ""}${match.pnlBps} bps` : "Position open"} · block {match.openedBlock.toLocaleString("en-US")}
         </p>
@@ -128,7 +186,7 @@ function OnChainMatch({ hash, fallbackTx }: { hash: string; fallbackTx?: string 
           <a className="external-link" href={etherscanTx(match.openTx)} target="_blank" rel="noreferrer">Open tx {shortHash(match.openTx)} ↗</a>
           {match.settleTx && <a className="external-link" href={etherscanTx(match.settleTx)} target="_blank" rel="noreferrer">Settle tx {shortHash(match.settleTx)} ↗</a>}
         </div>
-      </div>
+      </div></Reveal>
     );
   }
   if (fallbackTx) return <a className="external-link" href={etherscanTx(fallbackTx)} target="_blank" rel="noreferrer">View transaction on Etherscan ↗</a>;
@@ -250,11 +308,13 @@ export function ReasoningCardDetail({ card, fixture = false }: { card: FixtureCa
 
         <section className="panel detail-section" aria-labelledby="debate-title">
           <div className="panel-heading"><div><p className="section-kicker">Adversarial review</p><h2 id="debate-title">Debate</h2></div><span className="confidence">{Math.round((card.debate?.confidence ?? 0) * 100)}% confidence</span></div>
-          <div className="debate-grid">
-            <article className="debate-block bull"><span>Bull</span><p>{card.debate?.bull || "Argument unavailable."}</p></article>
-            <article className="debate-block bear"><span>Bear</span><p>{card.debate?.bear || "Argument unavailable."}</p></article>
-            <article className="debate-block judge"><span>Judge · {decisionLabel}</span><p>The judge selected <strong>{verdict}</strong> after weighing the bull and bear cases at {Math.round((card.debate?.confidence ?? 0) * 100)}% confidence. The fixture does not yet provide a separate judge reasoning field.</p></article>
-          </div>
+          <Reveal className="debate-reveal">
+            <div className="debate-thread">
+              <Bubble side="bull" text={card.debate?.bull || "Argument unavailable."} />
+              <Bubble side="bear" text={card.debate?.bear || "Argument unavailable."} />
+              <VerdictStamp label={decisionLabel} tone={decisionTone} confidence={card.debate?.confidence ?? 0} />
+            </div>
+          </Reveal>
         </section>
 
         <section className="panel detail-section" aria-labelledby="risk-title">
