@@ -3,6 +3,7 @@ import type { ReasoningCard } from "@echo/shared/card";
 import { cardHash } from "@echo/shared/hash";
 import { SiteLayout } from "./components/SiteChrome";
 import { etherscanTx, shortHash, useLedger } from "./data/ledger";
+import { decodeEntities } from "./data/pipeline";
 
 const RADAR_THRESHOLD = 0.6;
 
@@ -211,7 +212,7 @@ export function ReasoningCardDetail({ card, fixture = false }: { card: FixtureCa
               return (
                 <article className={`source-row${isEcho ? " echo" : ""}`} key={source.url || `${source.kol}-${source.posted_at}`}>
                   <div className="source-heading"><strong>@{source.kol}</strong><span className="platform">{source.platform}</span><span className={`sentiment ${source.extract.sentiment}`}>{source.extract.sentiment}</span></div>
-                  <p>“{source.quote || "Quote unavailable"}”</p>
+                  <p>“{source.quote ? decodeEntities(source.quote) : "Quote unavailable"}”</p>
                   <div className="source-footer">
                     {isEcho && <span className="echo-tag">↳ Echo{source.echo_of ? ` of ${shortValue(source.echo_of, 24, 8)}` : " detected"}</span>}
                     {source.url ? <a className="external-link" href={source.url} target="_blank" rel="noreferrer">Original post ↗</a> : <span className="muted-state">Original link unavailable</span>}
