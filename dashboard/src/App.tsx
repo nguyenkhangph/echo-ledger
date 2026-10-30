@@ -3,10 +3,13 @@ import type { ReasoningCard } from "@echo/shared/card";
 import { cardHash } from "@echo/shared/hash";
 import { CardNotFound, ReasoningCardDetail } from "./ReasoningCardDetail";
 import { Scorecard } from "./Scorecard";
+import { CertificatePage } from "./Certificate";
 import { DecisionFunnel } from "./components/DecisionFunnel";
 import { EchoGraph } from "./components/EchoGraph";
 import { OnChainLedger } from "./components/OnChainLedger";
 import { TrustSpark } from "./components/TrustSpark";
+import { ProofStrip } from "./components/ProofStrip";
+import { CreFlow } from "./components/CreFlow";
 import { EclipseOrb, Reveal, SectionHeading, SiteLayout } from "./components/SiteChrome";
 import { useLedger } from "./data/ledger";
 import {
@@ -346,16 +349,19 @@ function Radar() {
         <EclipseOrb className="hero__orb" />
         <div className="hero__grid">
           <div>
-            <p className="eyebrow fade-up">Narrative convergence · Ethereum Sepolia</p>
+            <p className="eyebrow fade-up">Accountable AI · evidence on Ethereum Sepolia</p>
             <h1 className="display-font fade-up" style={{ ["--d" as string]: "80ms" }}>
               Filter the echo.
               <br />
               Record the <span className="accent-underline">signal</span>
             </h1>
             <p className="mono-font hero__lead fade-up" style={{ ["--d" as string]: "160ms" }}>
-              Echo Ledger watches crypto voices, folds repeated calls into the one they echo, debates what is left, and writes every decision's
-              hash on-chain.
+              An AI agent that decides as if it will be cross-examined. It discounts claims that are only repeated, argues both sides, and leaves an
+              evidence-grade record on-chain that anyone can replay.
             </p>
+            <div className="fade-up" style={{ ["--d" as string]: "200ms" }}>
+              <ProofStrip />
+            </div>
             <div className="hero__actions fade-up" style={{ ["--d" as string]: "240ms" }}>
               {latest && (
                 <a className="ec-button" href={`/card/${encodeURIComponent(latest.card_id)}`}>
@@ -395,6 +401,8 @@ function Radar() {
         </div>
       </section>
 
+      <CreFlow />
+
       <OnChainLedger />
 
       <HowItWorks />
@@ -406,6 +414,9 @@ function App() {
   if (typeof window !== "undefined" && /^\/scorecard\/?$/.test(window.location.pathname)) {
     return <Scorecard />;
   }
+
+  const recordRoute = typeof window === "undefined" ? null : window.location.pathname.match(/^\/record\/(0x[0-9a-fA-F]{8,64})\/?$/);
+  if (recordRoute) return <CertificatePage positionId={recordRoute[1]} />;
 
   const cardRoute = typeof window === "undefined" ? null : window.location.pathname.match(/^\/card\/([^/]+)\/?$/);
   if (cardRoute) {

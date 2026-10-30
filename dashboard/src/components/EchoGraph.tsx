@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { echoFlippedVerdict, independentScore, naiveScore, trustWeightedScore, type VoteSource } from "@echo/shared/echo";
 import { useLedger } from "../data/ledger";
 import { decodeEntities, narratives, postById, relativeTime, type Narrative } from "../data/pipeline";
@@ -71,27 +71,34 @@ function useTrust() {
   return map;
 }
 
+const votesOf = (narrative: Narrative): VoteSource[] =>
+  narrative.sources.map((s) => ({ handle: s.handle, sentiment: s.sentiment as VoteSource["sentiment"], conviction: s.conviction, is_echo: s.is_echo }));
+
 function Compare({ narrative, trust }: { narrative: Narrative; trust: Map<string, { score: number; trades: number }> }) {
-  const votes: VoteSource[] = narrative.sources.map((s) => ({ handle: s.handle, sentiment: s.sentiment as VoteSource["sentiment"], conviction: s.conviction, is_echo: s.is_echo }));
+  const votes = votesOf(narrative);
   const naive = naiveScore(votes);
   const ours = independentScore(votes);
   const flipped = echoFlippedVerdict(votes);
   const known = trust.size > 0;
   const shadow = known ? trustWeightedScore(votes, (h) => (trust.get(handleKey(h))?.score ?? 5000) / 10000) : null;
-  const verdict = (passes: boolean) => (passes ? "opens a position" : "no position");
   return (
     <div className={`eg-compare${flipped ? " is-flipped" : ""}`}>
-      <div className="eg-compare__row eg-compare__row--naive">
-        <span className="mono-font">Naive bot · counts every post</span>
-        <strong className="display-font">{naive.score.toFixed(2)}</strong>
-        <em className={naive.passes ? "is-pass" : ""}>{verdict(naive.passes)}</em>
+      <div className="eg-compare__cards">
+        <div className={`eg-compare__card eg-compare__card--naive${naive.passes ? " is-pass" : ""}`}>
+          <span className="mono-font">Naive bot · counts every post</span>
+          <strong className="display-font">{naive.score.toFixed(2)}</strong>
+          <em className="mono-font">{naive.passes ? "would trade" : "no position"}</em>
+          <small className="mono-font">{naive.agreeing} of {naive.voices} posts agree</small>
+        </div>
+        <div className="eg-compare__vs mono-font" aria-hidden="true">vs</div>
+        <div className={`eg-compare__card eg-compare__card--ours${ours.passes ? " is-pass" : ""}`}>
+          <span className="mono-font">Echo Ledger · independent only</span>
+          <strong className="display-font">{ours.score.toFixed(2)}</strong>
+          <em className="mono-font">{ours.passes ? "opens a position" : flipped ? "held back" : "no position"}</em>
+          <small className="mono-font">{ours.agreeing} of {ours.voices} independent voices agree</small>
+        </div>
       </div>
-      <div className="eg-compare__row eg-compare__row--ours">
-        <span className="mono-font">Echo Ledger · independent only</span>
-        <strong className="display-font">{ours.score.toFixed(2)}</strong>
-        <em className={ours.passes ? "is-pass" : ""}>{verdict(ours.passes)}</em>
-      </div>
-      {flipped && <p className="eg-compare__flip mono-font">Echo detection changed the outcome: a naive count would have traded this narrative.</p>}
+      {flipped && <p className="eg-compare__flip mono-font">⚠ Echo detection changed the outcome. A bot that counts reposts would have traded this narrative on a repeated claim.</p>}
       {shadow != null && (
         <p className="eg-compare__shadow mono-font">
           Shadow · weighted by on-chain trust {shadow.toFixed(2)} <span>(not used for decisions yet; it shows what the ledger's memory would change)</span>
@@ -133,12 +140,28 @@ function Detail({ node, trust }: { node: GraphNode; trust: Map<string, { score: 
 }
 
 export function EchoGraph() {
-  const defaultIndex = Math.max(0, narratives.findIndex((narrative) => narrative.convergence.echo_count > 0));
+  // Open on the narrative where echo detection changed the outcome; that is the point of the graph.
+  const flippedIndex = narratives.findIndex((narrative) => echoFlippedVerdict(votesOf(narrative)));
+  const defaultIndex = flippedIndex >= 0 ? flippedIndex : Math.max(0, narratives.findIndex((narrative) => narrative.convergence.echo_count > 0));
   const [selected, setSelected] = useState(defaultIndex);
   const [pinned, setPinned] = useState<string | null>(null);
   const [hover, setHover] = useState<string | null>(null);
   const narrative = narratives[selected];
   const trust = useTrust();
+  const tabsRef = useRef<HTMLDivElement>(null);
+  // Bring the opening narrative into view inside the tab list without scrolling the page.
+  useEffect(() => {
+    const list = tabsRef.current;
+    const tab = list?.querySelector<HTMLElement>(".eg-tab.is-active");
+    if (!list || !tab) return;
+    const frame = requestAnimationFrame(() => {
+      const l = list.getBoundingClientRect();
+      const t = tab.getBoundingClientRect();
+      list.scrollTop += t.top - l.top - (l.height - t.height) / 2;
+      list.scrollLeft += t.left - l.left - (l.width - t.width) / 2;
+    });
+    return () => cancelAnimationFrame(frame);
+  }, []);
 
   if (!narrative) {
     return <p className="ledger-empty mono-font">No convergence candidate yet. The graph appears after the first agent cycle.</p>;
@@ -171,9 +194,10 @@ export function EchoGraph() {
       </div>
 
       <div className="eg-body">
-        <div className="eg-tabs" role="tablist" aria-label="Narratives">
+        <div className="eg-tabs" role="tablist" aria-label="Narratives" ref={tabsRef}>
           {narratives.map((item, index) => {
             const flagged = item.convergence.echo_count > 0;
+            const flipped = echoFlippedVerdict(votesOf(item));
             return (
               <button
                 key={`${item.date}-${item.token}-${index}`}
@@ -189,7 +213,7 @@ export function EchoGraph() {
                   <small className="mono-font">{formatDate(item.date)} · {item.convergence.score.toFixed(2)}</small>
                 </span>
                 {item.convergence.passed && <em className="row-tag row-tag--chain">passed</em>}
-                {flagged && <em className="row-tag row-tag--echo">{item.convergence.echo_count} echo</em>}
+                {flipped ? <em className="row-tag row-tag--flip">echo flip</em> : flagged && <em className="row-tag row-tag--echo">{item.convergence.echo_count} echo</em>}
               </button>
             );
           })}

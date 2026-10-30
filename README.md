@@ -130,7 +130,12 @@ It checks, for every decision:
 - **Reputation:** every `TrustUpdated` event is replayed (+250 on a win, −250 on a loss, −250 more for an echo, clamped) and must equal the score on chain, and the final score and trade count of each source must equal what the contract stores.
 - **Timing:** a trust update follows each settlement within 30 minutes.
 
-It exits with code 1 if any check fails. The dashboard runs the same code (the **Audit** panel under the ledger), and each position can be downloaded as a hashed proof pack. CI runs typecheck, tests, the audit on the recorded run, the dashboard build and the contract tests on every push.
+It exits with code 1 if any check fails. The dashboard runs the same code in the browser:
+
+- **Independent audit** panel with a **Try to tamper** control: edit a private copy of the chain data (turn a loss into a win, inflate a trust score, hide an oversized bet, close a trade early) and watch which checks catch it.
+- **Certificate of Record** for every decision (`/record/<positionId>`): particulars, sources relied upon, chain of custody from card hash to trust update, the verification result and a SHA-256 fingerprint of the proof pack. It prints to PDF.
+- **Proof pack** download per position: the on-chain record plus the re-derived checks, hashed.
+- **Naive vs Echo Ledger** on the Echo Graph: what a bot that counts every repost would have scored, next to the independent-only score. CI runs typecheck, tests, the audit on the recorded run, the dashboard build and the contract tests on every push.
 
 ---
 

@@ -63,11 +63,64 @@ function trustPct(score: number) {
   return `${(score / 100).toFixed(1)}%`;
 }
 
-export function AuditPanel({ snapshot, audit }: { snapshot: LedgerSnapshot; audit: AuditResult }) {
+type Tamper = { id: string; label: string; story: string; apply: (copy: LedgerSnapshot) => void };
+
+/** Edits a judge can make to a private copy of the chain data, to watch the audit catch them. Nothing is written anywhere. */
+const TAMPERS: Tamper[] = [
+  {
+    id: "pnl",
+    label: "Turn a loss into a win",
+    story: "You rewrote the worst settled trade as a +400 bps win, as an operator hiding a bad call might.",
+    apply: (copy) => {
+      const p = [...copy.positions].filter((x) => x.settled).sort((a, b) => (a.pnlBps ?? 0) - (b.pnlBps ?? 0))[0];
+      if (p) p.pnlBps = 400;
+    },
+  },
+  {
+    id: "trust",
+    label: "Inflate a source's trust",
+    story: "You gave the top source an extra 5 points of trust, both in its event history and in the contract's stored score.",
+    apply: (copy) => {
+      const kol = [...copy.kols].sort((a, b) => b.score - a.score)[0];
+      if (!kol) return;
+      kol.score += 500;
+      const last = [...copy.trustUpdates].reverse().find((u) => u.kolId === kol.kolId);
+      if (last) last.score += 500;
+    },
+  },
+  {
+    id: "size",
+    label: "Hide an oversized bet",
+    story: "You changed one position to 12% of the book, more than double the 5% risk limit.",
+    apply: (copy) => {
+      const p = copy.positions.find((x) => x.side !== "NONE");
+      if (p) p.sizeBps = 1200;
+    },
+  },
+  {
+    id: "early",
+    label: "Close a trade early",
+    story: "You moved one settlement to six hours after it opened, cashing out before the 24-hour horizon.",
+    apply: (copy) => {
+      const p = copy.positions.find((x) => x.settled && Math.abs(x.pnlBps ?? 0) < 800);
+      if (p) p.settledAt = new Date(Date.parse(p.openedAt) + 6 * 3_600_000).toISOString();
+    },
+  },
+];
+
+export function AuditPanel({ snapshot, audit: liveAudit }: { snapshot: LedgerSnapshot; audit: AuditResult }) {
   const [open, setOpen] = useState(false);
+  const [tamperId, setTamperId] = useState<string | null>(null);
+  const tamper = TAMPERS.find((t) => t.id === tamperId) ?? null;
+  const audit = useMemo(() => {
+    if (!tamper) return liveAudit;
+    const copy = structuredClone(snapshot);
+    tamper.apply(copy);
+    return auditLedger(copy);
+  }, [tamper, snapshot, liveAudit]);
   const failed = audit.total - audit.passed;
   return (
-    <section className={`panel audit${audit.ok ? "" : " audit--fail"}`} aria-labelledby="audit-title">
+    <section id="audit" className={`panel audit${audit.ok ? "" : " audit--fail"}${tamper ? " audit--tampered" : ""}`} aria-labelledby="audit-title">
       <div className="panel-heading">
         <div>
           <p className="section-kicker">Don't trust us, replay it · runs in your browser</p>
@@ -83,11 +136,36 @@ export function AuditPanel({ snapshot, audit }: { snapshot: LedgerSnapshot; audi
         The page re-derives profit and loss, risk limits and every source's trust score from the public Sepolia record alone, with the same rules the contract and the CRE workflows apply. Nothing below is read from our own database.
       </p>
 
+      <div className="tamper">
+        <div className="tamper__head">
+          <span className="mono-font tamper__kicker">Try to tamper</span>
+          <span className="tamper__hint">Edit a private copy of the chain data and watch the audit react. Nothing leaves your browser.</span>
+        </div>
+        <div className="tamper__options" role="group" aria-label="Tamper scenarios">
+          {TAMPERS.map((t) => (
+            <button key={t.id} type="button" className={`tamper__btn mono-font${t.id === tamperId ? " is-active" : ""}`} aria-pressed={t.id === tamperId} onClick={() => setTamperId((cur) => (cur === t.id ? null : t.id))}>
+              {t.label}
+            </button>
+          ))}
+          {tamper && (
+            <button type="button" className="tamper__btn tamper__btn--reset mono-font" onClick={() => setTamperId(null)}>
+              ↺ Restore chain data
+            </button>
+          )}
+        </div>
+        {tamper && (
+          <p className="tamper__verdict" role="status">
+            <strong>{audit.ok ? "Not caught." : `Caught by ${audit.checks.filter((c) => c.passed !== c.total).length} ${audit.checks.filter((c) => c.passed !== c.total).length === 1 ? "check" : "checks"}.`}</strong> {tamper.story}{" "}
+            {audit.ok ? "" : "The record on Sepolia cannot be edited, so any copy that disagrees with it is exposed."}
+          </p>
+        )}
+      </div>
+
       <ul className="audit__checks">
         {audit.checks.map((check) => {
           const ok = check.passed === check.total;
           return (
-            <li key={check.id} className={ok ? "is-ok" : "is-bad"}>
+            <li key={`${check.id}-${tamperId ?? "live"}`} className={ok ? "is-ok" : "is-bad"}>
               <span className="audit__mark mono-font" aria-hidden="true">{ok ? "✓" : "✗"}</span>
               <div>
                 <strong>{check.label}</strong>

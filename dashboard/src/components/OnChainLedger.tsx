@@ -195,7 +195,10 @@ function PositionRow({ position, snapshot, audit }: { position: LedgerPosition; 
         <span className="mono-font">
           {position.settled ? `settled ${formatTime(position.settledAt!)}` : `${recordedOnly ? "decided" : "opened"} ${formatTime(position.openedAt)}`}
         </span>
-        <ProofPackButton position={position} snapshot={snapshot} audit={audit} />
+        <span className="ledger-row__docs">
+          <a className="proof-btn proof-btn--cert mono-font" href={`/record/${position.id}`}>§ certificate</a>
+          <ProofPackButton position={position} snapshot={snapshot} audit={audit} />
+        </span>
       </div>
       <ProofChain position={position} snapshot={snapshot} recordedOnly={recordedOnly} />
     </article>
