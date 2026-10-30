@@ -12,6 +12,8 @@ The point is accountability: anyone can recompute a card's hash from its content
 
 ---
 
+![How a decision becomes evidence](docs/img/architecture.png)
+
 ## Judge's 3-minute path
 
 1. **Open [echoledger.fun](https://www.echoledger.fun).** The four numbers under the headline (practice PnL, audit checks, decisions, trust updates) are read from Sepolia and re-derived in your browser.
@@ -22,6 +24,15 @@ The point is accountability: anyone can recompute a card's hash from its content
 6. **§ printable case file** ([echoledger.fun/casefile](https://www.echoledger.fun/casefile)): the whole record as one document for a lawyer, with third-party evidence outside the chain.
 7. **Compliance map:** each feature matched to EU AI Act Art. 12/13, MiCA Art. 91 and FTC §255.5, with evidence links.
 8. **Check it without us:** `bun install && bun run verify` reads the contract and re-derives everything.
+
+### What you will see
+
+| | |
+|---|---|
+| ![Echo Graph: a naive bot would trade, Echo Ledger holds back](docs/img/echo-flip.png) | ![Three Chainlink CRE workflows with live report counts](docs/img/cre-workflows.png) |
+| **Echo Graph:** counting reposts gives 0.67 and a trade; discounting the echo gives 0.50 and no trade. | **Chainlink CRE:** HTTP → record, Cron → settle, EVM log → reputation, with the latest transaction of each. |
+| ![Try to tamper: the audit catches an edited result](docs/img/tamper.png) | ![Certificate of Record](docs/img/certificate.jpg) |
+| **Try to tamper:** turning a loss into a win in a private copy fails 3 checks at once. | **Certificate of Record:** grounds, sources, chain of custody, third-party corroboration and the verification seal. |
 
 > If the public Sepolia RPC is slow, the site shows the bundled copy of the ledger (block and time are printed) until the live read succeeds.
 
