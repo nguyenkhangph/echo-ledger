@@ -4,6 +4,8 @@
 
 **Filter the echo. Record the signal.**
 
+**[Live dashboard](https://www.echoledger.fun)** · **[Demo video (3:26)](https://youtu.be/UW116HZeuKU)** · **[Contract on Sepolia](https://sepolia.etherscan.io/address/0x88fd1895d9b4BD28Cf641281b9AA1eF787b8DAd0)** ([source verified on Sourcify](https://repo.sourcify.dev/11155111/0x88fd1895d9b4BD28Cf641281b9AA1eF787b8DAd0))
+
 Echo Ledger is an AI agent that watches public crypto voices (KOLs), works out which of them are saying something *independently* and which are just repeating someone else, checks the claim against market data, argues it out in a bull/bear/judge debate, and then opens a **practice** position. Every decision produces a *reasoning card*, and the card's hash, the settlement and the resulting change in each source's trust score are written to Ethereum Sepolia by **Chainlink CRE** workflows.
 
 The point is accountability: anyone can recompute a card's hash from its contents and check it against the chain, and every source's track record is public and cannot be edited after the fact.
