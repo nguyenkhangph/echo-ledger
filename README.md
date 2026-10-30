@@ -12,6 +12,20 @@ The point is accountability: anyone can recompute a card's hash from its content
 
 ---
 
+## Judge's 3-minute path
+
+1. **Open [echoledger.fun](https://www.echoledger.fun).** The four numbers under the headline (practice PnL, audit checks, decisions, trust updates) are read from Sepolia and re-derived in your browser.
+2. **Echo Graph:** it opens on BTC, 26 Oct. A bot that counts reposts scores 0.67 and trades; Echo Ledger discounts the echo, scores 0.50 and holds back.
+3. **Chainlink CRE section:** three workflows (HTTP → record, Cron → settle, EVM log → reputation), with live report counts and the latest transaction of each.
+4. **Independent audit → Try to tamper:** turn a loss into a win or inflate a trust score in a private copy of the data and watch the checks fail.
+5. **§ certificate** on any position: a printable Certificate of Record with the grounds for the decision, the sources relied on and the chain of custody.
+6. **Compliance map:** each feature matched to EU AI Act Art. 12/13, MiCA Art. 91 and FTC §255.5, with evidence links.
+7. **Check it without us:** `bun install && bun run verify` reads the contract and re-derives everything.
+
+> If the public Sepolia RPC is slow, the site shows the bundled copy of the ledger (block and time are printed) until the live read succeeds.
+
+---
+
 ## On-chain proof (Ethereum Sepolia)
 
 Contract **EchoLedger** [`0x88fd1895d9b4BD28Cf641281b9AA1eF787b8DAd0`](https://sepolia.etherscan.io/address/0x88fd1895d9b4BD28Cf641281b9AA1eF787b8DAd0), written through the CRE simulation forwarder `0x15fC6ae953E024d975e77382eEeC56A9101f9F88`.

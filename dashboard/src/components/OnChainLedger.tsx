@@ -289,7 +289,9 @@ export function OnChainLedger() {
       {ledger.status === "loading" && <p className="ledger-empty mono-font panel">Reading EchoLedger events from Ethereum Sepolia…</p>}
       {ledger.status === "error" && (
         <p className="ledger-empty ledger-empty--error mono-font panel">
-          Could not read Sepolia{snapshot ? " (showing the last good snapshot)" : ""}: {ledger.error}
+          {ledger.fallback && snapshot
+            ? `Live Sepolia read unavailable right now (${ledger.error}). Showing the copy read at block ${snapshot.latestBlock.toLocaleString("en-US")} on ${new Date(snapshot.fetchedAt).toUTCString().slice(5, 22)} UTC; every figure below can be checked against Etherscan.`
+            : `Could not read Sepolia${snapshot ? " (showing the last good snapshot)" : ""}: ${ledger.error}`}
         </p>
       )}
 

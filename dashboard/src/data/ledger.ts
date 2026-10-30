@@ -2,10 +2,18 @@ import { useEffect, useState } from "react";
 import { exampleCards } from "@echo/shared/fixtures";
 import { readLedgerSnapshot, type LedgerSnapshot } from "@echo/shared/ledger";
 import watchlist from "../../../agent/kols.json";
+import fallbackSnapshot from "./ledger-fallback.json";
 
 /** Block the staging EchoLedger was deployed at (matches cre/settle/config.staging.json). */
 const DEFAULT_FROM_BLOCK = "11974596";
 const REFRESH_MS = 60_000;
+/** If the live read has not finished by then, show the bundled snapshot while it keeps trying. */
+const FALLBACK_AFTER_MS = 9_000;
+/** Public Sepolia endpoints tried in order when no RPC is configured. */
+const PUBLIC_RPCS = ["https://ethereum-sepolia-rpc.publicnode.com", "https://sepolia.drpc.org"];
+
+/** A copy of the ledger read from Sepolia at a known block, shipped with the site so the record is never blank. */
+export const FALLBACK_SNAPSHOT = fallbackSnapshot as unknown as LedgerSnapshot;
 
 /** The live practice deployment; override with VITE_LEDGER_ADDRESS. */
 export const LEDGER_ADDRESS = (import.meta.env.VITE_LEDGER_ADDRESS as string | undefined)?.trim() || "0x88fd1895d9b4BD28Cf641281b9AA1eF787b8DAd0";
@@ -25,7 +33,7 @@ export type LedgerState =
   | { status: "unconfigured" }
   | { status: "loading" }
   | { status: "live"; snapshot: LedgerSnapshot }
-  | { status: "error"; error: string; snapshot?: LedgerSnapshot };
+  | { status: "error"; error: string; snapshot?: LedgerSnapshot; fallback?: boolean };
 
 let state: LedgerState = LEDGER_ADDRESS ? { status: "loading" } : { status: "unconfigured" };
 const listeners = new Set<(next: LedgerState) => void>();
@@ -36,20 +44,34 @@ function publish(next: LedgerState) {
   for (const listener of listeners) listener(next);
 }
 
+async function readLive(): Promise<LedgerSnapshot> {
+  const configured = (import.meta.env.VITE_SEPOLIA_RPC_URL as string | undefined) || undefined;
+  const rpcs = configured ? [configured] : PUBLIC_RPCS;
+  let lastError: unknown;
+  for (const rpcUrl of rpcs) {
+    try {
+      return await readLedgerSnapshot({
+        address: LEDGER_ADDRESS as `0x${string}`,
+        fromBlock: BigInt((import.meta.env.VITE_LEDGER_FROM_BLOCK as string | undefined) || DEFAULT_FROM_BLOCK),
+        rpcUrl,
+        knownKolNames: KNOWN_KOL_NAMES,
+      });
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError;
+}
+
 async function refresh() {
   if (!LEDGER_ADDRESS) return;
   try {
-    const snapshot = await readLedgerSnapshot({
-      address: LEDGER_ADDRESS as `0x${string}`,
-      fromBlock: BigInt((import.meta.env.VITE_LEDGER_FROM_BLOCK as string | undefined) || DEFAULT_FROM_BLOCK),
-      rpcUrl: (import.meta.env.VITE_SEPOLIA_RPC_URL as string | undefined) || undefined,
-      knownKolNames: KNOWN_KOL_NAMES,
-    });
-    publish({ status: "live", snapshot });
+    publish({ status: "live", snapshot: await readLive() });
   } catch (error) {
     const message = error instanceof Error ? error.message.split("\n")[0] : String(error);
-    // Keep the last good snapshot on screen if a later refresh fails.
-    publish({ status: "error", error: message, snapshot: state.status === "live" ? state.snapshot : undefined });
+    // Keep the last good live snapshot on screen; before the first one, show the bundled snapshot.
+    if (state.status === "live") publish({ status: "error", error: message, snapshot: state.snapshot });
+    else publish({ status: "error", error: message, snapshot: FALLBACK_SNAPSHOT, fallback: true });
   }
 }
 
@@ -62,6 +84,9 @@ export function useLedger(): LedgerState {
     if (!started && LEDGER_ADDRESS) {
       started = true;
       void refresh();
+      window.setTimeout(() => {
+        if (state.status === "loading") publish({ status: "error", error: "live read still in progress", snapshot: FALLBACK_SNAPSHOT, fallback: true });
+      }, FALLBACK_AFTER_MS);
       window.setInterval(() => void refresh(), REFRESH_MS);
     }
     return () => {

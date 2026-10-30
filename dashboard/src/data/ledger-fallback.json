@@ -1,0 +1,443 @@
+{
+  "address": "0x88fd1895d9b4BD28Cf641281b9AA1eF787b8DAd0",
+  "latestBlock": 12021987,
+  "fetchedAt": "2026-10-29T20:44:52.251Z",
+  "positions": [
+    {
+      "id": "0x593dc78d7d90226d63f9ec86af74ad1811b13756819b165061f0519d3384b0af",
+      "token": "BTC",
+      "side": "LONG",
+      "attestation": "APPROVE",
+      "sizeBps": 250,
+      "entryPrice": 80767.3,
+      "exitPrice": 80754,
+      "pnlBps": -1,
+      "cardHash": "0x86843cdcede9f2b819520b4480aff49d3cca2f5d179e2679adfff7e087739f61",
+      "settled": true,
+      "openedAt": "2026-10-28T18:09:00.000Z",
+      "openedBlock": 12014014,
+      "openTx": "0x31fc0653d8ec294c7929e3e5da034b67bb408135a7e78c7b7c54355501de7430",
+      "settledAt": "2026-10-29T18:09:25.000Z",
+      "settleTx": "0xf1ade48d47bbf8e6cb4e5f8210d059ac7be62332f39e5d022bdb7ddee7573306",
+      "sources": [
+        {
+          "kolId": "0x21df749dd7bd0679e4381fd4d07d4d0be7e49118c37f5a131eb6a182c2de166c",
+          "label": "glassnode",
+          "echo": false
+        },
+        {
+          "kolId": "0xeb99b3e5020fb32c4dcabf3501887ffed3d2f5d9b5b8d746748d667410dbf37a",
+          "label": "BitcoinBullets",
+          "echo": false
+        },
+        {
+          "kolId": "0x4d2c87bb724211bd032347e888b578692ea1eebb0c96d575047a782502d1f1da",
+          "label": "cryptoquant_official",
+          "echo": false
+        },
+        {
+          "kolId": "0xb53596db8c383b6e277695c5e3080f390483539d749e1211805144c7a196b755",
+          "label": "cointelegraph",
+          "echo": false
+        }
+      ]
+    },
+    {
+      "id": "0xa68a77af507ad1dedc98c2830ab9be03035eda63a426fd7ef27a06d11fffea71",
+      "token": "BTC",
+      "side": "NONE",
+      "attestation": "REJECT",
+      "sizeBps": 0,
+      "entryPrice": 80443,
+      "exitPrice": null,
+      "pnlBps": null,
+      "cardHash": "0x63cd66b1480b6c3691ad59ddd75eccd89d962a621a73424dbb1a55812d3f693b",
+      "settled": false,
+      "openedAt": "2026-10-27T18:02:36.000Z",
+      "openedBlock": 12006794,
+      "openTx": "0xdd9baf845a2fc5702ab754b80344b2bad0f46f7d14eb00de8c3f61b6ed21f35e",
+      "settledAt": null,
+      "settleTx": null,
+      "sources": [
+        {
+          "kolId": "0x21df749dd7bd0679e4381fd4d07d4d0be7e49118c37f5a131eb6a182c2de166c",
+          "label": "glassnode",
+          "echo": false
+        },
+        {
+          "kolId": "0xcdee24f839727ec4d84a4fb85ca2d2c95ce11404ad3ec3194d41bd23333b5416",
+          "label": "thedailyhodl",
+          "echo": false
+        },
+        {
+          "kolId": "0x4d2c87bb724211bd032347e888b578692ea1eebb0c96d575047a782502d1f1da",
+          "label": "cryptoquant_official",
+          "echo": false
+        }
+      ]
+    },
+    {
+      "id": "0x7d91e729f96f3532d801fcc9425c078c24a76ef9ae1ae3f28223d605d22810ae",
+      "token": "BTC",
+      "side": "NONE",
+      "attestation": "REJECT",
+      "sizeBps": 0,
+      "entryPrice": 79961,
+      "exitPrice": null,
+      "pnlBps": null,
+      "cardHash": "0xa7d95fb35f984c99b9326075b2f901656bfe436640b6fa4d5baad29e834d644e",
+      "settled": false,
+      "openedAt": "2026-10-27T14:21:00.000Z",
+      "openedBlock": 12005688,
+      "openTx": "0xacc7f8d2ad91a15648260c829beeb94c089e5b888c6822d6a4f89c46e0e0788c",
+      "settledAt": null,
+      "settleTx": null,
+      "sources": [
+        {
+          "kolId": "0x21df749dd7bd0679e4381fd4d07d4d0be7e49118c37f5a131eb6a182c2de166c",
+          "label": "glassnode",
+          "echo": false
+        },
+        {
+          "kolId": "0xcdee24f839727ec4d84a4fb85ca2d2c95ce11404ad3ec3194d41bd23333b5416",
+          "label": "thedailyhodl",
+          "echo": false
+        },
+        {
+          "kolId": "0x4d2c87bb724211bd032347e888b578692ea1eebb0c96d575047a782502d1f1da",
+          "label": "cryptoquant_official",
+          "echo": false
+        }
+      ]
+    },
+    {
+      "id": "0x1e31b928779576e50f4cf5edfffd0286792f48a01ef052744b22904fa017edfe",
+      "token": "BTC",
+      "side": "LONG",
+      "attestation": "APPROVE",
+      "sizeBps": 300,
+      "entryPrice": 80127.05,
+      "exitPrice": 80708,
+      "pnlBps": 72,
+      "cardHash": "0x36769c623575c9bb45fdadda3c6f43d027a0be80b7d95a4f7032dae65a2a9b8b",
+      "settled": true,
+      "openedAt": "2026-10-27T13:41:36.000Z",
+      "openedBlock": 12005491,
+      "openTx": "0x35e13fe9a8db5fddd11725cbcb8e46700e7780e688640f76df625bb26052a1b8",
+      "settledAt": "2026-10-28T13:42:28.000Z",
+      "settleTx": "0x115336607aa8bf14f8d6f63b218e42c0417a89acad131f85fc07da93febddb34",
+      "sources": [
+        {
+          "kolId": "0x21df749dd7bd0679e4381fd4d07d4d0be7e49118c37f5a131eb6a182c2de166c",
+          "label": "glassnode",
+          "echo": false
+        },
+        {
+          "kolId": "0xcdee24f839727ec4d84a4fb85ca2d2c95ce11404ad3ec3194d41bd23333b5416",
+          "label": "thedailyhodl",
+          "echo": false
+        },
+        {
+          "kolId": "0x4d2c87bb724211bd032347e888b578692ea1eebb0c96d575047a782502d1f1da",
+          "label": "cryptoquant_official",
+          "echo": false
+        }
+      ]
+    },
+    {
+      "id": "0x583eb25317d9dc5ce3a1af6d2ee64a5d074df22e6fb281b1d4ff7094c27d5141",
+      "token": "BTC",
+      "side": "LONG",
+      "attestation": "APPROVE",
+      "sizeBps": 300,
+      "entryPrice": 79935,
+      "exitPrice": 81288,
+      "pnlBps": 169,
+      "cardHash": "0xa2d9be373c311a5dc9dbdefa9a611b55b7df3cf089bb57b2437227b208cf56db",
+      "settled": true,
+      "openedAt": "2026-10-27T11:12:48.000Z",
+      "openedBlock": 12004747,
+      "openTx": "0xcaecb75332aeffed6dea3619d88f26e72b8d4c779d72be8fa19868e7a58c8da8",
+      "settledAt": "2026-10-28T11:14:29.000Z",
+      "settleTx": "0x244a07b66d3551ff462cebd673abcf55b6a7931a576a6a8fe6669ca167a66bdf",
+      "sources": [
+        {
+          "kolId": "0xfea8ba2f88e624d91171d5a552b71c8907c51a20b53bdec2e4d15d0fa7f462d9",
+          "label": "wublockchainenglish",
+          "echo": false
+        },
+        {
+          "kolId": "0x21df749dd7bd0679e4381fd4d07d4d0be7e49118c37f5a131eb6a182c2de166c",
+          "label": "glassnode",
+          "echo": false
+        },
+        {
+          "kolId": "0xcdee24f839727ec4d84a4fb85ca2d2c95ce11404ad3ec3194d41bd23333b5416",
+          "label": "thedailyhodl",
+          "echo": false
+        },
+        {
+          "kolId": "0x4d2c87bb724211bd032347e888b578692ea1eebb0c96d575047a782502d1f1da",
+          "label": "cryptoquant_official",
+          "echo": false
+        }
+      ]
+    },
+    {
+      "id": "0xf2ed7cba0709ec0e9438cbf546fd9a2947c232ae5c3e80589fb04c39616c33f4",
+      "token": "BTC",
+      "side": "LONG",
+      "attestation": "APPROVE",
+      "sizeBps": 250,
+      "entryPrice": 79561,
+      "exitPrice": 81428,
+      "pnlBps": 234,
+      "cardHash": "0x4d9e1141e51e41d667299222ec1dfcf75adfbc733de5ee48cd8d7e13cd99b04d",
+      "settled": true,
+      "openedAt": "2026-10-27T09:52:36.000Z",
+      "openedBlock": 12004347,
+      "openTx": "0xba6549c2fb6f5ded676ed5d15df1b185c6685b150998475d9484592e71ea683b",
+      "settledAt": "2026-10-28T09:53:22.000Z",
+      "settleTx": "0xd7c1b6ebafaf4a271d8af6b63fc03db1ec3d870d17b496d54ed7f1853a30b362",
+      "sources": [
+        {
+          "kolId": "0xfea8ba2f88e624d91171d5a552b71c8907c51a20b53bdec2e4d15d0fa7f462d9",
+          "label": "wublockchainenglish",
+          "echo": false
+        },
+        {
+          "kolId": "0x21df749dd7bd0679e4381fd4d07d4d0be7e49118c37f5a131eb6a182c2de166c",
+          "label": "glassnode",
+          "echo": false
+        },
+        {
+          "kolId": "0xcdee24f839727ec4d84a4fb85ca2d2c95ce11404ad3ec3194d41bd23333b5416",
+          "label": "thedailyhodl",
+          "echo": false
+        },
+        {
+          "kolId": "0x4d2c87bb724211bd032347e888b578692ea1eebb0c96d575047a782502d1f1da",
+          "label": "cryptoquant_official",
+          "echo": false
+        }
+      ]
+    },
+    {
+      "id": "0x4ec153f00a2d837f68389ef693c02351f6532ac391164759e30721054bba6d04",
+      "token": "SOL",
+      "side": "LONG",
+      "attestation": "APPROVE",
+      "sizeBps": 400,
+      "entryPrice": 100.845,
+      "exitPrice": 100.02,
+      "pnlBps": -81,
+      "cardHash": "0x93df14fc85a67c205a9419eb2c27d5f7e3cb918b7a9cde256c00efc128742bfd",
+      "settled": true,
+      "openedAt": "2026-10-26T04:34:36.000Z",
+      "openedBlock": 11995627,
+      "openTx": "0x0e729f4a7b02a3f4688bb37f92775992af29dce3423c1611f883951a2219a62d",
+      "settledAt": "2026-10-27T04:34:53.000Z",
+      "settleTx": "0x38efa182cb2775e6b8e8d51173884d6496adac2f96b81538505f28581c3eca09",
+      "sources": [
+        {
+          "kolId": "0x3e8fa6fc34b1a9ca4f87e2e552cd8e065f1d67d0f62e8b2228d4d32d8fe84200",
+          "label": "alice-crypto",
+          "echo": false
+        },
+        {
+          "kolId": "0x5f04f122cf0b125603d248bd032a45b73a479c99f8cc7e06c7c1a72d02943210",
+          "label": "block-research",
+          "echo": false
+        }
+      ]
+    }
+  ],
+  "trustUpdates": [
+    {
+      "kolId": "0x21df749dd7bd0679e4381fd4d07d4d0be7e49118c37f5a131eb6a182c2de166c",
+      "label": "glassnode",
+      "score": 5500,
+      "block": 12021214,
+      "tx": "0x4501ffa0a922c48c37edad00a22be4770db484cc37a3be58c7c1a2b3aea36bc3",
+      "at": "2026-10-29T18:09:48.000Z"
+    },
+    {
+      "kolId": "0xeb99b3e5020fb32c4dcabf3501887ffed3d2f5d9b5b8d746748d667410dbf37a",
+      "label": "BitcoinBullets",
+      "score": 4750,
+      "block": 12021214,
+      "tx": "0x4501ffa0a922c48c37edad00a22be4770db484cc37a3be58c7c1a2b3aea36bc3",
+      "at": "2026-10-29T18:09:48.000Z"
+    },
+    {
+      "kolId": "0x4d2c87bb724211bd032347e888b578692ea1eebb0c96d575047a782502d1f1da",
+      "label": "cryptoquant_official",
+      "score": 5500,
+      "block": 12021214,
+      "tx": "0x4501ffa0a922c48c37edad00a22be4770db484cc37a3be58c7c1a2b3aea36bc3",
+      "at": "2026-10-29T18:09:48.000Z"
+    },
+    {
+      "kolId": "0xb53596db8c383b6e277695c5e3080f390483539d749e1211805144c7a196b755",
+      "label": "cointelegraph",
+      "score": 4750,
+      "block": 12021214,
+      "tx": "0x4501ffa0a922c48c37edad00a22be4770db484cc37a3be58c7c1a2b3aea36bc3",
+      "at": "2026-10-29T18:09:48.000Z"
+    },
+    {
+      "kolId": "0x21df749dd7bd0679e4381fd4d07d4d0be7e49118c37f5a131eb6a182c2de166c",
+      "label": "glassnode",
+      "score": 5750,
+      "block": 12012686,
+      "tx": "0x9e95d32305a8fe72165a82016c0cc86073ab8cafc0b4522c863782dad4d67caf",
+      "at": "2026-10-28T13:43:00.000Z"
+    },
+    {
+      "kolId": "0xcdee24f839727ec4d84a4fb85ca2d2c95ce11404ad3ec3194d41bd23333b5416",
+      "label": "thedailyhodl",
+      "score": 5750,
+      "block": 12012686,
+      "tx": "0x9e95d32305a8fe72165a82016c0cc86073ab8cafc0b4522c863782dad4d67caf",
+      "at": "2026-10-28T13:43:00.000Z"
+    },
+    {
+      "kolId": "0x4d2c87bb724211bd032347e888b578692ea1eebb0c96d575047a782502d1f1da",
+      "label": "cryptoquant_official",
+      "score": 5750,
+      "block": 12012686,
+      "tx": "0x9e95d32305a8fe72165a82016c0cc86073ab8cafc0b4522c863782dad4d67caf",
+      "at": "2026-10-28T13:43:00.000Z"
+    },
+    {
+      "kolId": "0xfea8ba2f88e624d91171d5a552b71c8907c51a20b53bdec2e4d15d0fa7f462d9",
+      "label": "wublockchainenglish",
+      "score": 5500,
+      "block": 12011951,
+      "tx": "0xbf4d5d6f4d0c1eecbb527e0e34dc8b2621b114bf97e1678844b6324b60d0e6ae",
+      "at": "2026-10-28T11:15:24.000Z"
+    },
+    {
+      "kolId": "0x21df749dd7bd0679e4381fd4d07d4d0be7e49118c37f5a131eb6a182c2de166c",
+      "label": "glassnode",
+      "score": 5500,
+      "block": 12011951,
+      "tx": "0xbf4d5d6f4d0c1eecbb527e0e34dc8b2621b114bf97e1678844b6324b60d0e6ae",
+      "at": "2026-10-28T11:15:24.000Z"
+    },
+    {
+      "kolId": "0xcdee24f839727ec4d84a4fb85ca2d2c95ce11404ad3ec3194d41bd23333b5416",
+      "label": "thedailyhodl",
+      "score": 5500,
+      "block": 12011951,
+      "tx": "0xbf4d5d6f4d0c1eecbb527e0e34dc8b2621b114bf97e1678844b6324b60d0e6ae",
+      "at": "2026-10-28T11:15:24.000Z"
+    },
+    {
+      "kolId": "0x4d2c87bb724211bd032347e888b578692ea1eebb0c96d575047a782502d1f1da",
+      "label": "cryptoquant_official",
+      "score": 5500,
+      "block": 12011951,
+      "tx": "0xbf4d5d6f4d0c1eecbb527e0e34dc8b2621b114bf97e1678844b6324b60d0e6ae",
+      "at": "2026-10-28T11:15:24.000Z"
+    },
+    {
+      "kolId": "0xfea8ba2f88e624d91171d5a552b71c8907c51a20b53bdec2e4d15d0fa7f462d9",
+      "label": "wublockchainenglish",
+      "score": 5250,
+      "block": 12011544,
+      "tx": "0xa452f537347113d5c0bd61b9716bbbdcce94df3a8779cc5c1837884750ef2f28",
+      "at": "2026-10-28T09:53:36.000Z"
+    },
+    {
+      "kolId": "0x21df749dd7bd0679e4381fd4d07d4d0be7e49118c37f5a131eb6a182c2de166c",
+      "label": "glassnode",
+      "score": 5250,
+      "block": 12011544,
+      "tx": "0xa452f537347113d5c0bd61b9716bbbdcce94df3a8779cc5c1837884750ef2f28",
+      "at": "2026-10-28T09:53:36.000Z"
+    },
+    {
+      "kolId": "0xcdee24f839727ec4d84a4fb85ca2d2c95ce11404ad3ec3194d41bd23333b5416",
+      "label": "thedailyhodl",
+      "score": 5250,
+      "block": 12011544,
+      "tx": "0xa452f537347113d5c0bd61b9716bbbdcce94df3a8779cc5c1837884750ef2f28",
+      "at": "2026-10-28T09:53:36.000Z"
+    },
+    {
+      "kolId": "0x4d2c87bb724211bd032347e888b578692ea1eebb0c96d575047a782502d1f1da",
+      "label": "cryptoquant_official",
+      "score": 5250,
+      "block": 12011544,
+      "tx": "0xa452f537347113d5c0bd61b9716bbbdcce94df3a8779cc5c1837884750ef2f28",
+      "at": "2026-10-28T09:53:36.000Z"
+    },
+    {
+      "kolId": "0x3e8fa6fc34b1a9ca4f87e2e552cd8e065f1d67d0f62e8b2228d4d32d8fe84200",
+      "label": "alice-crypto",
+      "score": 4750,
+      "block": 12002765,
+      "tx": "0x7b7459824750fa355af5c05fe4cdc50559bb0f5b14e1acf202006f627018ec7b",
+      "at": "2026-10-27T04:35:24.000Z"
+    },
+    {
+      "kolId": "0x5f04f122cf0b125603d248bd032a45b73a479c99f8cc7e06c7c1a72d02943210",
+      "label": "block-research",
+      "score": 4750,
+      "block": 12002765,
+      "tx": "0x7b7459824750fa355af5c05fe4cdc50559bb0f5b14e1acf202006f627018ec7b",
+      "at": "2026-10-27T04:35:24.000Z"
+    }
+  ],
+  "kols": [
+    {
+      "kolId": "0x3e8fa6fc34b1a9ca4f87e2e552cd8e065f1d67d0f62e8b2228d4d32d8fe84200",
+      "label": "alice-crypto",
+      "score": 4750,
+      "trades": 1
+    },
+    {
+      "kolId": "0x5f04f122cf0b125603d248bd032a45b73a479c99f8cc7e06c7c1a72d02943210",
+      "label": "block-research",
+      "score": 4750,
+      "trades": 1
+    },
+    {
+      "kolId": "0xfea8ba2f88e624d91171d5a552b71c8907c51a20b53bdec2e4d15d0fa7f462d9",
+      "label": "wublockchainenglish",
+      "score": 5500,
+      "trades": 2
+    },
+    {
+      "kolId": "0x21df749dd7bd0679e4381fd4d07d4d0be7e49118c37f5a131eb6a182c2de166c",
+      "label": "glassnode",
+      "score": 5500,
+      "trades": 4
+    },
+    {
+      "kolId": "0xcdee24f839727ec4d84a4fb85ca2d2c95ce11404ad3ec3194d41bd23333b5416",
+      "label": "thedailyhodl",
+      "score": 5750,
+      "trades": 3
+    },
+    {
+      "kolId": "0x4d2c87bb724211bd032347e888b578692ea1eebb0c96d575047a782502d1f1da",
+      "label": "cryptoquant_official",
+      "score": 5500,
+      "trades": 4
+    },
+    {
+      "kolId": "0xeb99b3e5020fb32c4dcabf3501887ffed3d2f5d9b5b8d746748d667410dbf37a",
+      "label": "BitcoinBullets",
+      "score": 4750,
+      "trades": 1
+    },
+    {
+      "kolId": "0xb53596db8c383b6e277695c5e3080f390483539d749e1211805144c7a196b755",
+      "label": "cointelegraph",
+      "score": 4750,
+      "trades": 1
+    }
+  ]
+}
