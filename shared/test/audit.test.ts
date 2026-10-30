@@ -63,9 +63,12 @@ describe("auditLedger catches tampering", () => {
 
 describe("grounds", () => {
   test("skipped for snapshots without reason codes, checked when present", () => {
-    expect(auditLedger(live).checks.find((c) => c.id === "grounds")).toBeUndefined();
+    const without = clone();
+    for (const p of without.positions) delete p.reasonCode;
+    expect(auditLedger(without).checks.find((c) => c.id === "grounds")).toBeUndefined();
+    // The live run: both rejections were the open-position limit (1004), every approval code 0.
     const withReasons = clone();
-    for (const p of withReasons.positions) p.reasonCode = p.attestation === "REJECT" ? 1005 : p.attestation === "CONSTRAIN" ? 1006 : 0;
+    expect(withReasons.positions.filter((p) => p.attestation === "REJECT").map((p) => p.reasonCode)).toEqual([1004, 1004]);
     const ok = auditLedger(withReasons);
     expect(ok.ok).toBe(true);
     expect(ok.checks.find((c) => c.id === "grounds")!.total).toBe(7);
