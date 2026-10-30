@@ -61,6 +61,19 @@ describe("auditLedger catches tampering", () => {
   });
 });
 
+describe("grounds", () => {
+  test("skipped for snapshots without reason codes, checked when present", () => {
+    expect(auditLedger(live).checks.find((c) => c.id === "grounds")).toBeUndefined();
+    const withReasons = clone();
+    for (const p of withReasons.positions) p.reasonCode = p.attestation === "REJECT" ? 1005 : p.attestation === "CONSTRAIN" ? 1006 : 0;
+    const ok = auditLedger(withReasons);
+    expect(ok.ok).toBe(true);
+    expect(ok.checks.find((c) => c.id === "grounds")!.total).toBe(7);
+    withReasons.positions.find((p) => p.attestation === "REJECT")!.reasonCode = 0;
+    expect(auditLedger(withReasons).checks.find((c) => c.id === "grounds")!.failures).toHaveLength(1);
+  });
+});
+
 describe("rules", () => {
   test("trust moves 250 per outcome, echoes cost another 250, and clamps", () => {
     expect(nextTrust(undefined, 120, false)).toEqual({ score: 5250, trades: 1 });

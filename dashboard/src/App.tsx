@@ -10,6 +10,7 @@ import { OnChainLedger } from "./components/OnChainLedger";
 import { TrustSpark } from "./components/TrustSpark";
 import { ProofStrip } from "./components/ProofStrip";
 import { CreFlow } from "./components/CreFlow";
+import { BuildOnRecord, ComplianceMap } from "./components/ComplianceMap";
 import { EclipseOrb, Reveal, SectionHeading, SiteLayout } from "./components/SiteChrome";
 import { useLedger } from "./data/ledger";
 import {
@@ -404,6 +405,10 @@ function Radar() {
       <CreFlow />
 
       <OnChainLedger />
+
+      <ComplianceMap />
+
+      <BuildOnRecord />
 
       <HowItWorks />
     </SiteLayout>

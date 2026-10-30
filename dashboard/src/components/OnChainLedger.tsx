@@ -7,6 +7,7 @@ import { etherscanAddress, etherscanTx, LEDGER_ADDRESS, shortHash, useLedger } f
 import { Reveal, SectionHeading } from "./SiteChrome";
 import { AuditPanel, ProofPackButton, useAudit } from "./AuditPanel";
 import type { AuditResult } from "@echo/shared/audit";
+import { reasonFor } from "@echo/shared/reasons";
 
 function formatPrice(value: number) {
   return value.toLocaleString("en-US", { maximumFractionDigits: value < 1 ? 6 : 2 });
@@ -200,6 +201,11 @@ function PositionRow({ position, snapshot, audit }: { position: LedgerPosition; 
           <ProofPackButton position={position} snapshot={snapshot} audit={audit} />
         </span>
       </div>
+      {reasonFor(position) && (
+        <p className="ledger-row__reason mono-font">
+          <span>Grounds</span> {reasonFor(position)!.text} <code>{position.reasonCode}</code>
+        </p>
+      )}
       <ProofChain position={position} snapshot={snapshot} recordedOnly={recordedOnly} />
     </article>
   );

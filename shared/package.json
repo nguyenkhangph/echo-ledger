@@ -11,7 +11,8 @@
     "./card.schema.json": "./card.schema.json",
     "./ledger": "./src/ledger.ts",
     "./audit": "./src/audit.ts",
-    "./echo": "./src/echo.ts"
+    "./echo": "./src/echo.ts",
+    "./reasons": "./src/reasons.ts"
   },
   "scripts": {
     "generate:schema": "bun run scripts/generate-schema.ts",

@@ -3,6 +3,7 @@ import { exampleCards } from "@echo/shared/fixtures";
 import { cardHash } from "@echo/shared/hash";
 import { auditForPosition, auditLedger, HORIZON_MS, type AuditResult } from "@echo/shared/audit";
 import type { LedgerPosition, LedgerSnapshot } from "@echo/shared/ledger";
+import { reasonFor } from "@echo/shared/reasons";
 import { buildProofPack, ProofPackButton } from "./components/AuditPanel";
 import { SiteLayout } from "./components/SiteChrome";
 import { draftCards } from "./data/pipeline";
@@ -92,6 +93,7 @@ function CertificateBody({ position, snapshot, audit }: { position: LedgerPositi
             <dl className="cert__dl">
               <dt>Subject</dt><dd>{position.token}</dd>
               <dt>Decision</dt><dd>{position.attestation}{recordedOnly ? "" : ` · ${position.side.toLowerCase()} · ${(position.sizeBps / 100).toFixed(1)}%`}</dd>
+              {reasonFor(position) && (<><dt>Grounds</dt><dd className="cert__grounds">{reasonFor(position)!.text} <span className="cert__mono">(code {position.reasonCode})</span></dd></>)}
               <dt>Entry price</dt><dd>{price(position.entryPrice)} USD</dd>
               <dt>Exit price</dt><dd>{position.exitPrice == null ? "—" : `${price(position.exitPrice)} USD`}</dd>
               <dt>Outcome</dt><dd className={pnl == null ? "" : pnl > 0 ? "is-win" : pnl < 0 ? "is-loss" : ""}>{outcome}</dd>

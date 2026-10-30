@@ -32,6 +32,8 @@ export type LedgerPosition = {
   openTx: Hex;
   settledAt: string | null;
   settleTx: Hex | null;
+  /** Reason code the record workflow's risk gate stored with the decision (see ./reasons). Absent in snapshots taken before it was read. */
+  reasonCode?: number;
   sources: LedgerSource[];
 };
 
@@ -120,6 +122,7 @@ export async function readLedgerSnapshot(options: LedgerReadOptions): Promise<Le
         openTx: log.transactionHash,
         settledAt: stored.settled ? new Date(Number(stored.settledAt) * 1000).toISOString() : null,
         settleTx: settleLog?.transactionHash ?? null,
+        reasonCode: Number(stored.reasonCode),
         sources: kolIds.map((kolId, index) => ({ kolId, label: label(kolId), echo: echoFlags[index] ?? false })),
       };
     }),

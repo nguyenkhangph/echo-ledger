@@ -1,5 +1,6 @@
 import type { Hex } from "viem";
 import type { LedgerPosition, LedgerSnapshot } from "./ledger";
+import { REASONS } from "./reasons";
 
 /**
  * Re-derives what the EchoLedger contract and the CRE workflows did from the public record alone.
@@ -117,6 +118,12 @@ export function auditLedger(snapshot: LedgerSnapshot): AuditResult {
     record(rejects, p.side === "NONE" && p.sizeBps === 0 && !p.settled, short(p.id), `${p.token}: side ${p.side}, size ${p.sizeBps}, settled ${p.settled}`);
   }
 
+  const grounds = makeCheck("grounds", "Every decision states its grounds", "The reason code stored with each decision is a known risk-gate reason and matches the attestation.");
+  for (const p of positions.filter((p) => p.reasonCode !== undefined)) {
+    const reason = REASONS[p.reasonCode!];
+    record(grounds, Boolean(reason) && reason!.attestation === p.attestation, short(p.id), `${p.token}: ${p.attestation} recorded with reason code ${p.reasonCode}`);
+  }
+
   // Trust replay: apply the reputation rule to every settlement in order, then compare with what the contract holds.
   const state = new Map<string, TrustState>();
   const replay: ReplayStep[] = [];
@@ -180,7 +187,7 @@ export function auditLedger(snapshot: LedgerSnapshot): AuditResult {
     record(timing, answered, short(p.id), `${p.token}: no trust update within 30 min of settlement`);
   }
 
-  const checks = [pnl, horizon, size, rejects, events, finals, timing].filter((check) => check.total > 0);
+  const checks = [pnl, horizon, size, rejects, grounds, events, finals, timing].filter((check) => check.total > 0);
   const passed = checks.reduce((sum, check) => sum + check.passed, 0);
   const total = checks.reduce((sum, check) => sum + check.total, 0);
   return { ok: passed === total, passed, total, checks, replay };

@@ -135,6 +135,9 @@ It exits with code 1 if any check fails. The dashboard runs the same code in the
 - **Independent audit** panel with a **Try to tamper** control: edit a private copy of the chain data (turn a loss into a win, inflate a trust score, hide an oversized bet, close a trade early) and watch which checks catch it.
 - **Certificate of Record** for every decision (`/record/<positionId>`): particulars, sources relied upon, chain of custody from card hash to trust update, the verification result and a SHA-256 fingerprint of the proof pack. It prints to PDF.
 - **Proof pack** download per position: the on-chain record plus the re-derived checks, hashed.
+- **Grounds for every decision:** the reason code the CRE risk gate stored (e.g. `1002` price sources disagreed by more than 1%, `1005` the judge decided not to trade) is shown on the ledger and the certificate, and the audit checks that it matches the attestation.
+- **Compliance map:** each feature matched to the rule it answers (EU AI Act Art. 12 and 13, MiCA Art. 91(2)(c) and 91(3)(c), FTC 16 CFR §255.5) with a link to the evidence. Illustrative, not legal advice.
+- **Composable reputation:** a Solidity and viem snippet for reading `kolTrust` from any contract or agent.
 - **Naive vs Echo Ledger** on the Echo Graph: what a bot that counts every repost would have scored, next to the independent-only score. CI runs typecheck, tests, the audit on the recorded run, the dashboard build and the contract tests on every push.
 
 ---
@@ -211,6 +214,12 @@ bun run submit --date 2026-10-27   # dry run unless CRE_RECORD_URL is set
 **CRE workflows:** follow [`cre/LIVE_RUN.md`](cre/LIVE_RUN.md). Any command with `--broadcast` sends real Sepolia transactions.
 
 ---
+
+## Next
+
+- **Second-model consensus inside CRE:** run the judge step on two independent models through CRE Confidential HTTP and record a decision only when both agree.
+- **Trust-weighted convergence:** promote the shadow score (independent voices weighted by on-chain trust) from display to the decision rule once enough settlements exist.
+- **Agent circuit breaker:** let the contract refuse new OPEN reports after a drawdown limit, so the guardrail sits on-chain rather than in the agent.
 
 ## Known limitations
 
