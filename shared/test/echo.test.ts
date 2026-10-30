@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { echoFlippedVerdict, independentScore, naiveScore, trustWeightedScore, type VoteSource } from "../src/echo";
+import { echoFlippedVerdict, independentScore, naiveScore, pivotalVoices, trustWeightedScore, type VoteSource } from "../src/echo";
 
 const v = (handle: string, sentiment: VoteSource["sentiment"], is_echo = false, conviction = 0.5): VoteSource => ({ handle, sentiment, conviction, is_echo });
 
@@ -38,5 +38,13 @@ describe("echo scoring", () => {
     const weighted = trustWeightedScore(voices, (h) => (h === "dissent" ? 0.9 : 0.3));
     expect(weighted).toBeLessThan(equal);
     expect(trustWeightedScore([], () => 0.5)).toBe(0);
+  });
+
+  test("pivotal voices: who alone decides the verdict", () => {
+    // 2 bullish of 3 independent passes (0.67); dropping either bullish voice leaves 1 of 2 = 0.50, which fails.
+    const voices = [v("a", "bullish"), v("b", "bullish"), v("c", "bearish"), v("d", "bullish", true)];
+    expect(pivotalVoices(voices)).toEqual(["a", "b"]);
+    // An echo never matters, and a strong majority has no single pivotal voice.
+    expect(pivotalVoices([v("a", "bullish"), v("b", "bullish"), v("c", "bullish"), v("d", "bullish")])).toEqual([]);
   });
 });

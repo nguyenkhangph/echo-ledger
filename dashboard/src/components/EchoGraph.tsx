@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { echoFlippedVerdict, independentScore, naiveScore, trustWeightedScore, type VoteSource } from "@echo/shared/echo";
+import { echoFlippedVerdict, independentScore, naiveScore, pivotalVoices, trustWeightedScore, type VoteSource } from "@echo/shared/echo";
 import { useLedger } from "../data/ledger";
 import { decodeEntities, narratives, postById, relativeTime, type Narrative } from "../data/pipeline";
 
@@ -99,6 +99,16 @@ function Compare({ narrative, trust }: { narrative: Narrative; trust: Map<string
         </div>
       </div>
       {flipped && <p className="eg-compare__flip mono-font">⚠ Echo detection changed the outcome. A bot that counts reposts would have traded this narrative on a repeated claim.</p>}
+      <p className="eg-compare__shadow mono-font">
+        Leave-one-out ·{" "}
+        {(() => {
+          const pivots = [...new Set(pivotalVoices(votes))];
+          const verdict = ours.passes ? "pass" : "no position";
+          return pivots.length
+            ? <>removing <b>{pivots.join(" or ")}</b> alone would change "{verdict}"</>
+            : <>no single voice decides this verdict</>;
+        })()}
+      </p>
       {shadow != null && (
         <p className="eg-compare__shadow mono-font">
           Shadow · weighted by on-chain trust {shadow.toFixed(2)} <span>(not used for decisions yet; it shows what the ledger's memory would change)</span>

@@ -54,3 +54,12 @@ export function trustWeightedScore(sources: readonly VoteSource[], trustOf: (han
   if (total === 0) return 0;
   return independent.filter((s) => s.sentiment === side).reduce((sum, s) => sum + weight(s), 0) / total;
 }
+
+/**
+ * Leave-one-out test: the voices whose removal alone would flip the verdict (pass ↔ no pass). An empty list means
+ * no single voice decides the outcome, which is the robustness a reader should want.
+ */
+export function pivotalVoices(sources: readonly VoteSource[]): string[] {
+  const base = independentScore(sources).passes;
+  return sources.filter((_, i) => independentScore(sources.filter((__, j) => j !== i)).passes !== base).map((s) => s.handle);
+}

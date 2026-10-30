@@ -287,6 +287,17 @@ bun run submit --date 2026-10-27   # dry run unless CRE_RECORD_URL is set
 - **Trust-weighted convergence:** promote the shadow score (independent voices weighted by on-chain trust) from display to the decision rule once enough settlements exist.
 - **Agent circuit breaker:** let the contract refuse new OPEN reports after a drawdown limit, so the guardrail sits on-chain rather than in the agent.
 
+## Data sources and content use
+
+Echo Ledger is a research prototype, and its data use should be read that way.
+
+- **Telegram:** during the live run the agent read the public web previews of 9 Telegram channels (`t.me/s/<channel>`). Telegram's Terms of Service were updated in February 2026 to prohibit scraping or using its content for AI or machine-learning purposes without the explicit consent of the users concerned. A production deployment must not collect Telegram content this way; it should use only sources whose terms allow it, such as channels whose owners opt in through a bot, publisher RSS feeds, or licensed data.
+- **X:** posts were added by hand to `agent/manual_posts.json`, not collected automatically.
+- **What is stored and shown:** the repository keeps the posts the agent read in `fixtures/` as the audit trail of the live run. The dashboard shows excerpts with a link back to the original post; nothing is republished as a feed.
+- **Swappable ingest:** sources are adapters behind one interface ([`agent/src/ingest/`](agent/src/ingest)), so a licensed source can replace a scraped one without changing extraction, convergence, debate or the on-chain record.
+
+---
+
 ## Known limitations
 
 - X has no automated client; X sources contribute only the posts pasted into `agent/manual_posts.json`.
