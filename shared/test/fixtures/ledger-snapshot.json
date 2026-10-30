@@ -1,7 +1,7 @@
 {
   "address": "0x88fd1895d9b4BD28Cf641281b9AA1eF787b8DAd0",
-  "latestBlock": 12021987,
-  "fetchedAt": "2026-10-29T20:44:52.251Z",
+  "latestBlock": 12024124,
+  "fetchedAt": "2026-10-30T03:54:33.724Z",
   "positions": [
     {
       "id": "0x593dc78d7d90226d63f9ec86af74ad1811b13756819b165061f0519d3384b0af",
@@ -19,6 +19,7 @@
       "openTx": "0x31fc0653d8ec294c7929e3e5da034b67bb408135a7e78c7b7c54355501de7430",
       "settledAt": "2026-10-29T18:09:25.000Z",
       "settleTx": "0xf1ade48d47bbf8e6cb4e5f8210d059ac7be62332f39e5d022bdb7ddee7573306",
+      "reasonCode": 0,
       "sources": [
         {
           "kolId": "0x21df749dd7bd0679e4381fd4d07d4d0be7e49118c37f5a131eb6a182c2de166c",
@@ -58,6 +59,7 @@
       "openTx": "0xdd9baf845a2fc5702ab754b80344b2bad0f46f7d14eb00de8c3f61b6ed21f35e",
       "settledAt": null,
       "settleTx": null,
+      "reasonCode": 1004,
       "sources": [
         {
           "kolId": "0x21df749dd7bd0679e4381fd4d07d4d0be7e49118c37f5a131eb6a182c2de166c",
@@ -92,6 +94,7 @@
       "openTx": "0xacc7f8d2ad91a15648260c829beeb94c089e5b888c6822d6a4f89c46e0e0788c",
       "settledAt": null,
       "settleTx": null,
+      "reasonCode": 1004,
       "sources": [
         {
           "kolId": "0x21df749dd7bd0679e4381fd4d07d4d0be7e49118c37f5a131eb6a182c2de166c",
@@ -126,6 +129,7 @@
       "openTx": "0x35e13fe9a8db5fddd11725cbcb8e46700e7780e688640f76df625bb26052a1b8",
       "settledAt": "2026-10-28T13:42:28.000Z",
       "settleTx": "0x115336607aa8bf14f8d6f63b218e42c0417a89acad131f85fc07da93febddb34",
+      "reasonCode": 0,
       "sources": [
         {
           "kolId": "0x21df749dd7bd0679e4381fd4d07d4d0be7e49118c37f5a131eb6a182c2de166c",
@@ -160,6 +164,7 @@
       "openTx": "0xcaecb75332aeffed6dea3619d88f26e72b8d4c779d72be8fa19868e7a58c8da8",
       "settledAt": "2026-10-28T11:14:29.000Z",
       "settleTx": "0x244a07b66d3551ff462cebd673abcf55b6a7931a576a6a8fe6669ca167a66bdf",
+      "reasonCode": 0,
       "sources": [
         {
           "kolId": "0xfea8ba2f88e624d91171d5a552b71c8907c51a20b53bdec2e4d15d0fa7f462d9",
@@ -199,6 +204,7 @@
       "openTx": "0xba6549c2fb6f5ded676ed5d15df1b185c6685b150998475d9484592e71ea683b",
       "settledAt": "2026-10-28T09:53:22.000Z",
       "settleTx": "0xd7c1b6ebafaf4a271d8af6b63fc03db1ec3d870d17b496d54ed7f1853a30b362",
+      "reasonCode": 0,
       "sources": [
         {
           "kolId": "0xfea8ba2f88e624d91171d5a552b71c8907c51a20b53bdec2e4d15d0fa7f462d9",
@@ -238,6 +244,7 @@
       "openTx": "0x0e729f4a7b02a3f4688bb37f92775992af29dce3423c1611f883951a2219a62d",
       "settledAt": "2026-10-27T04:34:53.000Z",
       "settleTx": "0x38efa182cb2775e6b8e8d51173884d6496adac2f96b81538505f28581c3eca09",
+      "reasonCode": 0,
       "sources": [
         {
           "kolId": "0x3e8fa6fc34b1a9ca4f87e2e552cd8e065f1d67d0f62e8b2228d4d32d8fe84200",
