@@ -1,7 +1,5 @@
 # Echo Ledger
 
-[![CI](https://github.com/nguyenkhangph/echo-ledger/actions/workflows/ci.yml/badge.svg)](https://github.com/nguyenkhangph/echo-ledger/actions/workflows/ci.yml)
-
 **Filter the echo. Record the signal.**
 
 **[Live dashboard](https://www.echoledger.fun)** · **[Demo video (3:26)](https://youtu.be/UW116HZeuKU)** · **[Contract on Sepolia](https://sepolia.etherscan.io/address/0x88fd1895d9b4BD28Cf641281b9AA1eF787b8DAd0)** ([source verified on Sourcify](https://repo.sourcify.dev/11155111/0x88fd1895d9b4BD28Cf641281b9AA1eF787b8DAd0))
@@ -154,7 +152,7 @@ It exits with code 1 if any check fails. The dashboard runs the same code in the
 - **Grounds for every decision:** the reason code the CRE risk gate stored (e.g. `1002` price sources disagreed by more than 1%, `1005` the judge decided not to trade) is shown on the ledger and the certificate, and the audit checks that it matches the attestation.
 - **Compliance map:** each feature matched to the rule it answers (EU AI Act Art. 12 and 13, MiCA Art. 91(2)(c) and 91(3)(c), FTC 16 CFR §255.5) with a link to the evidence. Illustrative, not legal advice.
 - **Composable reputation:** a Solidity and viem snippet for reading `kolTrust` from any contract or agent.
-- **Naive vs Echo Ledger** on the Echo Graph: what a bot that counts every repost would have scored, next to the independent-only score. CI runs typecheck, tests, the audit on the recorded run, the dashboard build and the contract tests on every push.
+- **Naive vs Echo Ledger** on the Echo Graph: what a bot that counts every repost would have scored, next to the independent-only score. The CI workflow ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs typecheck, tests, the audit on the recorded run, the dashboard build and the contract tests; the same steps run locally with `bun run typecheck && bun test && bun run verify --snapshot shared/test/fixtures/ledger-snapshot.json && bun run dashboard:build` and `cd contracts && forge test`.
 
 ---
 
