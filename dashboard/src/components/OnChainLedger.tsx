@@ -5,6 +5,8 @@ import type { LedgerPosition, LedgerSnapshot } from "@echo/shared/ledger";
 import { draftCards } from "../data/pipeline";
 import { etherscanAddress, etherscanTx, LEDGER_ADDRESS, shortHash, useLedger } from "../data/ledger";
 import { Reveal, SectionHeading } from "./SiteChrome";
+import { AuditPanel, ProofPackButton, useAudit } from "./AuditPanel";
+import type { AuditResult } from "@echo/shared/audit";
 
 function formatPrice(value: number) {
   return value.toLocaleString("en-US", { maximumFractionDigits: value < 1 ? 6 : 2 });
@@ -164,7 +166,7 @@ function ProofChain({ position, snapshot, recordedOnly }: { position: LedgerPosi
   );
 }
 
-function PositionRow({ position, snapshot }: { position: LedgerPosition; snapshot: LedgerSnapshot }) {
+function PositionRow({ position, snapshot, audit }: { position: LedgerPosition; snapshot: LedgerSnapshot; audit: AuditResult }) {
   const pnl = position.pnlBps;
   // REJECT (and side NONE) decisions are stored for audit but never open a position.
   const recordedOnly = position.attestation === "REJECT" || position.side === "NONE";
@@ -193,6 +195,7 @@ function PositionRow({ position, snapshot }: { position: LedgerPosition; snapsho
         <span className="mono-font">
           {position.settled ? `settled ${formatTime(position.settledAt!)}` : `${recordedOnly ? "decided" : "opened"} ${formatTime(position.openedAt)}`}
         </span>
+        <ProofPackButton position={position} snapshot={snapshot} audit={audit} />
       </div>
       <ProofChain position={position} snapshot={snapshot} recordedOnly={recordedOnly} />
     </article>
@@ -213,6 +216,45 @@ function TrustFeed({ snapshot }: { snapshot: LedgerSnapshot }) {
         </li>
       ))}
     </ul>
+  );
+}
+
+function LedgerBody({ snapshot }: { snapshot: LedgerSnapshot }) {
+  const audit = useAudit(snapshot);
+  return (
+    <>
+      <Reveal><AuditPanel snapshot={snapshot} audit={audit} /></Reveal>
+      <div className="ledger-grid">
+        <Reveal className="panel">
+          <section aria-labelledby="ledger-positions-title">
+            <div className="panel-heading">
+              <div>
+                <p className="section-kicker">Recorded by CRE · record + settle workflows</p>
+                <h2 id="ledger-positions-title">Positions</h2>
+              </div>
+              <span className="count-badge">{snapshot.positions.length}</span>
+            </div>
+            {snapshot.positions.length === 0 ? (
+              <p className="ledger-empty mono-font">No decisions recorded yet.</p>
+            ) : (
+              snapshot.positions.map((position) => <PositionRow key={position.id} position={position} snapshot={snapshot} audit={audit} />)
+            )}
+          </section>
+        </Reveal>
+        <Reveal className="panel" delay={90}>
+          <section aria-labelledby="ledger-trust-title">
+            <div className="panel-heading">
+              <div>
+                <p className="section-kicker">Reputation workflow · EVM log trigger</p>
+                <h2 id="ledger-trust-title">Trust updates</h2>
+              </div>
+              <span className="count-badge">{snapshot.trustUpdates.length}</span>
+            </div>
+            <TrustFeed snapshot={snapshot} />
+          </section>
+        </Reveal>
+      </div>
+    </>
   );
 }
 
@@ -242,38 +284,7 @@ export function OnChainLedger() {
         </p>
       )}
 
-      {snapshot && (
-        <div className="ledger-grid">
-          <Reveal className="panel">
-            <section aria-labelledby="ledger-positions-title">
-              <div className="panel-heading">
-                <div>
-                  <p className="section-kicker">Recorded by CRE · record + settle workflows</p>
-                  <h2 id="ledger-positions-title">Positions</h2>
-                </div>
-                <span className="count-badge">{snapshot.positions.length}</span>
-              </div>
-              {snapshot.positions.length === 0 ? (
-                <p className="ledger-empty mono-font">No decisions recorded yet.</p>
-              ) : (
-                snapshot.positions.map((position) => <PositionRow key={position.id} position={position} snapshot={snapshot} />)
-              )}
-            </section>
-          </Reveal>
-          <Reveal className="panel" delay={90}>
-            <section aria-labelledby="ledger-trust-title">
-              <div className="panel-heading">
-                <div>
-                  <p className="section-kicker">Reputation workflow · EVM log trigger</p>
-                  <h2 id="ledger-trust-title">Trust updates</h2>
-                </div>
-                <span className="count-badge">{snapshot.trustUpdates.length}</span>
-              </div>
-              <TrustFeed snapshot={snapshot} />
-            </section>
-          </Reveal>
-        </div>
-      )}
+      {snapshot && <LedgerBody snapshot={snapshot} />}
     </section>
   );
 }

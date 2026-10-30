@@ -1,4 +1,6 @@
 import { useState } from "react";
+import { echoFlippedVerdict, independentScore, naiveScore, trustWeightedScore, type VoteSource } from "@echo/shared/echo";
+import { useLedger } from "../data/ledger";
 import { decodeEntities, narratives, postById, relativeTime, type Narrative } from "../data/pipeline";
 
 const THRESHOLD = 0.6;
@@ -58,11 +60,53 @@ function summaryFor(narrative: Narrative, direction: string) {
   return `${convergence.agreeing_independent_count} of ${convergence.independent_count} independent voices say ${direction} · ${echoes} · score ${convergence.score.toFixed(2)}, ${verdict}`;
 }
 
+const handleKey = (handle: string) => handle.replace(/^@/, "").toLowerCase();
+
+/** Recorded on-chain trust per source (0..1), keyed by watchlist handle. */
+function useTrust() {
+  const ledger = useLedger();
+  const snapshot = ledger.status === "live" ? ledger.snapshot : ledger.status === "error" ? ledger.snapshot : undefined;
+  const map = new Map<string, { score: number; trades: number }>();
+  for (const kol of snapshot?.kols ?? []) if (kol.label) map.set(handleKey(kol.label), { score: kol.score, trades: kol.trades });
+  return map;
+}
+
+function Compare({ narrative, trust }: { narrative: Narrative; trust: Map<string, { score: number; trades: number }> }) {
+  const votes: VoteSource[] = narrative.sources.map((s) => ({ handle: s.handle, sentiment: s.sentiment as VoteSource["sentiment"], conviction: s.conviction, is_echo: s.is_echo }));
+  const naive = naiveScore(votes);
+  const ours = independentScore(votes);
+  const flipped = echoFlippedVerdict(votes);
+  const known = trust.size > 0;
+  const shadow = known ? trustWeightedScore(votes, (h) => (trust.get(handleKey(h))?.score ?? 5000) / 10000) : null;
+  const verdict = (passes: boolean) => (passes ? "opens a position" : "no position");
+  return (
+    <div className={`eg-compare${flipped ? " is-flipped" : ""}`}>
+      <div className="eg-compare__row eg-compare__row--naive">
+        <span className="mono-font">Naive bot · counts every post</span>
+        <strong className="display-font">{naive.score.toFixed(2)}</strong>
+        <em className={naive.passes ? "is-pass" : ""}>{verdict(naive.passes)}</em>
+      </div>
+      <div className="eg-compare__row eg-compare__row--ours">
+        <span className="mono-font">Echo Ledger · independent only</span>
+        <strong className="display-font">{ours.score.toFixed(2)}</strong>
+        <em className={ours.passes ? "is-pass" : ""}>{verdict(ours.passes)}</em>
+      </div>
+      {flipped && <p className="eg-compare__flip mono-font">Echo detection changed the outcome: a naive count would have traded this narrative.</p>}
+      {shadow != null && (
+        <p className="eg-compare__shadow mono-font">
+          Shadow · weighted by on-chain trust {shadow.toFixed(2)} <span>(not used for decisions yet; it shows what the ledger's memory would change)</span>
+        </p>
+      )}
+    </div>
+  );
+}
+
 function formatDate(date: string) {
   return new Intl.DateTimeFormat("en", { month: "short", day: "numeric", timeZone: "UTC" }).format(new Date(`${date}T00:00:00Z`));
 }
 
-function Detail({ node }: { node: GraphNode }) {
+function Detail({ node, trust }: { node: GraphNode; trust: Map<string, { score: number; trades: number }> }) {
+  const record = trust.get(handleKey(node.source.handle));
   const post = postById.get(node.source.post_id);
   const handle = node.source.handle.startsWith("@") ? node.source.handle : `@${node.source.handle}`;
   const text = post ? decodeEntities(post.text) : null;
@@ -73,6 +117,7 @@ function Detail({ node }: { node: GraphNode }) {
         {post && <span className="mono-font">{post.platform} · {relativeTime(post.posted_at)}</span>}
         <span className={`sentiment ${node.source.sentiment === "bullish" ? "bull" : node.source.sentiment === "bearish" ? "bear" : "neutral"}`}>{node.source.sentiment}</span>
         <span className="token-tag">conviction {node.source.conviction.toFixed(1)}</span>
+        {record && record.trades > 0 && <span className="token-tag">on-chain trust {(record.score / 100).toFixed(1)}% · {record.trades} {record.trades === 1 ? "trade" : "trades"}</span>}
         {node.kind === "echo" ? (
           <span className="echo-tag">↳ echo of {node.source.echo_of ?? "an earlier post"} · counts 0</span>
         ) : (
@@ -93,6 +138,7 @@ export function EchoGraph() {
   const [pinned, setPinned] = useState<string | null>(null);
   const [hover, setHover] = useState<string | null>(null);
   const narrative = narratives[selected];
+  const trust = useTrust();
 
   if (!narrative) {
     return <p className="ledger-empty mono-font">No convergence candidate yet. The graph appears after the first agent cycle.</p>;
@@ -248,8 +294,10 @@ export function EchoGraph() {
             })}
           </svg>
 
+          <Compare narrative={narrative} trust={trust} />
+
           <div className="eg-detail" aria-live="polite">
-            {active ? <Detail node={active} /> : <p className="eg-summary mono-font">{summaryFor(narrative, direction)}</p>}
+            {active ? <Detail node={active} trust={trust} /> : <p className="eg-summary mono-font">{summaryFor(narrative, direction)}</p>}
             {!active && <p className="eg-hint mono-font">Hover or tap a node to read the post. Dashed amber lines point back to the voice an echo only repeated.</p>}
           </div>
         </div>
