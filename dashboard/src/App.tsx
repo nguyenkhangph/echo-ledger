@@ -4,6 +4,7 @@ import { cardHash } from "@echo/shared/hash";
 import { CardNotFound, ReasoningCardDetail } from "./ReasoningCardDetail";
 import { Scorecard } from "./Scorecard";
 import { CertificatePage } from "./Certificate";
+import { CaseFilePage } from "./CaseFile";
 import { DecisionFunnel } from "./components/DecisionFunnel";
 import { EchoGraph } from "./components/EchoGraph";
 import { OnChainLedger } from "./components/OnChainLedger";
@@ -419,6 +420,8 @@ function App() {
   if (typeof window !== "undefined" && /^\/scorecard\/?$/.test(window.location.pathname)) {
     return <Scorecard />;
   }
+
+  if (typeof window !== "undefined" && /^\/casefile\/?$/.test(window.location.pathname)) return <CaseFilePage />;
 
   const recordRoute = typeof window === "undefined" ? null : window.location.pathname.match(/^\/record\/(0x[0-9a-fA-F]{8,64})\/?$/);
   if (recordRoute) return <CertificatePage positionId={recordRoute[1]} />;

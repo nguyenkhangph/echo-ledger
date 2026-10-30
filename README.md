@@ -19,10 +19,51 @@ The point is accountability: anyone can recompute a card's hash from its content
 3. **Chainlink CRE section:** three workflows (HTTP → record, Cron → settle, EVM log → reputation), with live report counts and the latest transaction of each.
 4. **Independent audit → Try to tamper:** turn a loss into a win or inflate a trust score in a private copy of the data and watch the checks fail.
 5. **§ certificate** on any position: a printable Certificate of Record with the grounds for the decision, the sources relied on and the chain of custody.
-6. **Compliance map:** each feature matched to EU AI Act Art. 12/13, MiCA Art. 91 and FTC §255.5, with evidence links.
-7. **Check it without us:** `bun install && bun run verify` reads the contract and re-derives everything.
+6. **§ printable case file** ([echoledger.fun/casefile](https://www.echoledger.fun/casefile)): the whole record as one document for a lawyer, with third-party evidence outside the chain.
+7. **Compliance map:** each feature matched to EU AI Act Art. 12/13, MiCA Art. 91 and FTC §255.5, with evidence links.
+8. **Check it without us:** `bun install && bun run verify` reads the contract and re-derives everything.
 
 > If the public Sepolia RPC is slow, the site shows the bundled copy of the ledger (block and time are printed) until the live read succeeds.
+
+---
+
+## RYO-CHAN Autonomous Agents: how Echo Ledger meets the brief
+
+The bounty asks for an autonomous agent that **combines many sources of information** and **handles failure** instead of breaking or guessing. Both are central to Echo Ledger, and each claim below points to the code that does it.
+
+### It combines many sources
+
+- **19 public voices** on two platforms: Telegram channels read automatically every cycle, and X analysts through a manual feed ([`agent/kols.json`](agent/kols.json), [`agent/src/ingest/`](agent/src/ingest)).
+- **A structured call per post:** a language model extracts token, direction, conviction and urgency, and flags paid promotions with the reason, which are then set aside ([`agent/src/extract/`](agent/src/extract)).
+- **Independence, not volume:** posts that forward, quote or repeat another source are folded into the original and count for nothing; a narrative needs at least 2 independent voices and a 0.60 agreement score ([`agent/src/convergence/score.ts`](agent/src/convergence/score.ts)).
+- **Market evidence** (price, volume, 24 h move from CoinGecko) is attached before the bull, bear and judge argue the case ([`agent/src/convergence/evidence.ts`](agent/src/convergence/evidence.ts), [`agent/src/debate/`](agent/src/debate)).
+- **Three price sources inside Chainlink CRE:** the record workflow needs CoinGecko, Binance and Coinbase within 1% of each other; the settle workflow uses the median of at least two that agree ([`cre/record/workflow.ts`](cre/record/workflow.ts), [`cre/settle/workflow.ts`](cre/settle/workflow.ts)).
+- **Memory across decisions:** every settled call rescores each source on-chain, and the dashboard already shows what a trust-weighted score would change.
+
+### It handles failure
+
+- **A source disappears:** an unreachable or renamed Telegram channel is skipped and logged; the cycle continues with the rest ([`agent/src/ingest/telegram.ts`](agent/src/ingest/telegram.ts)).
+- **Network or API errors:** HTTP, LLM, market-data and CRE calls retry up to 3 times with exponential backoff and timeouts; permanent 4xx errors fail fast instead of looping ([`agent/src/ingest/http.ts`](agent/src/ingest/http.ts), [`agent/src/extract/llm.ts`](agent/src/extract/llm.ts), [`agent/src/submit/client.ts`](agent/src/submit/client.ts)).
+- **The model answers badly:** every LLM output is schema-validated; an invalid answer gets one corrective retry, then the stage stops rather than inventing a result ([`agent/src/extract/llm.ts`](agent/src/extract/llm.ts), [`agent/src/debate/debate.ts`](agent/src/debate/debate.ts)).
+- **A crash mid-cycle:** extraction results are cached as they arrive, so a rerun resumes instead of paying for the same calls; a corrupt cache line is skipped ([`agent/src/extract/extractor.ts`](agent/src/extract/extractor.ts)).
+- **The same story keeps growing:** a replay guard allows one decision per token per horizon ([`agent/src/submit/replay-guard.ts`](agent/src/submit/replay-guard.ts)).
+- **Price sources disagree or time out:** the record workflow rejects the decision (reason code 1002); the settle workflow treats a timed-out source as unavailable and settles on two that agree.
+- **Too much exposure:** the risk gate caps size at 5% and limits open positions. In the live run it rejected two decisions on-chain with reason code 1004; a stop closes any position at 8%.
+- **Stale or duplicate writes:** settle re-reads a position at the latest block before writing, and the contract refuses duplicate positions and duplicate trust updates.
+- **The dashboard's RPC is down:** it tries a second public RPC, then shows the bundled snapshot with its block number.
+- **Someone edits the record:** `bun run verify` and the in-browser audit re-derive everything and fail loudly; the "Try to tamper" panel demonstrates it.
+
+Several of these happened for real during the live run; the [lessons](#lessons-from-the-live-run) describe each one and how it was fixed.
+
+**What still needs a person:** X posts are added by hand to `agent/manual_posts.json`, the processes are started by an operator, and because CRE runs in local simulation the settle cron is driven by a loop script. Everything from a fetched post to the on-chain trust update runs without intervention.
+
+---
+
+## For lawyers: a record you can print and check elsewhere
+
+- **[Case File](https://www.echoledger.fun/casefile):** the whole record as one printable document: summary, index of decisions with their grounds, each source's track record, the audit result, the rules applied and a SHA-256 fingerprint of the data it was built from.
+- **Certificate of Record** (`/record/<positionId>`): one decision with its particulars, grounds, sources, chain of custody and verification seal.
+- **Evidence outside the chain:** each certificate and the case file compare every on-chain price with Binance's own public 1-minute candle for that minute (checked live in the browser, with the link to the exchange record), link the original public posts the agent relied on, and point to the verified contract source on Sourcify and the code on GitHub. None of these depend on Ethereum, Chainlink or us.
 
 ---
 

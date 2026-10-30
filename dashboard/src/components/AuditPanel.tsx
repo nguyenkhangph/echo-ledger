@@ -184,7 +184,10 @@ export function AuditPanel({ snapshot, audit: liveAudit }: { snapshot: LedgerSna
         <button type="button" className="audit__toggle mono-font" aria-expanded={open} onClick={() => setOpen((v) => !v)}>
           {open ? "Hide" : "Show"} the trust replay ({audit.replay.length} steps)
         </button>
-        <code className="audit__cmd mono-font">$ bun run verify</code>
+        <span className="audit__foot-end">
+          <a className="proof-btn proof-btn--cert mono-font" href="/casefile">§ printable case file</a>
+          <code className="audit__cmd mono-font">$ bun run verify</code>
+        </span>
       </div>
 
       {open && (

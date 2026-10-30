@@ -1149,3 +1149,38 @@ p.empty-row { margin: 0; }
 .build__tabs .build__copy { margin-left: auto; border-right: 0; border-left: 1px solid var(--ec-border-soft); }
 .build__code pre { margin: 0; padding: 18px; overflow-x: auto; color: #d8d8dc; font-size: 11.5px; line-height: 1.65; }
 @media (max-width: 1023px) { .build { grid-template-columns: 1fr; } }
+
+/* Corroboration outside the chain (certificate + case file) */
+.corr__lead { margin: 0 0 10px; color: var(--ink-soft, var(--ec-muted)); font-size: 13px; font-style: italic; }
+.corr h3 { margin: 12px 0 6px; font-size: 12px; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; }
+.corr__list, .corr__posts { list-style: none; margin: 0; padding: 0; }
+.corr__row, .corr__posts li { display: grid; grid-template-columns: 130px 210px minmax(0, 1fr) auto; gap: 4px 14px; align-items: baseline; padding: 6px 0; border-bottom: 1px dotted var(--rule, var(--ec-border-soft)); font-size: 12.5px; }
+.corr__posts li { grid-template-columns: 130px minmax(0, 1fr) auto; }
+.corr__row--plain { grid-template-columns: 130px minmax(0, 1fr); }
+.corr__what { font-weight: 600; }
+.corr__mono { font-family: var(--mono-font); font-size: 11px; overflow-wrap: anywhere; }
+.corr__ok { color: #17784f; font-weight: 600; }
+.corr__bad { color: #b3261e; font-weight: 600; }
+.corr__pending { color: var(--ink-soft, var(--ec-muted)); font-style: italic; }
+@media (max-width: 760px) { .corr__row, .corr__posts li, .corr__row--plain { grid-template-columns: 1fr; } }
+
+/* Case file */
+.casefile-page { width: min(1040px, 100%); }
+.audit__foot-end { display: inline-flex; align-items: center; gap: 12px; }
+.casefile__summary dd { font-size: 13.5px; }
+.casefile__table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+.casefile__table th { text-align: left; padding: 6px 8px 6px 0; border-bottom: 1px solid var(--ink); font-size: 10.5px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-soft); }
+.casefile__table td { padding: 6px 8px 6px 0; border-bottom: 1px dotted var(--rule); vertical-align: top; }
+.casefile__table .is-win { color: #17784f; font-weight: 600; }
+.casefile__table .is-loss { color: #9a5b00; font-weight: 600; }
+.casefile__note { margin: 8px 0 0; color: var(--ink-soft); font-size: 12px; font-style: italic; }
+.casefile__checks { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; font-size: 13px; }
+.casefile__checks li span { color: #17784f; font-weight: 700; }
+.casefile__checks li.is-bad, .casefile__checks li.is-bad span { color: var(--seal); }
+.casefile__checks i { color: var(--ink-soft); }
+.casefile__corr { margin-top: 14px; }
+.casefile__corr h3 { margin: 0 0 4px; font-size: 13px; }
+.casefile__rules { margin: 0; padding-left: 18px; display: grid; gap: 6px; font-size: 13px; line-height: 1.55; }
+@media print { .casefile__break { break-before: page; } .casefile__table tr { break-inside: avoid; } }
+@media (max-width: 760px) { .casefile__table { display: block; overflow-x: auto; white-space: nowrap; } }
+.corr__quote { font-size: 12px; color: var(--ink, var(--ec-text)); font-style: italic; } .corr__quote .corr__mono { font-style: normal; margin-right: 6px; }

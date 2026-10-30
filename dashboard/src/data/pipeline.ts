@@ -169,3 +169,24 @@ export function relativeTime(iso: string, now = Date.now()): string {
   if (hours < 48) return `${hours}h ${minutes % 60}m ago`;
   return `${Math.floor(hours / 24)}d ago`;
 }
+
+/**
+ * Public posts by one source that called `token` in the `hours` before `beforeIso`, newest first, from the agent's
+ * ingest log. These are links to the original posts, so they can be checked without trusting the ledger or us.
+ */
+export function sourcePostsFor(handle: string, token: string, beforeIso: string, hours = WINDOW_HOURS) {
+  const end = Date.parse(beforeIso);
+  const start = end - hours * 3_600_000;
+  const want = handle.replace(/^@/, "").toLowerCase();
+  return posts
+    .filter((post) => post.handle.replace(/^@/, "").toLowerCase() === want)
+    .filter((post) => {
+      const at = Date.parse(post.posted_at);
+      return at <= end && at >= start;
+    })
+    .flatMap((post) => {
+      const signal = signals.get(post.id);
+      return signal?.has_signal && signal.token?.toUpperCase() === token.toUpperCase() ? [{ ...post, signal }] : [];
+    })
+    .sort((a, b) => Date.parse(b.posted_at) - Date.parse(a.posted_at));
+}

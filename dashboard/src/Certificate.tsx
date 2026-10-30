@@ -6,6 +6,7 @@ import type { LedgerPosition, LedgerSnapshot } from "@echo/shared/ledger";
 import { reasonFor } from "@echo/shared/reasons";
 import { buildProofPack, ProofPackButton } from "./components/AuditPanel";
 import { SiteLayout } from "./components/SiteChrome";
+import { Corroboration } from "./components/Corroboration";
 import { draftCards } from "./data/pipeline";
 import { etherscanAddress, etherscanTx, LEDGER_ADDRESS, shortHash, useLedger } from "./data/ledger";
 
@@ -152,9 +153,14 @@ function CertificateBody({ position, snapshot, audit }: { position: LedgerPositi
           </ol>
         </section>
 
+        <section className="cert__section">
+          <h2><span>IV</span> Corroboration outside the chain</h2>
+          <Corroboration position={position} />
+        </section>
+
         <div className="cert__bottom">
           <section className="cert__section cert__verify">
-            <h2><span>IV</span> Independent verification</h2>
+            <h2><span>V</span> Independent verification</h2>
             <ul>
               {relevant.map((check) => (
                 <li key={check.id} className={check.failures ? "is-bad" : ""}>
