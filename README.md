@@ -1,5 +1,7 @@
 # Echo Ledger
 
+[![CI](https://github.com/nguyenkhangph/echo-ledger/actions/workflows/ci.yml/badge.svg)](https://github.com/nguyenkhangph/echo-ledger/actions/workflows/ci.yml)
+
 **Filter the echo. Record the signal.**
 
 Echo Ledger is an AI agent that watches public crypto voices (KOLs), works out which of them are saying something *independently* and which are just repeating someone else, checks the claim against market data, argues it out in a bull/bear/judge debate, and then opens a **practice** position. Every decision produces a *reasoning card*, and the card's hash, the settlement and the resulting change in each source's trust score are written to Ethereum Sepolia by **Chainlink CRE** workflows.
@@ -107,6 +109,28 @@ Two lessons from running this for real, both now covered by code and tests:
 ### Why local simulation and not a deployed DON
 
 Chainlink told us directly that deploying CRE workflows to a testnet or mainnet DON currently requires a commercial agreement with them, and that local simulation is the intended path for hackathon projects. The workflows therefore run with `cre workflow simulate … --broadcast`: the same workflow code, compiled to WASM and executed by the CRE simulator, writing real reports to Sepolia through the simulation forwarder. `record` and `reputation` run as persistent `--listen` processes; `settle` is driven by an operator loop because the simulator executes a cron trigger once per invocation. The full operating procedure is in [`cre/LIVE_RUN.md`](cre/LIVE_RUN.md).
+
+---
+
+## Verify it yourself
+
+Do not trust the dashboard, replay it. One command reads the public Sepolia ledger and re-derives the track record with the same rules the contract and the CRE workflows use:
+
+```bash
+bun install
+bun run verify                       # live read of the Sepolia ledger
+bun run verify --snapshot shared/test/fixtures/ledger-snapshot.json   # the recorded live run, offline
+```
+
+It checks, for every decision:
+
+- **Profit and loss** is recomputed from entry and exit price (signed by side, truncated toward zero like the contract).
+- **Horizon:** a position closes after 24 h, or earlier only at the 8% stop.
+- **Risk:** no opened position is larger than 5%; a REJECT never opens or settles.
+- **Reputation:** every `TrustUpdated` event is replayed (+250 on a win, −250 on a loss, −250 more for an echo, clamped) and must equal the score on chain, and the final score and trade count of each source must equal what the contract stores.
+- **Timing:** a trust update follows each settlement within 30 minutes.
+
+It exits with code 1 if any check fails. The dashboard runs the same code (the **Audit** panel under the ledger), and each position can be downloaded as a hashed proof pack. CI runs typecheck, tests, the audit on the recorded run, the dashboard build and the contract tests on every push.
 
 ---
 

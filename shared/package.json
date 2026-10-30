@@ -9,7 +9,9 @@
     "./fixtures": "./src/fixtures.ts",
     "./hash": "./src/hash.ts",
     "./card.schema.json": "./card.schema.json",
-    "./ledger": "./src/ledger.ts"
+    "./ledger": "./src/ledger.ts",
+    "./audit": "./src/audit.ts",
+    "./echo": "./src/echo.ts"
   },
   "scripts": {
     "generate:schema": "bun run scripts/generate-schema.ts",
